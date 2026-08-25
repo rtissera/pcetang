@@ -19,7 +19,17 @@
 
 `timescale 1ns / 1ps
 
-module pce2hdmi (
+module pce2hdmi #(
+	// Default matches the Console 60K Phase 1 build that measured clean (real gw_sh,
+	// BSRAM 106/118). Parameterized because Primer 25K's smaller device (56 total
+	// BSRAM blocks vs. 118) hit `ERROR (IF0008): 65536 DFF ... exceeds the resource
+	// limit(23280)` on the first attempt there with this same 256x224 size -- not yet
+	// confirmed as THIS array specifically (no per-identifier detail in that error),
+	// but it's the largest single new memory relative to the already-working Console
+	// 60K build, so it's the first thing being varied to test that.
+	parameter CAP_WIDTH  = 256,
+	parameter CAP_HEIGHT = 224
+) (
 	input clk,          // PCE core clock (CLK into pce_top.vhd)
 	input resetn,
 
@@ -65,8 +75,6 @@ wire [10:0] cx, frameWidth;
 // Capture: pce_top's own clk domain. video_hs/vs reset the active-area counters;
 // video_ce + not(hbl/vbl) gates a real pixel write.
 //
-localparam CAP_WIDTH  = 256;
-localparam CAP_HEIGHT = 224;
 localparam MEM_DEPTH  = CAP_WIDTH * CAP_HEIGHT;
 
 logic [8:0] mem [0:MEM_DEPTH-1];    // 9-bit raw RGB (3/3/3), no palette step needed

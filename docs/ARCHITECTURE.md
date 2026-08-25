@@ -207,3 +207,43 @@ reference it. Not resolved here — turning NECTang into a tracked, pushable rep
 separate, real decision (what to `.gitignore` — `impl/` alone is a large volume of
 generated synthesis artifacts — and whether/where to push it) that wasn't part of this
 session's authorization and should be confirmed explicitly, not assumed.
+
+**Phase 1 (Primer 25K): real bitstream, but NOT clean, 2026-08-26.**
+`pcetang_primer25k.vhd` reuses the Console 60K pattern plus NECTang's own real,
+proven `EXT_VRAM0=>1` external-SDRAM wiring (`sdram.sv`, required here — Primer 25K's
+whole engine does not fit on-chip, unlike Console 60K). HDMI/UART pins reused directly
+from nand2mario's own `nestang` `primer25k.cst` (his own board, his own working config)
+rather than adapted like Console 60K's cross-protocol guess.
+
+One real problem found and fixed before reaching a bitstream: the same 256x224
+framebuffer that worked fine on Console 60K (118 total BSRAM blocks) hit `ERROR
+(IF0008): 65536 DFF ... exceeds the resource limit(23280)` on Primer 25K (only 56 total
+BSRAM blocks) — the front-end never named which specific memory failed, but by
+elimination it's the largest single new memory relative to the working Console 60K
+build. Parameterized `pce2hdmi.sv`'s `CAP_WIDTH`/`CAP_HEIGHT` (default still 256x224,
+unchanged for Console 60K) and instantiated Primer 25K at 160x144 — inference cleared.
+
+Real result, `impl/pnr/pcetang_primer25k.fs`:
+
+```
+Logic     12691/23040  (56%)
+Register  8193/23280   (36%)
+CLS       10210/11520  (89%)
+BSRAM     56/56        (100%)  -- SDPB 34, DPB 6, DPX9B 7, pROMX9 9
+Setup violations: 136   Hold violations: 100
+```
+
+**This is a real bitstream, not a clean one.** BSRAM at 100% (zero margin, matching
+NECTang's own finding that Primer 25K is the tightest of the three boards even without
+TangCore's overhead) and CLS at 89% are the most likely real contributors — congested
+placement under high utilization is a plausible, unconfirmed cause, not yet root-caused
+with the level of rigor NECTang's own sibling project applied to its own timing
+failures (e.g. the vram0_cache naive-design timing violations there were tracked to a
+specific storage design choice, not left as "probably congestion"). Reducing the
+framebuffer further, revisiting the PLL's `set_clock_groups` (the `CK3000` clock-
+relationship warning seen on some Console 60K attempts didn't reappear here, but the
+underlying binding between named and default-generated PLL clocks was never fully
+confirmed correct either), or moving the framebuffer to external SDRAM are all
+plausible next steps — none attempted yet. Reporting the real number rather than
+continuing to iterate blindly, per this whole project's own "measure, don't deduce"
+discipline: the next fix needs a real hypothesis, not another guess.
