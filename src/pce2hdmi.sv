@@ -28,7 +28,20 @@ module pce2hdmi #(
 	// but it's the largest single new memory relative to the already-working Console
 	// 60K build, so it's the first thing being varied to test that.
 	parameter CAP_WIDTH  = 256,
-	parameter CAP_HEIGHT = 224
+	parameter CAP_HEIGHT = 224,
+	// HDMI mode. Defaults are 720p60 (Console 60K/Primer 25K, both real GW5A PLLA
+	// instances free for a dedicated HDMI clock pair). Nano 20K has no spare PLL for
+	// that (GW2AR-18C's real 2-PLL ceiling, see nano20k_pll.vhd's header) -- but that
+	// file already derives a real, hardware-informed 720x576p50 HDMI clock pair
+	// (clk_135/clk_27) for exactly this situation, unused until now. VIDEOID
+	// 17/18 = CEA-861 720x576p50 in hdmi.sv's own VIDEO_ID_CODE table.
+	parameter VIDEOID       = 4,
+	parameter VIDEO_REFRESH = 60.0,
+	parameter CLKFRQ        = 74250,   // kHz
+	parameter SCREEN_WIDTH  = 1280,
+	parameter SCREEN_HEIGHT = 720,
+	parameter WINDOW_WIDTH  = 960      // 4:3 window inside SCREEN_WIDTH; = SCREEN_WIDTH
+	                                    // for a mode that's already ~4:3 (no letterbox)
 ) (
 	input clk,          // PCE core clock (CLK into pce_top.vhd)
 	input resetn,
@@ -60,11 +73,6 @@ module pce2hdmi #(
 	output [2:0] tmds_d_p
 );
 
-localparam FRAMEWIDTH  = 1280;
-localparam FRAMEHEIGHT = 720;
-localparam VIDEOID     = 4;
-localparam VIDEO_REFRESH = 60.0;
-localparam CLKFRQ = 74250;
 localparam AUDIO_BIT_WIDTH = 16;
 localparam AUDIO_RATE = 48000;
 
@@ -129,8 +137,8 @@ reg [9:0] cy_r;
 assign mem_portB_addr = yy * CAP_WIDTH + xx;
 assign overlay_x = xx;
 assign overlay_y = yy;
-localparam XSTART = (1280 - 960) / 2;
-localparam XSTOP  = (1280 + 960) / 2;
+localparam XSTART = (SCREEN_WIDTH - WINDOW_WIDTH) / 2;
+localparam XSTOP  = (SCREEN_WIDTH + WINDOW_WIDTH) / 2;
 
 always @(posedge clk_pixel) begin
 	reg active_t;
@@ -144,13 +152,13 @@ always @(posedge clk_pixel) begin
 
 	if (active_t | active) begin
 		xcnt <= xcnt_next;
-		if (xcnt_next >= 960) begin xcnt <= xcnt_next - 960; xx <= xx + 1; end
+		if (xcnt_next >= WINDOW_WIDTH) begin xcnt <= xcnt_next - WINDOW_WIDTH; xx <= xx + 1; end
 	end
 
 	cy_r <= cy;
 	if (cy[0] != cy_r[0]) begin
 		ycnt <= ycnt_next;
-		if (ycnt_next >= 720) begin ycnt <= ycnt_next - 720; yy <= yy + 1; end
+		if (ycnt_next >= SCREEN_HEIGHT) begin ycnt <= ycnt_next - SCREEN_HEIGHT; yy <= yy + 1; end
 	end
 
 	if (cx == 0) begin xx <= 0; xcnt <= 0; end

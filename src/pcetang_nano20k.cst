@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Tang Nano 20K pins for pcetang. clk/reset reused from NECTang's own real, gw_sh-
+// verified nano20k_core_test.cst. HDMI/UART pins reused directly from nand2mario's own
+// nestang nano20k.cst (his own board, his own working config).
+
+IO_LOC "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
+
+IO_LOC "reset" 87;
+IO_PORT "reset" IO_TYPE=LVCMOS33 PULL_MODE=DOWN BANK_VCCIO=3.3;
+
+// HDMI TMDS -- real pins from nand2mario's nestang nano20k.cst.
+IO_LOC  "tmds_clk_p" 33;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_clk_n" 34;
+IO_PORT "tmds_clk_n" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[0]" 35;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_n[0]" 36;
+IO_PORT "tmds_d_n[0]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[1]" 37;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_n[1]" 38;
+IO_PORT "tmds_d_n[1]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[2]" 39;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_n[2]" 40;
+IO_PORT "tmds_d_n[2]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+// BL616 UART -- real pins from nand2mario's nestang nano20k.cst.
+IO_LOC  "uart_txd" 69;
+IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "uart_rxd" 70;
+IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;

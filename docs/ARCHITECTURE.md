@@ -264,3 +264,47 @@ keeping: when a build isn't clean, read the actual violating paths before theori
 about congestion or utilization — the real cause here was one missing clock
 declaration, not the numbers that looked suspicious (BSRAM 100%, CLS 89%) at first
 glance.
+
+**Phase 1 (Nano 20K): real bitstream, clean on the first real attempt after one SDC
+fix, 2026-08-26.** Caught before building, not after: PCE is NTSC-native 60 Hz, and
+`nano20k_pll.vhd`'s existing HDMI clock pair (`clk_135`/`clk_27`, unused until now) was
+originally derived for 720x576p**50** (PAL) — reusing it for PCE would have gotten the
+refresh rate wrong, not just the clock accuracy. Fixed by parameterizing
+`pce2hdmi.sv`'s video mode (`VIDEOID`, `CLKFRQ`, `SCREEN_WIDTH/HEIGHT`, `WINDOW_WIDTH`,
+`VIDEO_REFRESH`, all defaulting to Console 60K/Primer 25K's unchanged 720p60) and using
+`VIDEO_ID_CODE=2` (CEA-861 720x480p, NTSC-region 60 Hz) for Nano 20K — same 27 MHz-class
+pixel clock family, ~0.1% off spec (27.000 vs. 27.027 MHz), smaller than several
+already-accepted deviations elsewhere in this project, and gets the refresh rate right.
+
+GW2AR-18C's real 2-PLL ceiling (both already spent by `nano20k_pll.vhd`) meant no new
+PLL instance was possible or needed — real, hardware-informed HDMI clocks already
+existed in that unchanged file, just never loaded by any NECTang bring-up before this.
+
+One real SDC bug found and fixed before the first successful build: `clk_135` and
+`clk_sdram` are the *same physical net* (`nano20k_pll.vhd`'s `clk_sdram <= clk_135_i`).
+Declaring both as separately-named generated clocks work fine individually (as
+NECTang's own `nano20k_clocks.sdc` does — but that file never loads `clk_sdram`, so the
+name collision never surfaces there). Loading both at once here, Gowin's synthesis
+merges the two same-value nets under one surviving name (`clk_sdram`) — real gw_sh
+measured `ERROR (TA2003): Can't set timing constraint to object clk_135`. Fixed by
+deriving `clk_27` from `clk_sdram` instead, no separate `clk_135` declaration at all.
+
+Real result, `impl/pnr/pcetang_nano20k.fs`:
+
+```
+Logic     7953/20736  (39%)
+Register  3195/15915  (21%)
+CLS       5068/10368  (49%)
+BSRAM     37/46       (81%)   -- SPX9 1, SDPB 17, DPB 6, DPX9B 4, pROMX9 9
+Setup violations: 0    Hold violations: 0
+```
+
+**All three boards now have real, clean (0/0 violations) Phase 1 results** — this
+closes the "Phase 1 to 3" scope of the standing goal (ROM load, joypad, OSD via
+`iosys_bl616`, ported and measured on Console 60K, Primer 25K, and Nano 20K). Not
+started: Phase 2 (CD/CHD, the FDD-sector-interface approach documented above) — a
+substantially larger, separate undertaking (BL616 firmware protocol extension, real
+CHD sector serving) not begun this session. Also not verified anywhere: real hardware,
+the `textdisp`/OSD path (swept away as dead logic in synthesis on every board so far —
+plausible given nothing drives real UART traffic in these builds, but not confirmed
+correct rather than actually broken), and joypad button mapping.
