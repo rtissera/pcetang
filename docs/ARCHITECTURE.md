@@ -233,17 +233,34 @@ BSRAM     56/56        (100%)  -- SDPB 34, DPB 6, DPX9B 7, pROMX9 9
 Setup violations: 136   Hold violations: 100
 ```
 
-**This is a real bitstream, not a clean one.** BSRAM at 100% (zero margin, matching
-NECTang's own finding that Primer 25K is the tightest of the three boards even without
-TangCore's overhead) and CLS at 89% are the most likely real contributors — congested
-placement under high utilization is a plausible, unconfirmed cause, not yet root-caused
-with the level of rigor NECTang's own sibling project applied to its own timing
-failures (e.g. the vram0_cache naive-design timing violations there were tracked to a
-specific storage design choice, not left as "probably congestion"). Reducing the
-framebuffer further, revisiting the PLL's `set_clock_groups` (the `CK3000` clock-
-relationship warning seen on some Console 60K attempts didn't reappear here, but the
-underlying binding between named and default-generated PLL clocks was never fully
-confirmed correct either), or moving the framebuffer to external SDRAM are all
-plausible next steps — none attempted yet. Reporting the real number rather than
-continuing to iterate blindly, per this whole project's own "measure, don't deduce"
-discipline: the next fix needs a real hypothesis, not another guess.
+**Root-caused and fixed, not left as "probably congestion."** The BSRAM/CLS-congestion
+theory above was wrong — checked instead of assumed, by reading the actual violating
+paths in `pcetang_primer25k_tr_content.html`'s Setup/Hold Slack tables. Every single one
+of the 236 violations (136 setup + 100 hold) started at the identical net,
+`sdram_inst/RAM_A_WAIT_s0/Q`, clocked by `pll/PLLA_inst/CLKOUT1.default_gen_clk` — an
+**undeclared, auto-generated clock object**, because `pcetang_primer25k.sdc` never
+declared `clk_sdram` (the PLL's `CLKOUT1`, feeding `sdram.sv`) at all. Every path landed
+in `core/gen_vram0_ext.VRAM0/...` on `clk_pce` — a genuine `clk_sdram`-to-`clk_pce`
+clock-domain crossing that the SDC gave the tool zero information about, so it was
+analyzed as ordinary same-clock logic (worst slack -6.881 ns) instead of the
+multicycle-tolerant boundary `vram0_cache.vhd` actually implements.
+
+NECTang's own real, proven `primer25k_core_test.sdc` (checked directly) already has the
+exact fix for this boundary: `create_generated_clock -name clk_sdram` plus
+`set_multicycle_path -setup 3`/`-hold 2` in both directions between `clk_pce` and
+`clk_sdram`. Applied verbatim, not re-derived. Real result after rebuilding, identical
+resource numbers, timing now closed:
+
+```
+Logic     12691/23040  (56%)
+Register  8193/23280   (36%)
+CLS       10210/11520  (89%)
+BSRAM     56/56        (100%)  -- SDPB 34, DPB 6, DPX9B 7, pROMX9 9
+Setup violations: 0    Hold violations: 0
+```
+
+**Phase 1 is now real and clean on both Console 60K and Primer 25K.** The lesson worth
+keeping: when a build isn't clean, read the actual violating paths before theorizing
+about congestion or utilization — the real cause here was one missing clock
+declaration, not the numbers that looked suspicious (BSRAM 100%, CLS 89%) at first
+glance.
