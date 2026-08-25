@@ -1,9 +1,17 @@
 // IOSys_bl616 - BL616-based IO system
-// 
+//
 // This manages UART connection to the companion bl616 MCU, accepts ROM loading and other requests,
 // and display the text overlay when needed.
-// 
+//
 // Author: nand2mario, 2/2025
+//
+// PCETANG FIX (2026-08-26, GPL-3.0-or-later on this port's own changes): `kbd_data` was
+// declared `input` but is assigned internally (see the `'hc` case below: BL616 sends a
+// PS/2 scancode over UART, this module receives it and hands it to the core) -- it's an
+// output, same direction as the adjacent `kbd_data_valid`. Real Gowin synthesis error
+// (EX0344, "multiple drivers") the moment any top-level actually connects this port --
+// apparently unhit until now because no other TangCore core wires up PCXT's keyboard
+// interface. Fixed by correcting the port direction; no behavioral change.
 
 `define MCU_BL616
 
@@ -43,7 +51,7 @@ module iosys_bl616 #(
     input      [1:0]  fdd_request,      // [1]: write, [0]: read
 
     // Keyboard interface
-    input reg  [7:0] kbd_data,
+    output reg [7:0] kbd_data,
     output reg       kbd_data_valid,
     
     output reg [31:0] core_config,

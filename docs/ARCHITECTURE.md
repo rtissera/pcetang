@@ -151,11 +151,53 @@ Research phase complete: real source read (not just docs) for `iosys_bl616.v`,
 `nestang_top.sv`, `textdisp.v`, board-support table, `libchdr`'s BL616 integration.
 Repos forked/created (`rtissera/tangcore`, `rtissera/firmware-bl616`, `rtissera/nestang`,
 `rtissera/pcetang`, all private). Reusable infrastructure (`iosys_bl616.v`, `textdisp.v`,
-`uart_fixed.v`, `gowin_dpb_menu.v`, `hdmi2/*.sv`) copied into this repo's `src/`, not yet
-build-tested. **Nothing has been synthesized yet — no real `gw_sh` result exists for this
-repo.** Next real step: write `pcetang_top.sv` for Phase 1 (Console 60K, no CD, no SGX)
-and get a real `gw_sh` attempt, even if it fails on the first try — that failure is real
-information, per this whole project's own stated discipline.
+`uart_fixed.v`, `gowin_dpb_menu.v`, `hdmi2/*.sv`) copied into this repo's `src/`.
+
+**Phase 1 (Console 60K): real bitstream, 2026-08-26.** `pcetang_console60k.vhd` +
+`pce2hdmi.sv` (new file, first cut, see its own header) + `pcetang_console60k_hdmi_pll.vhd`
+wired together and built via `build_console60k.tcl`. Five real `gw_sh` attempts, each
+fixing one concrete, measured problem, none guessed:
+
+1. `iosys_bl616.v`'s `kbd_data` port fixed from `input` to `output` (`ERROR (EX0344)`,
+   multiple drivers) -- a genuine donor bug, apparently unhit until this repo's top-level
+   actually connected the port (no other TangCore core wires up PCXT's keyboard
+   interface). Fixed in this repo's vendored copy, documented at the fix site.
+2. ROM buffer sized 512K (`addr_width=19`) -- `ERROR (RP0001)`, 3,518,715 DFF needed.
+   Not an inference bug: 512K x8 alone is bigger than Console 60K's entire on-chip BSRAM
+   (118 blocks x 18Kbit =~ 2.1Mbit). Corrected to 32K (`addr_width=15`), the same
+   proven-safe depth class NECTang's own PRAM/RAM/VRAM0/VRAM1 already use.
+3. HDMI PLL (`pcetang_console60k_hdmi_pll.vhd`) needed three rounds to find this part's
+   real constraints, each a genuine measured number: `MDIV_SEL=297` silently replaced by
+   a default (`WARN (EX0205)`, invalid parameter); `MDIV_SEL=30/IDIV_SEL=1` (FVCO 1500
+   MHz) rejected by `WARN (PA1019)`, real VCO range 700-1400 MHz; `IDIV_SEL=4` (PFD 12.5
+   MHz) rejected by `ERROR (PA2078)`, real PFD range 19-87.5 MHz. Landed on
+   `IDIV_SEL=2`/`MDIV_SEL=30` (FVCO 750 MHz, reusing the already-parameter-confirmed 30):
+   clk_pixel 75.000 MHz / clk_5x_pixel 375.000 MHz, +1.01% vs. the 74.25/371.25 HDMI
+   spec, exact 5x ratio preserved.
+4. An SDC syntax error (`ERROR (TA2000)`) on the original multi-clock-name
+   `set_clock_groups` form -- Gowin's parser wants `get_clocks`, not a bare
+   space-separated name list, inside one `-group`.
+
+Real result, `impl/pnr/pcetang_console60k.fs`:
+
+```
+Logic     7883/59904  (14%)
+Register  3049/60780  (6%)
+CLS       5185/29952  (18%)
+BSRAM     106/118     (90%)   -- SDPB 56, DPB 38, DPX9B 3, pROMX9 9
+Setup violations: 0    Hold violations: 0
+```
+
+BSRAM at 90% (up from NECTang's own 82/118 baseline for the bare engine) is the number
+to watch going forward -- the new TangCore/HDMI/framebuffer infrastructure costs 24
+blocks on top of the engine, not nothing. **Not verified on real hardware** -- pin
+assignments for the BL616 UART link are still unconfirmed (see `pcetang_console60k.cst`),
+joypad button mapping is a first guess, and the video capture in `pce2hdmi.sv` has never
+been checked against an actual picture. A clean `gw_sh` run proves synthesis/timing
+closure, not a working picture or working controls.
+
+Next: Primer 25K and Nano 20K (Phase 3), then CD/CHD (Phase 2) -- see the goal state for
+current priority order.
 
 **Open, unresolved dependency**: NECTang itself is not a git repository yet (local
 working tree only, no `.git`) — this repo's plan to pull `pce_top.vhd` and the rest of

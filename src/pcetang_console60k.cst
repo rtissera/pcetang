@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Tang Console 60K pins for pcetang. clk/key_reset_n/leds_n and the HDMI TMDS pins are
+// real, cross-checked against ../TangNano60K's own Console 60K constraint file
+// (zxnext_console60k.cst, hardware-proven on this same board for a different core) --
+// P/N pin pairs there use Gowin's combined "one name, two IO_LOC" differential
+// shorthand; this file's RTL uses explicit separate tmds_*_p/tmds_*_n ports (matching
+// nand2mario's nes2hdmi.sv ELVDS_OBUF style, which this repo's pce2hdmi.sv follows), so
+// the pairs are split into separate IO_LOC lines here, values unchanged.
+//
+// uart_rxd/uart_txd are NOT CONFIRMED -- see docs/ARCHITECTURE.md's board-support
+// section. T13/V12/R13/U13 are the JTAG TMS/TCK/TDI/TDO pins that ../TangNano60K's own
+// notes (same physical board) say the onboard BL616 also shares for its own
+// (different, SPI-based) companion-MCU link -- TangCore's own dev docs independently
+// describe BL616<->FPGA communication over what its architecture doc calls
+// "BL616_TX"/"BL616_RX" on a debug connector that also carries TDI/TCK/TDO/TMS. Two
+// independent sources agree these 4 pins are the right neighborhood, but which 2
+// specifically carry TangCore's plain UART (not SPI) has not been confirmed against a
+// real Console 60K schematic. Picked TDI/TDO (R13/U13) as TX/RX respectively -- a
+// guess, needs real hardware or a definitive nand2mario source to confirm. Requires
+// -use_jtag_as_gpio 1 (see build script) either way.
+
+IO_LOC  "clk" V22;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF;
+
+IO_LOC  "key_reset_n" AA13;
+IO_PORT "key_reset_n" IO_TYPE=LVCMOS15 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=1.5;
+
+IO_LOC  "leds_n[0]" G11;
+IO_PORT "leds_n[0]" IO_TYPE=LVCMOS33 DRIVE=4 PULL_MODE=NONE BANK_VCCIO=3.3;
+IO_LOC  "leds_n[1]" U12;
+IO_PORT "leds_n[1]" IO_TYPE=LVCMOS33 DRIVE=4 PULL_MODE=NONE BANK_VCCIO=3.3;
+
+// HDMI TMDS -- real pins, cross-checked against ../TangNano60K's zxnext_console60k.cst
+// (tmds_clk_p "G15,G16" there = P,N in that order; same for tmds_d_p[0..2]).
+IO_LOC  "tmds_clk_p" G15;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_clk_n" G16;
+IO_PORT "tmds_clk_n" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_p[0]" J14;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_n[0]" H14;
+IO_PORT "tmds_d_n[0]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_p[1]" J15;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_n[1]" H15;
+IO_PORT "tmds_d_n[1]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_p[2]" K17;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+IO_LOC  "tmds_d_n[2]" J17;
+IO_PORT "tmds_d_n[2]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
+
+// BL616 UART -- NOT CONFIRMED, see header.
+IO_LOC  "uart_txd" R13;
+IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "uart_rxd" U13;
+IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=3.3;
