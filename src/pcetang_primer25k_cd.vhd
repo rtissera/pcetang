@@ -2,22 +2,36 @@
 
 -- pcetang Phase 2 CD attempt, Tang Primer 25K, TangCore-integrated (iosys_bl616: ROM
 -- load, joypad, OSD via pce2hdmi_sd's scandoubler), NO_CD=>0, EXT_VRAM0=>1 (required --
--- Primer 25K's whole engine does not fit on-chip). CURRENT REAL STATUS: FAILS,
--- ERROR (RP0006) LUT overflow (60649/23040 default, 49449/23040 with a
--- direct-GowinSynthesis `-ram_rw_check 0` invocation gw_sh's own `set_option` cannot
--- express) -- see docs/ARCHITECTURE.md's "Goal revised" section for the full real
--- investigation. Root cause, directly confirmed (not inferred): BSRAM exhaustion
--- cascading into LUT fallback -- every sub-piece (bare CD engine, iosys alone, video
--- alone) independently drives Primer 25K's 56-block BSRAM ceiling to 54-56/56, and
--- combined real demand exceeds it. Confirmed by measurement: shrinking the on-chip
--- cart ROM buffer (line ~206, `ROM_ABITS`) from 15 (32KB, 16 real blocks) to 11 (2KB)
--- alone drops the result to a clean `Logic 18230/23040 (80%), BSRAM 56/56 (100%)`, CD's
--- full 64KB `ADPCM_DRAM` confirmed still live (not swept) -- the capacity thesis is
--- measured, not a plan. Real fix path (not yet built): move cart ROM off-chip through
--- `sdram.sv`'s existing, already-built but never-wired port B -- two real open design
--- questions (bank-0 addressing collision with Phase 3's own future needs; whether the
--- HuC6280 CPU can tolerate `WAIT_N`'s stall duration for a real SDRAM round trip) need
--- answers before that bridge gets written, per the same document section.
+-- Primer 25K's whole engine does not fit on-chip).
+--
+-- PRIOR REAL STATUS (superseded by the change below): FAILED, ERROR (RP0006) LUT overflow
+-- (60649/23040 default, 49449/23040 with a direct-GowinSynthesis `-ram_rw_check 0`
+-- invocation gw_sh's own `set_option` cannot express). Root cause, directly confirmed (not
+-- inferred): BSRAM exhaustion cascading into LUT fallback -- every sub-piece (bare CD
+-- engine, iosys alone, video alone) independently drove Primer 25K's 56-block BSRAM
+-- ceiling to 54-56/56, and combined real demand exceeded it. Confirmed by measurement:
+-- shrinking the on-chip cart ROM buffer alone (it was a dpram, see below) dropped the
+-- result to a clean `Logic 18230/23040 (80%), BSRAM 56/56 (100%)` -- the capacity thesis
+-- was measured, not a plan. See docs/ARCHITECTURE.md's "Goal revised" section for the
+-- full investigation.
+--
+-- CURRENT CHANGE (2026-08-26, NOT YET gw_sh-VERIFIED): the on-chip cart/syscard ROM
+-- buffer (a dpram, one of the two BSRAM-heavy pieces above) is replaced by a bridge to
+-- `sdram.sv`'s port B, which was already built but never wired to anything. Port B is
+-- given a real write side (`RAM_B_WE`/`RAM_B_DI`, added to sdram.sv itself -- authorized
+-- surgery per the active goal) so the same port serves both ROM loading (write, from
+-- iosys_bl616) and gameplay fetch (read, from pce_top's ROM_RD/ROM_A/ROM_DO/ROM_RDY) --
+-- the two never overlap in time, so no arbitration is needed, just a static mux on
+-- rom_loading_r. Both directions use the same small settle-then-wait bridge FSM (see
+-- rd_state/wr_state below). Design questions this rests on, both resolved before writing
+-- it (see docs/ARCHITECTURE.md): the HuC6280 CPU's WAIT_N has no timeout, so an SDRAM
+-- round-trip stall is architecturally safe; the bank-0/Phase-3 addressing collision is
+-- handled with a provisional 1MB ROM offset (`ROM_SDRAM_BASE`), documented at its
+-- declaration as not meant to survive Phase 3's eventual bank-widening work.
+--
+-- NOT YET RUN THROUGH A REAL gw_sh BUILD. This is the first attempt at the actual fix,
+-- not a re-confirmation -- treat the resource/functional outcome as unknown until a real
+-- PnR result is recorded here.
 --
 -- HDMI/UART pins reused directly from nand2mario's own nestang primer25k.cst (this
 -- board, his own working config) rather than adapted from a different board/protocol
@@ -100,6 +114,8 @@ architecture rtl of pcetang_primer25k_cd is
          RAM_A_WAIT : out   std_logic;
          RAM_B_ADDR : in    std_logic_vector(20 downto 0);
          RAM_B_REQ  : in    std_logic;
+         RAM_B_WE   : in    std_logic;
+         RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
          RAM_B_WAIT : out   std_logic
       );
@@ -196,7 +212,6 @@ architecture rtl of pcetang_primer25k_cd is
    signal vram0_ram_a_di   : std_logic_vector(7 downto 0);
    signal vram0_ram_a_do   : std_logic_vector(7 downto 0);
    signal vram0_ram_a_wait : std_logic;
-   signal ram_b_wait_nc    : std_logic;
 
    signal overlay       : std_logic;
    signal overlay_x     : std_logic_vector(7 downto 0);
@@ -209,14 +224,56 @@ architecture rtl of pcetang_primer25k_cd is
    signal rom_loading  : std_logic_vector(7 downto 0);
    signal rom_do       : std_logic_vector(7 downto 0);
    signal rom_do_valid : std_logic;
-
-   -- 32K, same proven-safe depth as Console 60K's Phase 1 -- see that file's header for
-   -- why (real gw_sh measurement, not guessed).
-   constant ROM_ABITS : integer := 15;
-   signal rom_a       : std_logic_vector(21 downto 0);
-   signal rom_do_core : std_logic_vector(7 downto 0);
-   signal rom_wr_addr : unsigned(ROM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
+
+   -- Cart/syscard ROM now lives off-chip in SDRAM via sdram.sv's port B (was an on-chip
+   -- dpram -- that BSRAM was one of the two blocks pushing this build's combined BSRAM
+   -- demand to 56/56, cascading into the RP0006 LUT overflow; see docs/ARCHITECTURE.md's
+   -- "Goal revised" section for the measured root cause). NOT YET gw_sh-verified -- see
+   -- this file's header.
+   --
+   -- Provisional base offset into bank 0's 2MB SDRAM window: VRAM0 (port A) needs at most
+   -- 128KB (PCE VRAM0 is 64K x 16-bit), so 1MB of headroom before ROM starts is generous
+   -- margin without needing to track VRAM0's exact footprint here. ROM gets the remaining
+   -- 1MB (up to 8Mbit), enough for a real syscard (typically 128-256KB) with room to
+   -- spare, but this is a real ceiling -- SF2-class oversized HuCard mappers won't fit.
+   -- Revisit when sdram.sv's bank-0 addressing itself gets widened for Phase 3 (Arcade
+   -- Card) -- that work supersedes this layout anyway, so this constant is not meant to be
+   -- permanent.
+   constant ROM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#100000#, 21);
+   constant ROM_SDRAM_ABITS : integer := 20;  -- 1MB of address space for ROM
+
+   signal rom_a       : std_logic_vector(21 downto 0);
+   signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
+   signal rom_rdy_i   : std_logic := '1';
+   signal rom_rd_i    : std_logic;
+   signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
+
+   -- Shared SDRAM port-B request/response, muxed between the read bridge (gameplay,
+   -- pce_top's ROM_RD/ROM_A/ROM_DO/ROM_RDY) and the write bridge (loading, iosys_bl616's
+   -- rom_do/rom_do_valid). The two never run concurrently -- the core sits in reset for
+   -- the whole load -- so there is no real arbitration, just a static mux on rom_loading_r.
+   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_req  : std_logic := '0';
+   signal romb_we   : std_logic := '0';
+   signal romb_di   : std_logic_vector(7 downto 0);
+   signal romb_do   : std_logic_vector(7 downto 0);
+   signal romb_wait : std_logic;
+
+   type romb_state_t is (RB_IDLE, RB_SETTLE, RB_WAIT);
+
+   -- Read side (gameplay fetch, one pce_top ROM_RD per byte)
+   signal rd_state       : romb_state_t := RB_IDLE;
+   signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal rd_req         : std_logic := '0';
+   signal rd_addr        : std_logic_vector(20 downto 0);
+
+   -- Write side (ROM load, one rom_do_valid pulse per byte)
+   signal wr_state       : romb_state_t := RB_IDLE;
+   signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal wr_req         : std_logic := '0';
+   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_data        : std_logic_vector(7 downto 0);
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -280,11 +337,21 @@ begin
       RAM_A_DI   => vram0_ram_a_di,
       RAM_A_DO   => vram0_ram_a_do,
       RAM_A_WAIT => vram0_ram_a_wait,
-      RAM_B_ADDR => (others => '0'),
-      RAM_B_REQ  => '0',
-      RAM_B_DO   => open,
-      RAM_B_WAIT => ram_b_wait_nc
+      RAM_B_ADDR => romb_addr,
+      RAM_B_REQ  => romb_req,
+      RAM_B_WE   => romb_we,
+      RAM_B_DI   => romb_di,
+      RAM_B_DO   => romb_do,
+      RAM_B_WAIT => romb_wait
    );
+
+   -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read bridge
+   -- (gameplay fetch) owns it otherwise. The two are never both active -- pce_top's CLK is
+   -- held in reset for the entire load (see reset_n), so ROM_RD cannot fire during it.
+   romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
+   romb_req  <= wr_req  when rom_loading_r = '1' else rd_req;
+   romb_we   <= '1'     when rom_loading_r = '1' else '0';
+   romb_di   <= wr_data;
 
    joy1_ds2 <= (others => '0');
    joy1     <= joy1_ds2 or hid1(11 downto 0);
@@ -327,19 +394,89 @@ begin
       end if;
    end process;
 
-   rom_mem: entity work.dpram
-   generic map (addr_width => ROM_ABITS, data_width => 8)
-   port map (
-      clock    => clk_pce,
-      address_a => rom_a(ROM_ABITS-1 downto 0),
-      data_a    => (others => '0'),
-      wren_a    => '0',
-      q_a       => rom_do_core,
+   -- ROM write bridge: one iosys_bl616 byte (rom_do/rom_do_valid, arriving at UART rate --
+   -- far slower than this FSM's few-cycle turnaround, confirmed by reading
+   -- src/iosys/iosys_bl616.v directly rather than assumed) becomes one real SDRAM write via
+   -- port B. See romb_* mux above and the read bridge below for the shared settle-window
+   -- rationale (both are the same pattern, read and write).
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case wr_state is
+            when RB_IDLE =>
+               if rom_do_valid = '1' then
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_data <= rom_do;
+                  wr_req  <= not wr_req;
+                  wr_settle_cnt <= (others => '0');
+                  wr_state <= RB_SETTLE;
+               end if;
 
-      address_b => std_logic_vector(rom_wr_addr),
-      data_b    => rom_do,
-      wren_b    => rom_do_valid
-   );
+            when RB_SETTLE =>
+               -- clk_sdram (120 MHz) is ~2.8x clk_pce (42.857 MHz); 4 clk_pce cycles is
+               -- >10x margin for sdram.sv to either latch a cache hit or start asserting
+               -- romb_wait for a real fetch -- see docs/ARCHITECTURE.md.
+               if wr_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     wr_state <= RB_WAIT;
+                  else
+                     wr_state <= RB_IDLE;
+                  end if;
+               else
+                  wr_settle_cnt <= wr_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  wr_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   -- ROM read bridge: one pce_top ROM_RD per CPU cart-ROM byte access becomes one real
+   -- SDRAM read via port B (which has its own small line cache in sdram.sv, so sequential
+   -- fetches -- the common case -- mostly hit there rather than round-tripping SDRAM every
+   -- byte). ROM_RDY is held low (stalling the CPU via pce_top's WAIT_N path -- see
+   -- HUC6280.vhd's WAIT_N handling, no timeout, verified architecturally sound) until the
+   -- byte is ready.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case rd_state is
+            when RB_IDLE =>
+               rom_rdy_i <= '1';
+               if rom_rd_i = '1' then
+                  rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                  rom_rdy_i <= '0';
+                  rd_req <= not rd_req;
+                  rd_settle_cnt <= (others => '0');
+                  rd_state <= RB_SETTLE;
+               end if;
+
+            when RB_SETTLE =>
+               if rd_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     rd_state <= RB_WAIT;
+                  else
+                     rom_do_i <= romb_do;
+                     rom_rdy_i <= '1';
+                     rd_state <= RB_IDLE;
+                  end if;
+               else
+                  rd_settle_cnt <= rd_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  rom_do_i <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
 
    backup_ram: entity work.spram
    generic map (addr_width => 11, data_width => 8)
@@ -361,10 +498,10 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
 
-      ROM_RD    => open,
-      ROM_RDY   => '1',
+      ROM_RD    => rom_rd_i,
+      ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
-      ROM_DO    => rom_do_core,
+      ROM_DO    => rom_do_i,
       ROM_SZ    => x"008",
       ROM_POP   => '0',
       ROM_CLKEN => open,

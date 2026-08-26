@@ -22,9 +22,18 @@
 // header for the fuller rationale, not repeated here. Port A carries VRAM0 (needs writes
 // and real wait-state feedback -- the VDC has zero tolerance for a late response, see
 // docs/PORTING.md's "VRAM0 external memory" design consult). Port B carries cartridge ROM
-// (read-only, latency-tolerant via pce_top.vhd's existing ROM_RDY -> WAIT_N path).
+// (latency-tolerant via pce_top.vhd's existing ROM_RDY -> WAIT_N path).
 // Arbitration priority swapped so A beats B, and RAM_B_WAIT added (the original has no
 // completion signal on port B at all).
+//
+// PCE PORT (2026-08-26): port B given a write side (RAM_B_WE/RAM_B_DI) for the Primer 25K
+// CD build's cart/syscard ROM offload -- see docs/ARCHITECTURE.md's "Goal revised" section.
+// Loading (write) and gameplay (read) never overlap in time (the core is held in reset
+// during load), so this reuses the one port rather than adding a third -- no new
+// arbitration needed. A write always forces a real bus cycle (never served from the line
+// cache -- see fetch_req_b below) and invalidates the cached line afterward, since the
+// cache's shadow copy (last_data) is not updated by a write. RAM_B_WE defaults to 0 so
+// existing callers that don't connect it are unaffected.
 
 //============================================================================
 //
@@ -73,6 +82,8 @@ module sdram
 
 	input      [20:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
+	input             RAM_B_WE  = 1'b0,  // PCE PORT: write side, added for ROM offload, see header
+	input       [7:0] RAM_B_DI  = 8'h0,  // PCE PORT: write data, added for ROM offload, see header
 	output reg  [7:0] RAM_B_DO,
 	output reg        RAM_B_WAIT      // PCE PORT: absent in the ZX Next original, see header
 );
@@ -119,7 +130,8 @@ reg [21:2] last_a[2] = '{'1,'1};
 reg  [8:0] rfsh_cnt;
 
 wire       fetch_req = (RAM_A_RD_n || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
-wire       fetch_req_b = (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});   // PCE PORT: B is read-only
+// PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
+wire       fetch_req_b = RAM_B_WE || (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});
 
 // access manager
 always @(posedge clk) begin
@@ -142,7 +154,10 @@ always @(posedge clk) begin
 		else RAM_A_DO <= last_data[0][(RAM_A_ADDR[1:0]*8) +:8];
 	end
 
-	if((old_b_req ^ RAM_B_REQ) && (last_a[1] == {1'b0,RAM_B_ADDR[20:2]})) begin
+	// PCE PORT: !RAM_B_WE added -- a write must never be served from the cache, it has to
+	// reach real SDRAM (last_data is not updated by a write, so a "hit" here would just
+	// hand back stale pre-write data on the very next read).
+	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && (last_a[1] == {1'b0,RAM_B_ADDR[20:2]})) begin
 		old_b_req <= RAM_B_REQ;
 		RAM_B_DO <= last_data[1][(RAM_B_ADDR[1:0]*8) +:8];
 	end
@@ -173,7 +188,9 @@ always @(posedge clk) begin
 		end
 		else if((old_b_req ^ RAM_B_REQ) && fetch_req_b) begin
 			old_b_req <= RAM_B_REQ;
+			we <= RAM_B_WE;                    // PCE PORT: was implicitly 0 (B was read-only)
 			{bank,a} <= RAM_B_ADDR;
+			data <= {RAM_B_DI,RAM_B_DI};        // PCE PORT: write data, only used when RAM_B_WE
 			ram_req <= 1;
 			last_a[1] <= RAM_B_ADDR[20:2];
 			ch1_busy <= 1;
@@ -208,9 +225,15 @@ always @(posedge clk) begin
 		if(ch1_busy) begin
 			ch1_busy <= 0;
 			RAM_B_WAIT <= 0;   // PCE PORT
-			RAM_B_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
-			last_data[1][(a[1] ? 16 : 0) +:16] <= data_reg;
-			store <= {2'b11,~a[1]};
+			// PCE PORT: a write's data_reg readback does not reflect what was just written
+			// (see header), so last_data[1] would go stale -- invalidate the line instead of
+			// caching it, forcing the next read to really re-fetch from SDRAM.
+			if(we) last_a[1] <= '1;
+			else begin
+				RAM_B_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
+				last_data[1][(a[1] ? 16 : 0) +:16] <= data_reg;
+				store <= {2'b11,~a[1]};
+			end
 		end
 	end
 
