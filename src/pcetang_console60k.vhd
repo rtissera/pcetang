@@ -1,8 +1,14 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 
--- pcetang Phase 1: Tang Console 60K, TangCore-integrated (iosys_bl616: ROM load,
--- joypad, OSD), HuCard-only -- no CD (NO_CD=>1), no SGX (LITE=>1), no Arcade Card
--- (AC_EN='0'). Matches NECTang's own proven Console 60K config for those generics; the
+-- pcetang Phase 1+2: Tang Console 60K, TangCore-integrated (iosys_bl616: ROM load,
+-- joypad, OSD), CD/SCSI/ADPCM elaborated (NO_CD=>0, matching NECTang's own proven
+-- Console 60K CD config -- see docs/PORTING.md), no SGX (LITE=>1), no Arcade Card
+-- (AC_EN='0'). CD_COMM/CD_DATA/CD_STAT (the SCSI-command-level host interface --
+-- interpreting these commands against a real CHD image is BL616 firmware work, not
+-- FPGA work; see docs/ARCHITECTURE.md's "CD via CHD" section) are still tied to safe
+-- stubs, same as NECTang's own CD bring-ups -- this build measures real fit/timing
+-- with CD elaborated, not real CD function. Matches NECTang's own proven Console 60K
+-- config for those generics otherwise; the
 -- new parts here are ROM loading via iosys_bl616 instead of a fixed test pattern, real
 -- joypad input, and HDMI output via pce2hdmi.sv -- none of that exists in NECTang's own
 -- bring-ups, which use a fixed BRAM pattern and no video/joypad wiring at all.
@@ -102,6 +108,10 @@ architecture rtl of pcetang_console60k is
    end component;
 
    component pce2hdmi is
+      generic (
+         CAP_WIDTH  : integer := 256;
+         CAP_HEIGHT : integer := 224
+      );
       port (
          clk    : in std_logic;
          resetn : in std_logic;
@@ -259,7 +269,7 @@ begin
    );
 
    core: entity work.pce_top
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 1)
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
       RESET      => not reset_n,
       COLD_RESET => not reset_n,
@@ -314,6 +324,7 @@ begin
              joy1(3) & joy1(2) & joy1(1)  & joy1(0);
 
    hdmi_out: pce2hdmi
+   generic map (CAP_WIDTH => 160, CAP_HEIGHT => 144)
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,

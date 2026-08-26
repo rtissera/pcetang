@@ -308,3 +308,69 @@ CHD sector serving) not begun this session. Also not verified anywhere: real har
 the `textdisp`/OSD path (swept away as dead logic in synthesis on every board so far —
 plausible given nothing drives real UART traffic in these builds, but not confirmed
 correct rather than actually broken), and joypad button mapping.
+
+## Phase 2 (CD via CHD) — real architecture finding: SCSI-command interpretation is HPS/firmware work, not RTL
+
+Before touching RTL, read `TurboGrafx16.sv` (upstream `tg16-mister`'s real MiSTer
+top-level, the only real consumer of `pce_top.vhd`'s `CD_COMM`/`CD_STAT`/`CD_DOUT`
+ports anywhere in either donor tree). Finding: there is no RTL-side SCSI target
+anywhere in this donor. `CD_COMM` (96-bit SCSI CDB) and `CD_DOUT`/`CD_STAT` get
+shipped wholesale to MiSTer's ARM HPS over the `HPS_EXT` co-processor bus
+(`cd_in`/`cd_out` registers, `TurboGrafx16.sv:411-438`) — a Linux-side driver
+interprets the SCSI commands (TEST UNIT READY, READ TOC, READ(10), etc.) against a
+real disc image and answers back. None of that interpretation logic is FPGA-side.
+
+For pcetang this means: the real Phase 2 SCSI-command interpreter has to be written
+as new BL616 firmware (`rtissera/firmware-bl616`), consuming `CD_COMM`/answering
+`CD_STAT`/`CD_DOUT`/streaming `CD_DATA`, backed by `libchdr`'s already-vendored
+`chd_fatfs.c`. That's real, substantial, from-scratch software work — no existing
+open-source reference implements this for BL616 — and it cannot be exercised or
+measured by `gw_sh` at all (`gw_sh` only proves the FPGA side synthesizes and closes
+timing, not that SCSI commands get answered correctly). Not started this session;
+correctly out of `gw_sh`'s reach regardless of effort spent here.
+
+**What `gw_sh` *can* answer for Phase 2: does CD fit on top of Console 60K's Phase 1
+TangCore integration at all.** Per NECTang's own `docs/PORTING.md`, CD is already
+proven to fit on bare Console 60K (`NO_CD=>0`, 106/118 BSRAM = 90%, no TangCore infra
+at all). Phase 1's TangCore/HDMI/OSD layer already pushed that same BSRAM number to
+106/118 on its own (no CD) — meaning flipping `NO_CD=>0` on top of Phase 1 asks for
+both budgets at once, an open question, not assumed either way.
+
+**Real first attempt (2026-08-26): does not fit.** `pcetang_console60k.vhd`'s
+`pce_top` generic flipped to `NO_CD => 0`, `CD_COMM`/`CD_DATA`/`CD_STAT`/etc. left
+tied to the same safe stubs NECTang's own bring-ups use (`(others => '0')`/`'0'`/`open`
+— this measures fit/timing with CD elaborated, not real CD function). Real `gw_sh`
+result:
+
+```
+Logic     49711/59904  (83%)   -- was 14% Phase 1-only
+CLS       25806/29952  (87%)   -- was 18% Phase 1-only
+BSRAM     118/118      (100%)  -- was 90% Phase 1-only, zero headroom left
+Routing:  ERROR (PR0004) -- 13106 unrouted nets, after 1h02m in Routing Phase 1
+```
+
+Placement succeeded; routing failed outright, not a timing-closure problem — a real,
+measured "doesn't fit" result, consistent with landing at exactly 100% BSRAM (zero
+placement slack) plus CD's SCSI/ADPCM state machine adding ~35k LUTs of Logic on top
+of Phase 1's baseline. Not a guess: BSRAM at 100% with CD elaborated matches
+PORTING.md's own measured "CD costs ~21 blocks" delta on Nano 20K almost exactly (Phase
+1 baseline 106/118 + CD's real cost saturates the remaining 12).
+
+**Mitigation attempt in progress**: shrunk `pce2hdmi`'s on-chip capture buffer from
+256x224 to 160x144 (`CAP_WIDTH`/`CAP_HEIGHT` generics, the identical fix already used
+for Primer 25K's `ERROR (IF0008)` in Phase 1) to free BSRAM headroom before retrying.
+Real result pending — will be recorded here once `gw_sh` finishes (each attempt takes
+roughly an hour of wall-clock routing time on this design, not seconds like Phase 1's
+smaller builds).
+
+**Phase 3 (Arcade Card) is separately, structurally blocked — not something this
+session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
+and backup RAM" section): `AC_RAM_A` is 21 bits wanting the *entire* reachable 2MB
+SDRAM bank, `CD_RAM_A` is 22 bits against the existing controller's 21-bit ceiling, and
+both collide with `vram0_cache`'s existing use of the same bank. Fitting either needs
+`sdram32.sv`/`sdram.sv` widened to decode more than bank 0 — explicitly scoped in
+NECTang's own docs as its own separate project, not started there, and NECTang is not
+even a tracked git repo yet (a separate open dependency flagged earlier in this
+document). No amount of correct work in `pcetang` this session changes that; Phase 3
+real `gw_sh` results are not obtainable until NECTang's own SDRAM controller widening
+lands.
