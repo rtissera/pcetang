@@ -875,3 +875,219 @@ re-measurement, and interacts with everything already found about audio/BSRAM ma
 above) and firmware correctness has no verification path in this environment regardless
 (no real hardware here to test against). Toolchain readiness is no longer a question;
 the RTL interface is the next real step, whenever this item is picked back up.
+
+## Goal revised (2026-08-26): fit CD or SGX on Primer 25K with TangCore, undegraded — real root cause found, real fix path identified
+
+The user set a new, narrower goal after reviewing the RP0006 finding above: fit CD or
+SGX on Primer 25K *with* TangCore integration, not degraded relative to a bare-engine
+build, explicitly authorizing surgery on shared TangCore-side files (`vram0_cache.vhd`,
+`sdram.sv`, `pce_top.vhd`) if needed. This section documents what was found chasing
+that goal — a real critical bug fix, a corrected root-cause understanding, and a
+concrete, evidenced path forward, from both direct `gw_sh`/`GowinSynthesis` work and an
+independent Opus research pass.
+
+### Critical correctness bug found and fixed: `vram0_cache.vhd`'s SDRAM command polarity was inverted
+
+While investigating whether Primer 25K's `EXT_VRAM0` SDRAM offload was somehow the
+cause of RP0006 (a hypothesis, tested and cleared below), an Opus research pass reading
+`vram0_cache.vhd` directly against its two real consumers found a genuine, severe bug,
+independent of the RP0006 investigation:
+
+```vhdl
+ram_a_rd_n <= not seq_is_write;   -- WRONG, two call sites (SEQ_REQ_LO, SEQ_REQ_HI)
+```
+
+Both real SDRAM controllers this module drives agree independently on the opposite
+convention — `RAM_A_RD_n`: 0 = read, 1 = write:
+- `sdram.sv:166`: `we <= RAM_A_RD_n;` (Primer 25K's controller)
+- `sdram32.sv:286`: `we <= a_rd_n_d;` (Nano 20K's controller)
+
+Verified directly against the source (not taken on the research pass's word alone):
+`sdram.sv:268/272` dispatch `CMD_WRITE` when `we=1` and `CMD_READ` when `we=0`. With the
+inverted polarity, every real write-drain (`seq_is_write='1'`) drove `ram_a_rd_n='0'`,
+telling the controller to issue a **read**; every real read-refill drove `ram_a_rd_n='1'`,
+telling it to issue a **write**. On real hardware, VRAM0 external memory would never
+have worked at all — writes silently no-op, reads silently corrupt memory with
+whatever happened to be on the write-data bus. This affects both boards that use
+`EXT_VRAM0`: Nano 20K (always) and Primer 25K (whenever `EXT_VRAM0=>1`, which is every
+Primer 25K build so far, Phase 1 included).
+
+**Why no `gw_sh` result ever caught this**: this is a logical/functional bug, not a
+resource or timing one — `gw_sh` proves synthesis, timing, and resource closure, never
+correctness, and this project has repeated that caveat since Phase 1. **Why simulation
+didn't catch it either**: `sim/tb_vram0_cache.vhd`'s mock SDRAM responder (line 118,
+`if ram_a_rd_n = '0' then <write> else <read>`) encodes the *same inverted* polarity as
+the bug, so the testbench agreed with the buggy RTL while both disagreed with the real
+controllers. GHDL passed for the wrong reason. **Why no runtime signal exists either**:
+`pce_top.vhd`'s `gen_vram0_ext` block ties `dbg_deadline_miss => open,
+dbg_fifo_overflow => open` on every board — the module's own built-in instrumentation
+for exactly this class of problem was never wired to anything observable.
+
+**Fixed**: removed the `not` at both call sites (`ram_a_rd_n <= seq_is_write;`). This is
+a pure polarity fix — same signal, same width, no resource change expected. Verified
+resource-neutral by rebuilding Nano 20K's tracked Phase 1 (the only board with a
+previously-committed `EXT_VRAM0` result): real `gw_sh` result unchanged,
+`BSRAM 37/46 (81%)`, full PnR close — matching the pre-fix number exactly, confirming
+the fix is functionally corrective without moving any resource count. **Every
+previously-reported "clean" Nano 20K result in this project's history should be read as
+"resource/timing-clean, VRAM0-broken until this fix"** — a real, retroactive correction
+to this document's own prior claims, not just a new finding.
+
+**Follow-up not done**: `sim/tb_vram0_cache.vhd` lives in NECTang (upstream), which has
+its own uncommitted foreign changes this project has deliberately left untouched all
+session — its mock's matching polarity bug is flagged here for whoever next touches
+that repo, not fixed by this session.
+
+### RP0006 root cause, corrected: BSRAM exhaustion cascading into LUT fallback, not a device-specific synthesis pathology
+
+The previous entry in this document (Item 1, `EXT_VRAM0` cleared as a cause) left the
+real driver of Primer 25K's `ERROR (RP0006)` (60649 LUTs vs 23040) unresolved, floating
+an unconfirmed "GW5A-25A may lack hard ALU/DSP primitives" guess. That guess is now
+**retracted, with real evidence against it**:
+
+**The user's own observation broke it open**: NECTang's own bare-engine CD build (no
+TangCore at all — no `iosys_bl616`, no `hdmi2` stack, no OSD, upstream `tg16-mister`
+RTL directly) has a real, already-existing artifact on disk
+(`impl/pnr/primer25k_cd_probe.rpt.txt`): `Logic 8066/23040 (35%), BSRAM 54/56 (97%)`.
+Real, clean, nowhere near the LUT ceiling. **Same CD RTL, same GW5A-25A device, no LUT
+overflow.** This alone kills the "device lacks primitives" theory — the device handles
+this RTL fine; TangCore's own integration layer is the actual delta.
+
+**Bisection, real `gw_sh`/`GowinSynthesis` numbers** (all direct `GowinSynthesis`
+invocations bypassing `gw_sh`'s project-TCL layer — see the `ram_rw_check` section
+below for why — same `ram_rw_check=0` setting throughout for a fair comparison):
+
+| Build | Logic (combined) | BSRAM |
+|---|---|---|
+| Bare CD probe (no TangCore) | 8066/23040 (35%) | 54/56 (97%) |
+| + `iosys_bl616` real ROM-loading path, no video/HDMI | 21761/23040 (95%) | 56/56 (100%) |
+| + full `hdmi2`/`pce2hdmi_sd` video stack, no iosys | 13251/23040 (58%) | 56/56 (100%) |
+| Full (iosys + video + CD), OSD stubbed to zero | 46078/23040 (over, RP0006) | n/a (aborted) |
+| Full (iosys + video + CD), OSD live | 49449/23040 (over, RP0006) | n/a (aborted) |
+| Full (iosys + video + CD), OSD live, default `ram_rw_check` | 60649/23040 (over, RP0006) | n/a (aborted) |
+
+Two things this table establishes directly:
+
+1. **Every sub-configuration independently drives BSRAM to 56/56 or 54/56** — Primer
+   25K's 56-block ceiling is already at or one block from full in every piece tested
+   separately. `iosys` alone needs 2 more blocks than bare CD; video alone needs the
+   same 2, via presumably different real memories. Combined, real total BSRAM demand
+   plausibly exceeds 56, and Gowin's inferencer — rather than throwing an explicit
+   `IF0008`-style error the way it did for the earlier Nano 20K/Primer 25K CD attempts
+   — appears to silently route some of the excess into LUT-based fallback (`SSRAM`/
+   distributed-RAM primitives, visible in the RP0006 error's own breakdown: `0 SSRAMs`
+   with `ram_rw_check` at its default vs `696 SSRAMs` with it disabled). No explicit
+   `IF0008` line appears in this failing build's log before the Tech-Mapping-stage
+   `RP0006` error — the fallback here is quieter than the Nano 20K/Primer 25K DFF-
+   overflow cases already documented above, but the underlying mechanism (BSRAM
+   exhaustion forcing memories into logic) is the same one this project has already
+   diagnosed three separate times (this document's own Nano 20K/Primer 25K `IF0008`
+   sections above; `vram0_cache.vhd`'s own header, a documented 58735-LUT/0-BSRAM
+   failure from an earlier design iteration; and Console 60K's own real,
+   already-measured 41000-LUT swing between its BSRAM-saturated full-framebuffer CD
+   attempt (`49711` LUT at `118/118` BSRAM) and its non-saturated scandoubler CD build
+   (`8674` LUT at `115/118`) — same CD RTL both times, the only structural difference
+   being whether BSRAM was pinned at the ceiling).
+2. **The combination cost is real and only partly explained by any one piece** —
+   summing the isolated marginal costs (bare 8066 + iosys's own +13695 + video's own
+   +5185 ≈ 26946) falls far short of the full build's 46078-49449. Stubbing the OSD
+   renderer specifically (`overlay`/`overlay_color` tied to zero, isolating it from the
+   confound that neither bisection test above exercised the OSD renderer at all) only
+   accounts for a real but small ~3.4k-unit slice of that gap (49449 → 46078) — OSD is
+   a contributor, not the story. The remaining ~19000-unit gap is consistent with the
+   BSRAM-cascade mechanism in point 1: once combined demand exceeds 56 blocks, more
+   than one memory likely falls back simultaneously, and multiple simultaneous
+   fallbacks compound rather than add.
+
+**A real, usable lever found along the way**: `-ram_rw_check 0` is a genuine Gowin
+`GowinSynthesis` CLI flag (`GowinSynthesis --help`: "Automatic Read/Write Check
+Insertion for RAM"), confirmed present in the underlying `libgwsyn.so`/`libFpgaPrj.so`
+libraries and in the `.prj` XML schema (an old, undocumented artifact,
+`primer25k_cd_probe.prj`, already had `ram_rw_check=0` set — likely why the user's own
+memory of that build being clean didn't carry a LUT-overflow caveat). It reduces the
+full build's LUT overflow by 18% (60649 → 49449) by favoring `SSRAM` distributed-RAM
+inference over raw-LUT-plus-collision-check logic for memories that don't fit in
+BSRAM. **Real build-flow limitation**: `gw_sh`'s `set_option` TCL command does not
+expose this flag — both `-ram_rw_check` and `-syn_ram_rw_check` are rejected as
+"unknown option." Using it for real requires invoking `GowinSynthesis` directly (as
+done for all the bisection numbers above) and handing its `.vg` netlist to PnR as a
+separate step — NECTang's own `impl/` tree already has `gwsynthesis/`+`pnr/` artifacts
+for `primer25k_cd_probe` in exactly this split shape, so the flow has real precedent,
+but `build_primer25k_cd.tcl`'s single-script `gw_sh` convention would need restructuring
+to use it for a real board build. Not attempted this session — a real but partial
+lever (18%, not closing the ~2x overflow alone), lower priority than the BSRAM-offload
+path below which addresses the actual bottleneck this table identifies.
+
+### Real fix path found: extend `sdram.sv`'s already-built second port, don't build a new arbiter yet
+
+An Opus research pass (dispatched per the user's request to check MiSTle-Dev/FPGA-
+Companion and other real Tang-FPGA ecosystems for a multi-client SDRAM technique)
+returned findings that reframe the whole problem, verified independently against the
+real source before being trusted:
+
+**NECTang's own SGX-alone and CD-alone builds already fit Primer 25K, without
+TangCore** (`docs/PORTING.md:996-1030`, real committed numbers, not this session's
+work): SGX alone (`LITE=>0, SGX=>'1', EXT_VRAM0=>1, NO_CD=>1`) closes at
+`Logic 18859/23040 (82%), CLS 11137/11520 (97%), BSRAM 56/56 (100%)` — though with
+`psg` (and `backup_ram`/`test_rom`) swept dead in that build too, so real PSG's +6
+BSRAM/+2700 LUT (measured on Console 60K, this document's own Phase 2 section) is not
+included, meaning real SGX is worse than this number, not better. CD alone (this
+document's own numbers, `8066/23040`) has real headroom.
+
+**`sdram.sv` is already a 2-client controller, and the second port is tied off on
+every board.** `sdram.sv:74-77` declares a real, complete `RAM_B_ADDR/RAM_B_REQ/
+RAM_B_DO/RAM_B_WAIT` port with a real fixed-priority launch chain (A → B → refresh,
+lines 156-186) already implemented — and the file's own header (lines 24-27) already
+documents its intended purpose: "Port B carries cartridge ROM (read-only, latency-
+tolerant via `pce_top.vhd`'s existing `ROM_RDY -> WAIT_N` path)." That `WAIT_N` path is
+real and already exists (`pce_top.vhd:313`, `WAIT_N => ROM_RDY and not CPU_PAUSE_EN`) —
+every board simply ties `ROM_RDY => '1'` and `RAM_B_REQ => '0'`, never using it.
+**Wiring the cartridge ROM through this already-built port frees 16 BSRAM blocks**
+(the on-chip `rom_mem` `dpram(15,8)` measures 16 blocks in Console 60K's own real
+synthesis resource report) **and fixes a real, separate correctness gap**: pcetang's
+current on-chip ROM buffer is sized `ROM_ABITS=15` (32KB) everywhere, while
+`pce_top.vhd` itself decodes HuCard sizes up to 1MB+ — the current builds cannot load
+essentially any real game regardless of CD/SGX. Port B's one real limitation: it has no
+`RAM_B_DI`/`RAM_B_RD_n` (read-only), fine for ROM, not usable for `ADPCM_DRAM`.
+
+**`ADPCM_DRAM` is a realistic second SDRAM client, with real bandwidth margin
+checked.** `cd.vhd:630-652`: `DRAM_CLKEN` fires every 18 CLK cycles (2.381 MHz), worst
+case ≤1.79M accesses/s — a 420ns budget per access. `sdram.sv`'s real transaction cost
+(`RASCAS_DELAY=3, CAS_LATENCY=3`, 10 cycles at the port's clock) is roughly 250ns —
+comfortable margin, and `cd.vhd`'s own existing `DRAM_SLOT_CNT` 4-phase ring already
+absorbs variable latency by design (it wasn't built assuming zero-latency BSRAM). This
+needs a genuinely new third port (write-capable, unlike port B) added to `sdram.sv`'s
+existing fixed-priority chain — real, scoped, additive work, not attempted this
+session.
+
+**SGX is a real dead end on Primer 25K, and SDRAM offload targets the wrong resource
+for it.** SGX alone is already at `CLS 11137/11520 (97%)` *before* real PSG audio or
+any TangCore integration cost is added — this is a Logic-cell-fabric ceiling, not a
+BSRAM one, and moving VRAM1 to external SDRAM would need *more* on-chip logic (a second
+cache client), not less, making an already-97%-full CLS budget worse. Separately, at
+PCE's fastest real dot clock (10.7 MHz) VRAM1 would need bandwidth matching VRAM0's own
+already-tight budget on the exact same SDRAM chip — two clients each needing ~100% of
+one channel's real throughput, zero margin, before even reaching the CLS ceiling above.
+**Not a promising path; not pursued further.**
+
+**Real, checkable multi-client SDRAM precedent exists on this exact device, for later
+if CD's single-additional-client extension isn't enough**: `nand2mario/snestang`'s
+`src/sdram_cl2_3ch.v` is a genuine 6-client, bank-interleaved arbiter confirmed (via
+its own `build.tcl`) targeting `GW5A-LV25MG121NC1/I0` — the same real part — in
+production, at 85.9375 MHz. Not needed for the CD path above (a simple 3rd fixed-
+priority port suffices there), but real evidence this class of design scales further
+on this hardware if a future SGX attempt or additional client is ever revisited.
+
+### Net position on the revised goal
+
+**CD on Primer 25K with TangCore, undegraded: a real, scoped, evidenced path exists —
+not yet built.** Two concrete RTL changes, in order: (1) wire cartridge ROM through
+`sdram.sv`'s existing, already-built port B (frees 16 BSRAM blocks, fixes the real
+32KB-ROM ceiling as a side effect), (2) add a third, write-capable port to `sdram.sv`
+for `ADPCM_DRAM` (real bandwidth margin checked and adequate). Neither attempted this
+session — both are real board-top and shared-file changes needing their own `gw_sh`
+verification, correctly scoped as the next work, not squeezed into this pass.
+
+**SGX on Primer 25K with TangCore: a real dead end**, blocked on Logic-cell-fabric
+capacity (97% before TangCore or real audio) and SDRAM bandwidth, not BSRAM — no
+version of the SDRAM-offload work above is expected to change this conclusion.
