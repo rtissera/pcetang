@@ -91,6 +91,8 @@ architecture rtl of pcetang_primer25k is
          RAM_A_WAIT : out   std_logic;
          RAM_B_ADDR : in    std_logic_vector(20 downto 0);
          RAM_B_REQ  : in    std_logic;
+         RAM_B_WE   : in    std_logic;
+         RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
          RAM_B_WAIT : out   std_logic
       );
@@ -267,6 +269,8 @@ begin
       RAM_A_WAIT => vram0_ram_a_wait,
       RAM_B_ADDR => (others => '0'),
       RAM_B_REQ  => '0',
+      RAM_B_WE   => '0',
+      RAM_B_DI   => (others => '0'),
       RAM_B_DO   => open,
       RAM_B_WAIT => ram_b_wait_nc
    );
