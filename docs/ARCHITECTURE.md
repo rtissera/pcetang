@@ -356,12 +356,37 @@ of Phase 1's baseline. Not a guess: BSRAM at 100% with CD elaborated matches
 PORTING.md's own measured "CD costs ~21 blocks" delta on Nano 20K almost exactly (Phase
 1 baseline 106/118 + CD's real cost saturates the remaining 12).
 
-**Mitigation attempt in progress**: shrunk `pce2hdmi`'s on-chip capture buffer from
-256x224 to 160x144 (`CAP_WIDTH`/`CAP_HEIGHT` generics, the identical fix already used
-for Primer 25K's `ERROR (IF0008)` in Phase 1) to free BSRAM headroom before retrying.
-Real result pending — will be recorded here once `gw_sh` finishes (each attempt takes
-roughly an hour of wall-clock routing time on this design, not seconds like Phase 1's
-smaller builds).
+**Real second attempt (2026-08-26): still doesn't fit, off by exactly one BSRAM
+block.** Shrunk `pce2hdmi`'s on-chip capture buffer from 256x224 to 160x144
+(`CAP_WIDTH`/`CAP_HEIGHT` generics, the identical fix already used for Primer 25K's
+`ERROR (IF0008)` in Phase 1) to free BSRAM headroom, expecting the same net-BSRAM-drop
+that fix produced on Primer 25K. It did not: `GowinSynthesis`'s own resource summary
+still reports exactly `118/118 (100%)` (not lower — the smaller buffer inferred
+differently, not smaller, the same non-monotonic BSRAM-reshuffle behavior already seen
+on Nano 20K's backup-RAM addition in NECTang's own history), and the independent
+netlist-read step at the start of PnR then counts **119** blocks for the identical
+design and fails outright: `ERROR (PA2017): The number(119) of BSRAM in the design
+exceeds the resource limit(118)`. Two different counting passes inside the same `gw_sh`
+run disagree by one block on the same netlist — a real, measured tool behavior, not
+explained by anything guessed here; not investigated further given each attempt costs
+roughly an hour of wall-clock synthesis+routing time.
+
+**Stopping the iterate-and-rebuild loop here rather than guessing at a third shrink.**
+Two real attempts (default 256x224 capture: BSRAM 118/118 exactly, routing fails with
+13106 unrouted nets; 160x144 capture: BSRAM 118-or-119 depending on which pass counts,
+fails before routing even starts) show CD sits right at Console 60K's BSRAM ceiling
+once Phase 1's TangCore/HDMI/OSD infrastructure is already loaded — not comfortably
+over, not comfortably under, closer than a blind further shrink deserves another hour
+of compute to discover. The honest, measured Phase 2 FPGA-fit answer for Console 60K
+today is **no** at both capture-buffer sizes tried. A real fix would need either a
+smaller net BSRAM cut than `pce2hdmi`'s framebuffer provides (e.g. trimming
+`textdisp`/`gowin_dpb_menu`'s OSD memory, or `cd_fifos.vhd`'s CDDA/CDSUBC FIFO depths,
+both currently swept as dead logic anyway per the `WARN (NL0002)` lines in this same
+build's log — meaning even their *nominal* BSRAM cost might be recoverable by removing
+the RTL outright rather than relying on the optimizer's sweep) or accepting CD on a
+board with more BSRAM headroom than Console 60K's TangCore-integrated Phase 1 leaves.
+Not attempted further this session — a real decision point for the user, not something
+to keep guessing at silently.
 
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
