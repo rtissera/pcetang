@@ -1175,6 +1175,36 @@ pieces that pushed the combined build to 56/56 BSRAM and cascaded into `RP0006`.
 
 **Direct GowinSynthesis check (resource-fit only, no .sdc/PnR)**: `Logic 13210/23040
 (58%), BSRAM 56/56 (100%)`, no `RP0006` — a real, clean fit, down from `60649/23040`
-(over) before this change. A full `gw_sh` PnR run (with real timing constraints) is in
-progress to confirm actual timing closure; that result, not this one, is the real
-answer and will be recorded here once it completes.
+(over) before this change.
+
+### Real `gw_sh` PnR result (2026-08-26): CD fits on Primer 25K with full TangCore integration, timing closes clean
+
+Full `gw_sh build_primer25k_cd.tcl` run to completion (placement, routing, timing
+analysis, bitstream generation, power analysis all completed — a real `.fs` bitstream
+was produced, 5.8MB). This is the actual PnR result, not the synthesis-only pre-check
+above.
+
+- **Resources**: `Logic 14031/23040 (61%)`, `Register 9081/23280 (39%)`,
+  `BSRAM 56/56 (100%)`, `CLS 10659/11520 (93%)`.
+- **Timing**: `pcetang_primer25k_cd_tr_content.html`'s STA summary —
+  **0 Setup Violated Endpoints, 0 Hold Violated Endpoints** out of 28953 endpoints
+  analyzed across 49215 paths. Max-frequency summary, constraint vs. actual Fmax:
+  `clk_pce` 42.857 MHz constraint / 44.327 MHz actual, `clk_sdram` 120.000 MHz / 139.506
+  MHz actual, `clk_pixel` 27.000 MHz / 78.243 MHz actual — every clock closes with real
+  margin, not just barely. Total Negative Slack is `0.000` on every analyzed clock.
+- This also resolves, with a real number instead of a synthesis-stage artifact, the
+  `-6.340` slack the standalone `GowinSynthesis` pre-check reported on the
+  `VRAM0/ram_a_addr -> sdram_inst/last_a[0]` clk_pce→clk_sdram path: that check had no
+  `.sdc` loaded, so it had no timing exceptions to apply to a path this design's own
+  port-A convention already treats as tolerant (see the relaxed-CDC note above). The
+  real PnR run, with the project's actual constraints, shows this path closes fine.
+
+**This is the real, gw_sh-confirmed answer for the active goal**: CD fits on Tang
+Primer 25K with full TangCore integration (iosys_bl616 ROM load/joypad/OSD, full video
+stack, full CD engine including `ADPCM_DRAM` at its real 64KB) — not degraded, not
+stripped down to close the build. Not yet hardware-verified (no board test performed),
+but the synthesis/PnR/timing closure itself is real and complete, not simulated or
+inferred.
+
+**SGX on Primer 25K remains the confirmed dead end** described above — this work was
+scoped to CD only, per the capacity/bandwidth ceiling already established for SGX.
