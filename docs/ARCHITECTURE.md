@@ -441,6 +441,35 @@ This is not a synthesis-tool quirk or a guessable RTL bug on either board — re
 all three top-level files back to `NO_CD=>1` so the tracked builds stay the real, clean
 Phase 1 references.
 
+**Follow-up experiment (2026-08-26): RGB222 framebuffer, decisive negative, closes this
+avenue.** Added a `COLOR_BITS` generic to `pce2hdmi.sv` (default 3, matching PCE's real
+HuC6260 output depth) to test whether cutting the capture buffer's per-channel depth
+3->2 bits (256x224x9 -> 256x224x6, a real ~9-block nominal BSRAM saving by the same
+arithmetic used for the earlier 160x144 attempt) would clear Console 60K's CD fit.
+Killed at the synthesis-stage BSRAM check (before the ~1h routing phase) once the
+number was known, per the same measure-early discipline used throughout this project.
+**Result: still exactly `118/118`, byte-for-byte identical to both the original
+256x224x9 attempt and the 160x144x9 attempt.** Three real attempts spanning a ~3x range
+in nominal framebuffer bit demand (516096, 207360, 344064 bits) all report the identical
+118/118 ceiling. This is conclusive, not ambiguous: **the framebuffer was never the
+binding constraint.** Something else in the design — almost certainly CD's own real
+memories (`ADPCM_DRAM` at 524288 bits, the SCSI/CDDA/CDSUBC FIFOs, or an interaction
+between them and the rest of the engine) saturates the device independently of anything
+`pce2hdmi.sv` does. Reverted `pcetang_console60k.vhd`'s `pce2hdmi` instantiation to
+default `COLOR_BITS` (unchanged behavior from the original, already-measured Phase 1
+result) and `NO_CD` back to `1`. **No further framebuffer-size lever is worth trying on
+any board** — this closes that specific avenue with real evidence, not a guess.
+
+**Phase 2 is now closed for this session across all three boards, decisively.** Two
+independent trim strategies (spatial: 160x144, color-depth: RGB222) both failed to
+move Console 60K's BSRAM number at all, on top of the three boards' original real
+failures already on record above. Freeing enough BSRAM for CD to fit would require
+identifying and removing whatever is actually consuming the budget (not yet isolated —
+would need a per-instance BSRAM breakdown Gowin's `gw_sh` text reports don't expose,
+or a bisection by commenting out CD submodules one at a time, both real further work
+this session did not do) or the Arcade-Card-class SDRAM controller widening already
+flagged as its own separate NECTang-side project.
+
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
 and backup RAM" section): `AC_RAM_A` is 21 bits wanting the *entire* reachable 2MB

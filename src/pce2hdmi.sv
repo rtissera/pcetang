@@ -29,6 +29,10 @@ module pce2hdmi #(
 	// 60K build, so it's the first thing being varied to test that.
 	parameter CAP_WIDTH  = 256,
 	parameter CAP_HEIGHT = 224,
+	parameter COLOR_BITS = 3,   // per-channel capture depth; PCE's real HuC6260 output is
+	                            // 3/3/3 (this default). Lower values are a real quality
+	                            // tradeoff (fewer colors), traded for less BSRAM -- not
+	                            // free, see docs/ARCHITECTURE.md's Phase 2 section.
 	// HDMI mode. Defaults are 720p60 (Console 60K/Primer 25K, both real GW5A PLLA
 	// instances free for a dedicated HDMI clock pair). Nano 20K has no spare PLL for
 	// that (GW2AR-18C's real 2-PLL ceiling, see nano20k_pll.vhd's header) -- but that
@@ -84,14 +88,25 @@ wire [10:0] cx, frameWidth;
 // video_ce + not(hbl/vbl) gates a real pixel write.
 //
 localparam MEM_DEPTH  = CAP_WIDTH * CAP_HEIGHT;
+localparam PIX_BITS   = COLOR_BITS * 3;
 
-logic [8:0] mem [0:MEM_DEPTH-1];    // 9-bit raw RGB (3/3/3), no palette step needed
+// Bit-replication expansion of one COLOR_BITS-wide channel to 8 bits, e.g. 3->8:
+// {v,v,v}[8-downto-1], 2->8: {v,v,v,v} exactly. Same technique the fixed 3/3/3 case
+// used inline before this was made a parameter; not a palette step.
+function automatic logic [7:0] expand_channel(input logic [COLOR_BITS-1:0] v);
+	localparam int REPS = (8 + COLOR_BITS - 1) / COLOR_BITS;
+	logic [REPS*COLOR_BITS-1:0] repeated;
+	repeated = {REPS{v}};
+	expand_channel = repeated[REPS*COLOR_BITS-1 -: 8];
+endfunction
+
+logic [PIX_BITS-1:0] mem [0:MEM_DEPTH-1];    // per-channel COLOR_BITS raw RGB, no palette
 logic [15:0] mem_portA_addr;
-logic [8:0]  mem_portA_wdata;
+logic [PIX_BITS-1:0]  mem_portA_wdata;
 logic        mem_portA_we;
 
 wire [15:0] mem_portB_addr;
-logic [8:0] mem_portB_rdata;
+logic [PIX_BITS-1:0] mem_portB_rdata;
 
 always_ff @(posedge clk) begin
 	if (mem_portA_we) mem[mem_portA_addr] <= mem_portA_wdata;
@@ -117,7 +132,7 @@ always @(posedge clk) begin
 	if (video_ce && ~video_hbl && ~video_vbl) begin
 		if (cap_x < CAP_WIDTH) begin
 			mem_portA_addr <= cap_y * CAP_WIDTH + cap_x;
-			mem_portA_wdata <= {video_r, video_g, video_b};
+			mem_portA_wdata <= {video_r[2 -: COLOR_BITS], video_g[2 -: COLOR_BITS], video_b[2 -: COLOR_BITS]};
 			mem_portA_we <= 1'b1;
 			cap_x <= cap_x + 1;
 		end
@@ -165,15 +180,16 @@ always @(posedge clk_pixel) begin
 	if (cy == 0) begin yy <= 0; ycnt <= 0; end
 end
 
-// 9-bit RGB (3/3/3) -> 24-bit, bit-replication expansion (r3,r3,r3[2:1]), not a palette
+// PIX_BITS-wide RGB (COLOR_BITS/COLOR_BITS/COLOR_BITS) -> 24-bit, bit-replication
+// expansion per channel via expand_channel(), not a palette step.
 always @(posedge clk_pixel) begin
 	if (active) begin
 		if (overlay)
 			rgb <= {overlay_color[4:0],3'b0,overlay_color[9:5],3'b0,overlay_color[14:10],3'b0};
 		else
-			rgb <= { {mem_portB_rdata[8:6]}, {mem_portB_rdata[8:6]}, mem_portB_rdata[8:7],
-			         {mem_portB_rdata[5:3]}, {mem_portB_rdata[5:3]}, mem_portB_rdata[5:4],
-			         {mem_portB_rdata[2:0]}, {mem_portB_rdata[2:0]}, mem_portB_rdata[2:1] };
+			rgb <= { expand_channel(mem_portB_rdata[PIX_BITS-1 -: COLOR_BITS]),
+			         expand_channel(mem_portB_rdata[PIX_BITS-COLOR_BITS-1 -: COLOR_BITS]),
+			         expand_channel(mem_portB_rdata[COLOR_BITS-1 -: COLOR_BITS]) };
 	end else
 		rgb <= 24'h101010;
 end

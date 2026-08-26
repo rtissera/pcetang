@@ -113,7 +113,8 @@ architecture rtl of pcetang_console60k is
    component pce2hdmi is
       generic (
          CAP_WIDTH  : integer := 256;
-         CAP_HEIGHT : integer := 224
+         CAP_HEIGHT : integer := 224;
+         COLOR_BITS : integer := 3
       );
       port (
          clk    : in std_logic;
