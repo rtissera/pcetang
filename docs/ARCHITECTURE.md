@@ -448,22 +448,32 @@ HuC6260 output depth) to test whether cutting the capture buffer's per-channel d
 arithmetic used for the earlier 160x144 attempt) would clear Console 60K's CD fit.
 Killed at the synthesis-stage BSRAM check (before the ~1h routing phase) once the
 number was known, per the same measure-early discipline used throughout this project.
-**Result: still exactly `118/118`, byte-for-byte identical to both the original
-256x224x9 attempt and the 160x144x9 attempt.** Three real attempts spanning a ~3x range
-in nominal framebuffer bit demand (516096, 207360, 344064 bits) all report the identical
-118/118 ceiling. This is conclusive, not ambiguous: **the framebuffer was never the
-binding constraint.** Something else in the design — almost certainly CD's own real
-memories (`ADPCM_DRAM` at 524288 bits, the SCSI/CDDA/CDSUBC FIFOs, or an interaction
-between them and the rest of the engine) saturates the device independently of anything
-`pce2hdmi.sv` does. Reverted `pcetang_console60k.vhd`'s `pce2hdmi` instantiation to
-default `COLOR_BITS` (unchanged behavior from the original, already-measured Phase 1
-result) and `NO_CD` back to `1`. **No further framebuffer-size lever is worth trying on
-any board** — this closes that specific avenue with real evidence, not a guess.
+**Result at the time: still exactly `118/118`, byte-for-byte identical to both the
+original 256x224x9 attempt and the 160x144x9 attempt.** Three real attempts spanning a
+~3x range in nominal framebuffer bit demand (516096, 207360, 344064 bits) all reported
+the identical 118/118 ceiling.
 
-**Bisection (2026-08-26): the real cost driver is identified — `ADPCM_DRAM`,
-`cd.vhd:655`.** Two independent framebuffer trim strategies (spatial 160x144,
-color-depth RGB222) both failed to move Console 60K's BSRAM number at all — real
-evidence the framebuffer was never the constraint (see above). Bisected further:
+**CORRECTION (2026-08-26, later same day): the conclusion drawn from this was wrong,
+caught before acting on it further.** 118 is `GW5AT-60`'s *physical maximum* BSRAM
+count. All three framebuffer sizes were tested while total demand was still over
+capacity (CD's full 64KB `ADPCM_DRAM` alone, ~28 blocks, was still in the design) — the
+report was pinned at the device ceiling, not actually measuring the framebuffer's
+marginal cost. A ceiling reading is uninformative about the size of the thing you
+changed; it only says total demand exceeded 118, which was already known. The later
+ADPCM bisection (below) proves this directly: once total demand dropped under 118 (real
+capacity headroom restored), the numbers moved *linearly* with size (4KB ADPCM stub:
+108/118; 16KB ADPCM: 115/118 — a +7-block delta for +12KB, consistent with real
+18Kbit-block arithmetic). The framebuffer-size lever was never actually tested under
+conditions where it could show an effect. Reverted `pcetang_console60k.vhd`'s
+`pce2hdmi` instantiation to default `COLOR_BITS` and `NO_CD` back to `1` regardless
+(correct regardless of this correction, since neither variant was being kept). See
+`docs/OVERHEAD.md` for where this reopened avenue led.
+
+**Bisection (2026-08-26): a real cost driver identified — `ADPCM_DRAM`,
+`cd.vhd:655`.** Two framebuffer trim strategies (spatial 160x144, color-depth RGB222)
+had reported no change against the 118/118 ceiling — now understood (see correction
+above) to mean total demand was still over capacity both times, not that the
+framebuffer was cost-free. Bisected further:
 `gw_sh` doesn't expose a per-instance BSRAM breakdown, so isolated candidates by
 temporarily shrinking one CD memory at a time and rebuilding, checking the
 synthesis-stage BSRAM number before committing to a full ~1h routing run. `ADPCM_DRAM`
