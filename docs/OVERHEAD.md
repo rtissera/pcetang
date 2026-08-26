@@ -128,3 +128,57 @@ sibling module wired only into `pcetang_console60k_cd.vhd`, not touching the thr
 tracked, real, measured Phase 1 tops or the shared `hdmi2/*.sv` files) — with the
 question of back-porting to other TangCore cores (nestang, snestang, etc.) explicitly
 deferred, per the user's own words, to "later if needed."
+
+## 6. Follow-up (2026-08-26): PCE video timing specifics — the mid-frame dot-clock risk is real but tractable, verified from `huc6260.vhd` directly
+
+The open risk from section 4 (`DOTCLOCK` changing mid-frame) is real, but reading
+`huc6260.vhd`'s actual timing-generation process (`:205-239`) resolves it cleanly,
+without needing per-mode output timing at all:
+
+- `H_CNT` (0 to `LINE_CLOCKS-1` = 2729) and `V_CNT` are driven purely by the **master
+  clock** (`clk_pce`, real ~42.857 MHz on Console 60K, target 42.9545 MHz — standard
+  PCE timing) and reset every line/frame **independently of `DOTCLOCK`**. `HSYNC_F`/
+  `VSYNC_F` (real, already-exposed huc6260 outputs) are generated purely from
+  `H_CNT`/`V_CNT` — real-world scanline and frame duration are **constant regardless of
+  which video mode is active**.
+- `DOTCLOCK` only changes how often `CLKEN` (the pixel-valid strobe) pulses within that
+  fixed window — divide-by-8 (256-wide mode), divide-by-6 (336-wide), divide-by-4
+  (512-wide). This matches real hardware: a real PC Engine CRT signal has a constant
+  ~63.6us horizontal period regardless of resolution mode; the console widens or
+  narrows individual pixel dwell time to fill it, never changes the scanline rate
+  itself. `LINE_CLOCKS`/`DISP_CLOCKS` are both single constants in the file, not
+  per-mode tables — confirming this in the RTL, not just from spec knowledge.
+
+**This means a scandoubler that samples on the master-clock domain (using `CLKEN` as
+its per-pixel write-strobe into a line buffer sized for the max width, 512, and
+`HSYNC_F`/`VSYNC_F` for its own timing reference — the same real ports `pce2hdmi.sv`
+already consumes) needs no per-mode reconfiguration at all.** A mid-frame `DOTCLOCK`
+switch just changes how many valid samples land in that line's buffer before the next
+`HSYNC_F` — the playback/output side, driven by the same constant real-world line rate,
+doesn't need to know or care. This is not a new invention: it's the same thing a real
+analog CRT does when a real PC Engine switches modes mid-frame, and it directly
+resolves the concern raised in section 4 without the fixed-single-output-clock
+limitation that (correctly) works for Atari ST's much simpler, truly-fixed-mode video.
+
+## 7. Real precedent for modifying the shared `hdmi.sv` core itself
+
+Checked whether `hdmi2/hdmi.sv`'s fixed CEA-861 `VIDEO_ID_CODE` table (`hdmi.sv:203`)
+is a hard limitation. It is, **as shipped** — no custom/non-standard timing case exists.
+But MiSTeryNano's own `src/hdmi/hdmi.sv` (same donor lineage, same file names,
+`packet_picker.sv`/`tmds_channel.sv`/etc. all present) is a **real, working, already-
+shipped fork of this exact IP that replaces the fixed `VIDEO_ID_CODE` table entirely**
+with a runtime `stmode`/`screen`-selected custom timing table (`timing0`/`timing1`
+internal parameters, fixed 32MHz `VIDEO_RATE`, non-CEA-861). This is direct, real proof
+that this exact class of modification — teaching the shared HDMI core a non-standard,
+source-native timing mode — has already been done successfully on this same board
+family, not just theorized.
+
+**Impact on nestang/mdtang/other TangCore cores, concretely: zero, if done additively.**
+The natural way to add this to pcetang's own copy of `hdmi2/hdmi.sv` is a new case
+alongside the existing `VIDEO_ID_CODE` table (e.g. `VIDEO_ID_CODE == 0` => custom
+timing driven by new input ports), not a replacement of the table. Every existing
+TangCore core (nestang, snestang, mdtang, gbatang) passes a real, non-zero
+`VIDEO_ID_CODE` (1/2/3/4/etc.) and would take the exact same code path as today,
+byte-for-byte — untouched. Only pcetang's own top-level would use the new case. Nothing
+about this requires touching nestang/mdtang now, or ever, unless a future decision is
+made to migrate them too — which stays exactly as deferred as the user already said.

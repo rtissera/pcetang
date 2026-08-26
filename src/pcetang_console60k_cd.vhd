@@ -4,18 +4,24 @@
 -- pcetang_console60k.vhd's Phase 1 (no-CD) build -- same split pattern NECTang itself
 -- uses for feature-combo variants (e.g. primer25k_core_test vs primer25k_sgx_core_test).
 --
--- REAL, MEASURED CAVEAT: ADPCM_DRAM (src/pce/tg16-mister-rtl/cd/cd.vhd) is 16KB here,
--- not the real CD-ROM2 spec's 64KB -- a documented capacity reduction, found necessary
--- by real gw_sh bisection (full 64KB: BSRAM 118/118, routing fails outright; 16KB:
--- BSRAM 115/118, real clean bitstream, 0/0 violations). See docs/ARCHITECTURE.md's
--- "Phase 2" section for the full history (two failed full-spec attempts, the bisection
--- that found ADPCM_DRAM as the actual cost driver, and this real passing result).
+-- VIDEO PATH: pce2hdmi_sd.sv (line-doubling scandoubler), NOT pce2hdmi.sv (full-frame
+-- capture) -- a full-frame buffer at this board's ~19-33 real measured BSRAM block cost
+-- (docs/OVERHEAD.md section 1, and the legal-stub A/B in section 5-7) left no room for
+-- CD's real 64KB ADPCM_DRAM. The scandoubler measures ~1 block by construction. Real
+-- history: two failed full-64KB-ADPCM attempts (BSRAM 118/118, routing fails outright),
+-- an interim 16KB-ADPCM reduction that passed (115/118) as a documented capacity
+-- tradeoff, then this scandoubler swap restoring full 64KB fidelity -- see
+-- docs/ARCHITECTURE.md's "Phase 2" section and docs/OVERHEAD.md for the complete real
+-- measurement history behind this design. Real precedent for the technique:
+-- MiSTle-Dev/FPGA-Companion's MiSTeryNano (same Tang board family) uses the same
+-- line-doubling approach for Atari ST.
+--
 -- CD_COMM/CD_DATA/CD_STAT (the SCSI-command host interface) are still tied to safe
 -- stubs -- real CD/CHD function needs BL616 firmware SCSI-target work, unstarted,
 -- separate from and unblocked by this FPGA-side result.
 --
 -- Otherwise identical to pcetang_console60k.vhd: ROM loading via iosys_bl616, real
--- joypad input, HDMI output via pce2hdmi.sv.
+-- joypad input.
 --
 -- NOT VERIFIED ON HARDWARE. Joypad button mapping (iosys_bl616's DS2/SNES-shaped
 -- joy1[11:0] onto pce_top's 2-select-bit/4-data-bit protocol) is a reasonable first
@@ -56,7 +62,7 @@ architecture rtl of pcetang_console60k_cd is
       );
    end component;
 
-   component pcetang_console60k_hdmi_pll is
+   component pcetang_console60k_hdmi_pll_480p is
       port (
          clkin        : in  std_logic;
          reset        : in  std_logic;
@@ -108,11 +114,14 @@ architecture rtl of pcetang_console60k_cd is
       );
    end component;
 
-   component pce2hdmi is
+   component pce2hdmi_sd is
       generic (
-         CAP_WIDTH  : integer := 256;
-         CAP_HEIGHT : integer := 224;
-         COLOR_BITS : integer := 3
+         MAX_LINE_SAMPLES : integer := 540;
+         VIDEOID       : integer := 2;
+         VIDEO_REFRESH : real    := 60.0;
+         CLKFRQ        : integer := 27000;
+         SCREEN_WIDTH  : integer := 720;
+         SCREEN_HEIGHT : integer := 480
       );
       port (
          clk    : in std_logic;
@@ -194,7 +203,7 @@ begin
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => open, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll
+   hdmi_pll: pcetang_console60k_hdmi_pll_480p
    port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
 
@@ -325,7 +334,7 @@ begin
    joy_in <= joy1(4) & joy1(5) & joy1(11) & joy1(10) when joy_out(0) = '1' else
              joy1(3) & joy1(2) & joy1(1)  & joy1(0);
 
-   hdmi_out: pce2hdmi
+   hdmi_out: pce2hdmi_sd
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,

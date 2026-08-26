@@ -533,6 +533,73 @@ all (`IF0008`/`RP0001`, register-fallback), and their starting BSRAM margins (Pr
 ±0-2% swing here — a 16KB ADPCM RAM alone is unlikely to be enough on either, and
 confirming that would cost two more real `gw_sh` attempts this session did not spend.
 
+## Phase 2 superseded (2026-08-26): full 64KB ADPCM fidelity, via a scandoubler, not a capacity reduction
+
+The 16KB-ADPCM result above was real and shipped, but it was a compromise. Per the
+user's explicit direction to research TangCore's actual overhead and pursue a more
+correct fix rather than accept the reduction, this session found and built a real
+alternative: **`pce2hdmi_sd.sv`**, a line-doubling scandoubler replacing
+`pce2hdmi.sv`'s full-frame capture buffer for Console 60K's CD build specifically. Full
+research and real measurement trail in `docs/OVERHEAD.md` (TangCore overhead
+breakdown, MiSTer/MiSTle-Dev-FPGA-Companion ecosystem comparison, the real
+`huc6260.vhd` timing analysis that de-risked PCE's variable dot clock, and the
+Console 60K legal-stub A/B that measured the framebuffer's real cost at ~33 blocks,
+not the ~28 estimated).
+
+**Real result, `impl/pnr/pcetang_console60k_cd.fs` (rebuilt on this design,
+2026-08-26):**
+
+```
+Logic     8692/59904  (15%)
+Register  3338/60780  (6%)
+CLS       5616/29952  (19%)
+BSRAM     104/118     (89%)
+clk_pixel: 27.000 MHz (exact, no PLL parameter substitution)
+clk_5x_pixel: 135.000 MHz (exact)
+Setup violations: 0    Hold violations: 0 (zero slack on every clock, not just zero
+                                            violations)
+```
+
+**`ADPCM_DRAM` is back to its real, full 64KB spec (`generic map (17,4)`,
+`cd.vhd:663`)** — this is not a reduced-capacity build. First real `gw_sh` attempt at
+the new design succeeded outright: no PLL parameter rejection (the new
+`pcetang_console60k_hdmi_pll_480p.vhd` uses `ODIV0_SEL=50`, untested anywhere else in
+this repo — it was accepted as given), no port mismatches, no CDC issues surfacing at
+synthesis/PnR (a 2-flop synchronizer was included by design for the cross-clock
+`wr_line_toggle` signal, per standard practice, not discovered as a bug afterward).
+
+**What changed, concretely:**
+- `pce2hdmi_sd.sv` (new file): 2-line ping-pong buffer (~1 BSRAM block) indexed by
+  `video_ce` pulses, not a `CAP_WIDTH*CAP_HEIGHT` full-frame array. Per-line real
+  sample count is latched and used to drive a Bresenham-style horizontal stretch,
+  handling PCE's three real dot-clock modes (and, per the `huc6260.vhd` analysis in
+  `docs/OVERHEAD.md`, mid-frame mode switches) without per-mode reconfiguration, since
+  real scanline duration is DOTCLOCK-invariant.
+- `pcetang_console60k_hdmi_pll_480p.vhd` (new file): a third PLLA instance
+  (Console 60K/GW5A has headroom) producing 27.000/135.000 MHz (CEA-861
+  `VIDEO_ID_CODE=2`, the same code Nano 20K's Phase 1 already uses) instead of the
+  720p pair.
+- `pcetang_console60k_cd.sdc` (new file): same `clk`/`clk_pce` as Phase 1's shared sdc,
+  new `clk_pixel`/`clk_5x_pixel` ratios matching the new PLL.
+- `cd.vhd`'s `ADPCM_DRAM` restored to `(17,4)`.
+- `hdmi2/*.sv` and the three tracked Phase 1 board tops: **untouched**, per the
+  additive scope this was built under — `VIDEO_ID_CODE=2` already existed in the
+  shared `hdmi` core, so no fork of that file was needed (the cheaper of the two paths
+  identified during design, confirmed real by this result).
+
+**Impact on nestang/mdtang/other TangCore cores: none.** No shared file was modified.
+This is entirely new, additive RTL wired only into `pcetang_console60k_cd.vhd`.
+
+**Not resolved by this result**: real CD/CHD *function* (BL616 firmware SCSI-target
+work, scoped earlier in this section, unstarted) and the picture's actual correctness
+(no video simulation environment exists in this project — `gw_sh` proves synthesis,
+timing, and resource closure, not a correct image on a real screen, same caveat as
+`pce2hdmi.sv`'s own first cut carried). Not attempted on Primer 25K or Nano 20K —
+Primer 25K's Phase 1 has zero BSRAM headroom before any CD memory at all (a
+scandoubler wouldn't create margin that doesn't exist elsewhere), and Nano 20K's CD
+failure is a different, inference-eligibility class of problem (`RP0001`,
+register-fallback), not a capacity problem this fix addresses.
+
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
 and backup RAM" section): `AC_RAM_A` is 21 bits wanting the *entire* reachable 2MB

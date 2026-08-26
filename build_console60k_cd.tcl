@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# pcetang Phase 2: Tang Console 60K, CD/SCSI/ADPCM elaborated, ADPCM RAM at 16KB (real
-# spec is 64KB -- documented capacity reduction, see pcetang_console60k_cd.vhd's header
-# and docs/ARCHITECTURE.md's "Phase 2" section). Run: gw_sh build_console60k_cd.tcl
+# pcetang Phase 2: Tang Console 60K, CD/SCSI/ADPCM elaborated, full 64KB ADPCM RAM
+# (real CD-ROM2 spec) via a scandoubler-based HDMI path (pce2hdmi_sd.sv) instead of
+# pce2hdmi.sv's full-frame capture -- see docs/OVERHEAD.md sections 5-7 for why.
+# Run: gw_sh build_console60k_cd.tcl
 
 set_device GW5AT-LV60PG484AC1/I0 -name GW5AT-60B
 
@@ -50,12 +51,12 @@ add_file src/hdmi2/tmds_channel.sv
 add_file src/hdmi2/hdmi.sv
 
 # This repo's own new RTL
-add_file src/pce2hdmi.sv
-add_file src/pcetang_console60k_hdmi_pll.vhd
+add_file src/pce2hdmi_sd.sv
+add_file src/pcetang_console60k_hdmi_pll_480p.vhd
 add_file src/pce/common/pll/console60k_pll.vhd
 add_file src/pcetang_console60k_cd.vhd
 add_file src/pcetang_console60k.cst
-add_file src/pcetang_console60k.sdc
+add_file src/pcetang_console60k_cd.sdc
 
 set_option -synthesis_tool gowinsynthesis
 set_option -output_base_name pcetang_console60k_cd
