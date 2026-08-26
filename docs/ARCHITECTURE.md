@@ -460,15 +460,39 @@ default `COLOR_BITS` (unchanged behavior from the original, already-measured Pha
 result) and `NO_CD` back to `1`. **No further framebuffer-size lever is worth trying on
 any board** — this closes that specific avenue with real evidence, not a guess.
 
-**Phase 2 is now closed for this session across all three boards, decisively.** Two
-independent trim strategies (spatial: 160x144, color-depth: RGB222) both failed to
-move Console 60K's BSRAM number at all, on top of the three boards' original real
-failures already on record above. Freeing enough BSRAM for CD to fit would require
-identifying and removing whatever is actually consuming the budget (not yet isolated —
-would need a per-instance BSRAM breakdown Gowin's `gw_sh` text reports don't expose,
-or a bisection by commenting out CD submodules one at a time, both real further work
-this session did not do) or the Arcade-Card-class SDRAM controller widening already
-flagged as its own separate NECTang-side project.
+**Bisection (2026-08-26): the real cost driver is identified — `ADPCM_DRAM`,
+`cd.vhd:655`.** Two independent framebuffer trim strategies (spatial 160x144,
+color-depth RGB222) both failed to move Console 60K's BSRAM number at all — real
+evidence the framebuffer was never the constraint (see above). Bisected further:
+`gw_sh` doesn't expose a per-instance BSRAM breakdown, so isolated candidates by
+temporarily shrinking one CD memory at a time and rebuilding, checking the
+synthesis-stage BSRAM number before committing to a full ~1h routing run. `ADPCM_DRAM`
+(`entity work.dpram generic map (17,4)`, 524288 bits — the real PC-Engine/CD-ROM²
+ADPCM working RAM, 128Kx4, matching actual hardware capacity, the one CD memory that
+survives every sweep since it's the only one with an observable path even with audio
+outputs tied to `open`) is it: shrinking it to a 4Kbit stub (`generic map (10,4)`,
+non-functional for real ADPCM playback, diagnostic only) dropped Console 60K's CD
+build from `118/118` (routing collapse) to a **real, clean pass**: `108/118 (92%)
+BSRAM, Logic 15%, CLS 19%, 0/0 violations`. CD's own SCSI/decode logic barely moved
+Logic at all (14%->15% over Phase 1) — confirms it was specifically this one memory,
+not CD's logic in general.
+
+**This does not hand Phase 2 a free win — it reframes the decision.** Real ADPCM RAM
+is genuinely 64KB per actual CD-ROM² hardware; the diagnostic stub breaks real ADPCM
+playback (games writing anywhere past a few KB would corrupt/wrap). Restoring the full,
+correct 64KB size would very likely reproduce the original failure, since that's
+approximately the ~12-block gap this test measured. What's open, honestly, as a real
+decision — not yet made, not resolved by more `gw_sh` runs on their own — is whether a
+**smaller-than-real, larger-than-stub ADPCM RAM** (e.g. 8-16KB) is an acceptable
+tradeoff for a first real CD-capable Console 60K build, especially since no BL616
+firmware exists yet to drive real ADPCM playback at all (a separate, unstarted
+software project per the "CD via CHD" section above) — meaning a reduced-ADPCM CD
+build would not be shipping a regression relative to what's actually usable today, only
+relative to a fully faithful future implementation. Diagnostic files
+(`cd.vhd`'s `ADPCM_DRAM` generic, `pcetang_console60k.vhd`'s `NO_CD`) left uncommitted
+in this exploration, reverted to their correct real values (full 64KB `ADPCM_DRAM`,
+`NO_CD=>1`) — this repo's tracked Console 60K build stays the real, clean Phase 1
+reference until/unless a partial-ADPCM Phase 2 direction is explicitly chosen.
 
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
