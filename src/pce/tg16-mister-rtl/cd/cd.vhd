@@ -652,10 +652,18 @@ begin
 		end case;
 	end process;
 	
-	ADPCM_DRAM : entity work.dpram generic map (17,4)
+	-- pcetang Phase 2 real attempt (2026-08-26): shrunk from generic map (17,4) (real
+	-- CD-ROM2 spec, 128Kx4 = 64KB ADPCM working RAM) to (15,4) (32Kx4 = 16KB) -- a
+	-- documented capacity reduction, not full fidelity. Bisection measured the full
+	-- 64KB version costs Console 60K's CD-fit ~12 BSRAM blocks over the budget; no
+	-- BL616 firmware exists yet to drive real ADPCM playback at all (see docs/
+	-- ARCHITECTURE.md's "CD via CHD" section), so this isn't a regression against
+	-- anything actually usable today. See docs/ARCHITECTURE.md's Phase 2 section for
+	-- the real gw_sh result this produced.
+	ADPCM_DRAM : entity work.dpram generic map (15,4)
 	port map (
 		clock		=> CLK,
-		address_a=> ADRAM_A,
+		address_a=> ADRAM_A(14 downto 0),
 		data_a	=> ADRAM_DI,
 		wren_a	=> ADRAM_WE,
 		q_a		=> ADRAM_DO

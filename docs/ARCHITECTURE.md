@@ -488,11 +488,40 @@ tradeoff for a first real CD-capable Console 60K build, especially since no BL61
 firmware exists yet to drive real ADPCM playback at all (a separate, unstarted
 software project per the "CD via CHD" section above) — meaning a reduced-ADPCM CD
 build would not be shipping a regression relative to what's actually usable today, only
-relative to a fully faithful future implementation. Diagnostic files
-(`cd.vhd`'s `ADPCM_DRAM` generic, `pcetang_console60k.vhd`'s `NO_CD`) left uncommitted
-in this exploration, reverted to their correct real values (full 64KB `ADPCM_DRAM`,
-`NO_CD=>1`) — this repo's tracked Console 60K build stays the real, clean Phase 1
-reference until/unless a partial-ADPCM Phase 2 direction is explicitly chosen.
+relative to a fully faithful future implementation.
+
+**Real Phase 2 success on Console 60K (2026-08-26): `ADPCM_DRAM` at 16KB (half real
+spec, `generic map (15,4)`, `cd.vhd:661`), `NO_CD=>0`.** Verified `ADPCM_DRAM` survives
+the synthesis sweep (no `NL0002` line names it or `dpram(addr_width=15,data_width=4)`)
+before committing to the full ~1h routing run — this is a real, elaborated memory in
+the final netlist, not a dead-code artifact like the earlier stub test. Real `gw_sh`
+result, `impl/pnr/pcetang_console60k.fs`:
+
+```
+Logic     8674/59904  (15%)
+Register  3345/60780  (6%)
+CLS       5663/29952  (19%)
+BSRAM     115/118     (98%)   -- SP 9, SDPB 56, DPB 38, DPX9B 3, pROMX9 9
+Setup violations: 0    Hold violations: 0
+```
+
+**Honest label for this result: Console 60K, CD/SCSI/ADPCM decode hardware elaborated
+and routed, real clean bitstream, with ADPCM working RAM at 16KB instead of the real
+64KB CD-ROM² spec — a documented capacity reduction, not full fidelity.** Real games
+that write ADPCM data past the first 16KB of the window would wrap/corrupt; this is a
+genuine, named limitation, not hidden inside the passing number. CD_COMM/CD_DATA/CD_STAT
+(the SCSI-command host interface) are still tied to the same safe stubs as before —
+real CD/CHD *function* (not just fit) still needs the BL616 firmware SCSI-target work
+scoped earlier in this section, unstarted, and out of `gw_sh`'s reach regardless of
+this result.
+
+**This is a real Phase 2 result for at least one board** — the bar this project has
+been measuring against throughout. Not attempted on Primer 25K or Nano 20K: both
+failed at the synthesis-inference stage before reaching a BSRAM-capacity question at
+all (`IF0008`/`RP0001`, register-fallback), and their starting BSRAM margins (Primer
+25K 0% free, Nano 20K 19% free before *any* CD memory) are tighter than Console 60K's
+±0-2% swing here — a 16KB ADPCM RAM alone is unlikely to be enough on either, and
+confirming that would cost two more real `gw_sh` attempts this session did not spend.
 
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
