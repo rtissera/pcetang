@@ -994,10 +994,18 @@ Two things this table establishes directly:
    renderer specifically (`overlay`/`overlay_color` tied to zero, isolating it from the
    confound that neither bisection test above exercised the OSD renderer at all) only
    accounts for a real but small ~3.4k-unit slice of that gap (49449 → 46078) — OSD is
-   a contributor, not the story. The remaining ~19000-unit gap is consistent with the
-   BSRAM-cascade mechanism in point 1: once combined demand exceeds 56 blocks, more
-   than one memory likely falls back simultaneously, and multiple simultaneous
-   fallbacks compound rather than add.
+   a contributor, not the story.
+3. **Confirmed directly, not just by consistency argument**: shrinking the on-chip cart
+   ROM buffer from `ROM_ABITS=15` (32KB, 16 real BSRAM blocks) to `ROM_ABITS=11` (2KB,
+   ~1 block) in the full build — freeing roughly the same ~16 blocks a real port-B ROM
+   offload (below) would free, with nothing else changed — dropped the result from
+   `46078` straight through the 23040 ceiling to a clean, real
+   `Logic 18230/23040 (80%), BSRAM 56/56 (100%)`, `ADPCM_DRAM` confirmed still live at
+   its full 64KB spec (not swept). A single ~16-block memory-capacity change accounts
+   for the entire remaining ~28000-unit gap by itself. This is the direct, measured
+   confirmation of the BSRAM-exhaustion-cascade mechanism, not an inference from
+   consistency with other cases — once combined real demand drops back under the
+   56-block ceiling, the LUT-fallback cascade simply stops happening.
 
 **A real, usable lever found along the way**: `-ram_rw_check 0` is a genuine Gowin
 `GowinSynthesis` CLI flag (`GowinSynthesis --help`: "Automatic Read/Write Check
@@ -1078,15 +1086,44 @@ production, at 85.9375 MHz. Not needed for the CD path above (a simple 3rd fixed
 priority port suffices there), but real evidence this class of design scales further
 on this hardware if a future SGX attempt or additional client is ever revisited.
 
-### Net position on the revised goal
+### Capacity path confirmed; mechanism (how to actually free the blocks) still open
 
-**CD on Primer 25K with TangCore, undegraded: a real, scoped, evidenced path exists —
-not yet built.** Two concrete RTL changes, in order: (1) wire cartridge ROM through
-`sdram.sv`'s existing, already-built port B (frees 16 BSRAM blocks, fixes the real
-32KB-ROM ceiling as a side effect), (2) add a third, write-capable port to `sdram.sv`
-for `ADPCM_DRAM` (real bandwidth margin checked and adequate). Neither attempted this
-session — both are real board-top and shared-file changes needing their own `gw_sh`
-verification, correctly scoped as the next work, not squeezed into this pass.
+**The capacity thesis is now directly confirmed, not inferred**: freeing ~16 BSRAM
+blocks (simulated by shrinking the on-chip ROM buffer, not yet by a real port-B bridge)
+takes the full build from a 46078-LUT `RP0006` failure to a clean, real
+`Logic 18230/23040 (80%), BSRAM 56/56 (100%)`, `ADPCM_DRAM` confirmed live at full
+64KB spec. **CD fits on Primer 25K with full TangCore integration once ~16 BSRAM
+blocks move off-chip** — this is now a measured fact, not a plan.
+
+**What's still open is the mechanism, and it's more constrained than it first
+looked.** Reading `sdram.sv`'s own address path (`{bank,a} <= RAM_A_ADDR` /
+`RAM_B_ADDR`, both only 21 bits wide) shows `bank` is hardwired to `2'b00` for both
+existing ports — the controller only ever reaches bank 0 of the physical SDRAM chip,
+a 2MB window, regardless of the chip's real total capacity. **This is the same
+21-bit/bank-0 ceiling this document's own Phase 3 section already identifies as the
+reason Arcade Card is separately, structurally blocked** — arrived at independently
+here, not assumed. Offset-partitioning cart ROM into the same bank-0 window (e.g. base
+VRAM0 at 0, ROM at some higher offset) is arithmetically possible and was the original
+plan, but it means CD's fix and Phase 3's eventual fix would compete for the exact same
+scarce 2MB, and a layout chosen now would need undoing if bank-widening work ever
+lands. Not decided; flagged as a real design choice, not defaulted into.
+
+**A second, more immediate open question found before writing any bridge RTL**:
+`sdram.sv`'s port B (and its `RAM_B_WAIT` signal specifically) is real but **untested
+infrastructure** — the file's own header calls it a PCE-specific addition absent from
+the donor ZX Next design, and no board in this project has ever driven it. Before
+building a CDC bridge from `pce_top.vhd`'s `ROM_RD`/`ROM_A`/`ROM_DO`/`ROM_RDY` interface
+to port B, the real open question is whether the HuC6280 CPU (`HUC6280_CPU.vhd`/
+`HUC6280_MC.vhd`) can tolerate the wait-state duration a real SDRAM round trip would
+assert on `WAIT_N` — `vram0_cache.vhd` exists specifically because the VDC has *no*
+wait input and can't stall at all; whether the CPU path has a similar hard constraint
+(vs. a simple, tolerant wait-state input) has not been checked yet, and answering that
+comes before designing the handshake, not after — the same class of care that the
+`ram_a_rd_n` polarity bug above should have gotten the first time.
+
+**Net position**: CD on Primer 25K with TangCore, undegraded — capacity-confirmed,
+real, not yet built. Two real open design questions (bank-0/Phase-3 collision, CPU
+wait-state tolerance) need answers before writing the port-B bridge, not after.
 
 **SGX on Primer 25K with TangCore: a real dead end**, blocked on Logic-cell-fabric
 capacity (97% before TangCore or real audio) and SDRAM bandwidth, not BSRAM — no
