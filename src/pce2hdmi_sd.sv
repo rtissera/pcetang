@@ -73,6 +73,12 @@ module pce2hdmi_sd #(
 	input clk_pixel,
 	input clk_5x_pixel,
 
+	// pce_top.vhd audio outputs, direct -- observability test only (2026-08-26): makes
+	// PSG/CDDA/ADPCM real, live logic instead of dead-code-swept, so this file's real
+	// BSRAM/Logic cost can be measured on a design that isn't silent. Summed, not
+	// mixed correctly -- see docs/ARCHITECTURE.md's audio-observability section.
+	input signed [15:0] psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s,
+
 	output       tmds_clk_n,
 	output       tmds_clk_p,
 	output [2:0] tmds_d_n,
@@ -216,10 +222,17 @@ always @(posedge clk_pixel) begin
 		rgb <= 24'h101010;
 end
 
-// Silent audio -- same real gap as pce2hdmi.sv, not done here either.
-logic clk_audio = 0;
+// Observability wiring, not a real mixer -- summed with wraparound, no clipping, no
+// real resampling to AUDIO_RATE. Enough to make PSG/CDDA/ADPCM live logic for a real
+// gw_sh resource measurement; audio correctness is unstarted work (see
+// docs/ARCHITECTURE.md).
+logic clk_audio;
+assign clk_audio = clk_pixel;
 reg [15:0] audio_sample_word [1:0];
-initial begin audio_sample_word[0] = 0; audio_sample_word[1] = 0; end
+always_ff @(posedge clk_audio) begin
+	audio_sample_word[0] <= psg_sl + cdda_sl + adpcm_s;
+	audio_sample_word[1] <= psg_sr + cdda_sr + adpcm_s;
+end
 
 logic[2:0] tmds;
 wire tmdsClk;

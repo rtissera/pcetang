@@ -144,6 +144,8 @@ architecture rtl of pcetang_console60k_cd is
          clk_pixel    : in std_logic;
          clk_5x_pixel : in std_logic;
 
+         psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : in std_logic_vector(15 downto 0);
+
          tmds_clk_n : out std_logic;
          tmds_clk_p : out std_logic;
          tmds_d_n   : out std_logic_vector(2 downto 0);
@@ -153,6 +155,8 @@ architecture rtl of pcetang_console60k_cd is
 
    signal clk_pce, clk_pixel, clk_5x_pixel : std_logic;
    signal pll_lock, hdmi_pll_lock, reset_n : std_logic;
+
+   signal psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : signed(15 downto 0);
 
    signal overlay       : std_logic;
    signal overlay_x     : std_logic_vector(7 downto 0);
@@ -317,7 +321,7 @@ begin
       CD_DATA => (others => '0'), CD_DATA_WR => '0', CD_AUDIO_WR => '0',
       CD_SUBCD_WR => '0', CD_DATA_END => open, CD_DM => '0',
 
-      CDDA_SL => open, CDDA_SR => open, ADPCM_S => open, PSG_SL => open, PSG_SR => open,
+      CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
       BG_EN => '1', SPR_EN => '1', GRID_EN => (others => '0'), CPU_PAUSE_EN => '0',
 
@@ -343,6 +347,9 @@ begin
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
       clk_pixel => clk_pixel, clk_5x_pixel => clk_5x_pixel,
+      psg_sl => std_logic_vector(psg_sl), psg_sr => std_logic_vector(psg_sr),
+      cdda_sl => std_logic_vector(cdda_sl), cdda_sr => std_logic_vector(cdda_sr),
+      adpcm_s => std_logic_vector(adpcm_s),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );

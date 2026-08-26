@@ -600,6 +600,51 @@ scandoubler wouldn't create margin that doesn't exist elsewhere), and Nano 20K's
 failure is a different, inference-eligibility class of problem (`RP0001`,
 register-fallback), not a capacity problem this fix addresses.
 
+**Correction (2026-08-26, later same day): the `104/118` figure above was measured with
+no sound at all, on any voice, not just CD's own audio.** `pce2hdmi_sd.sv`'s audio
+stub (`clk_audio`/`audio_sample_word` never assigned) leaves `PSG_SL`/`PSG_SR` — the
+PC Engine's base sound chip output, tied to `open` and swept away exactly like CD's own
+`CDDA`/`ADPCM` outputs — meaning the committed number describes a design with *no game
+audio whatsoever*, not just no CD audio. This was true of every board top in this
+project already (`pcetang_console60k.vhd`'s own header names it: "nothing wires
+PSG/CDDA/ADPCM outputs to anything"), but the Phase 2 write-up above stated `104/118`
+without repeating that caveat by name, reading more complete than it was.
+
+Wired `PSG_SL`/`PSG_SR`/`CDDA_SL`/`CDDA_SR`/`ADPCM_S` (all `signed(15 downto 0)` from
+`pce_top.vhd`, previously `open`) into new real input ports on `pce2hdmi_sd.sv`, summed
+into `audio_sample_word` on `clk_audio <= clk_pixel` — an observability test, not a real
+mixer: no resampling to 48 kHz, no clipping, and `psg_sl`/etc. cross from the `clk_pce`
+domain to `clk_audio` with no synchronizer (the SDC declares `clk_pce`/`clk_pixel` an
+asynchronous group, so this doesn't even get a real CDC timing check — `0/0` setup/hold
+violations here means the check didn't run on this path, not that it passed one).
+Real `gw_sh` result: full place-and-route to bitstream, exit 0 —
+
+```
+Logic     11374/59904  (19%)
+Register   5430/60780  ( 9%)
+CLS        8058/29952  (27%)
+BSRAM       110/118    (94%)
+```
+
+`psg`, its `VT` dpram, and `audio_clock_regeneration_packet` all drop off the `NL0002`
+sweep list (confirmed live now, not inferred) — real base-game audio genuinely costs
+`110-104 = 6` BSRAM blocks and ~2700 more LUTs than the silent number. **The design
+still closes, but headroom drops from 14 blocks to 8** (`8/118`, ~7%) once sound that
+every game needs, CD or not, is counted.
+
+**CD's own audio specifically (`CDDA_FIFO`, `CDSUBC_FIFO`, `ADPCM`'s decode path,
+`PRAM`) stays on the `NL0002` sweep list even in this build** — still provably dead,
+because `pce_top.vhd` internally gates `CD_SL`/`CD_SR` (which feed `CDDA_SL`/`CDDA_SR`)
+to zero whenever `CD_EN => '0'`, which every CD build in this project ties permanently.
+Making the port *reachable* didn't make the internal path *reachable*, since the
+optimizer can still prove the gate. **This means the `110/118` number still does not
+include the cost of an actual CD disc being active at runtime** — only base PSG sound.
+Real `CD_EN` activation (whatever firmware would eventually drive, per item 3 above)
+would very likely reintroduce all of `CDDA_FIFO`/`CDSUBC_FIFO`/`ADPCM`'s decode cost on
+top of this, against only 8 blocks of remaining headroom. **The full picture is:
+base sound fits (barely); CD's own audio has not been shown to fit and the margin left
+to test it in is thin.**
+
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
 and backup RAM" section): `AC_RAM_A` is 21 bits wanting the *entire* reachable 2MB
@@ -766,3 +811,40 @@ triggering the same register-fallback-cascade class of failure documented for th
 pre-scandoubler attempt. **Real, settled negative result — no further work planned on
 this specific approach for Nano 20K.** Diagnostic build files removed after the
 finding was recorded.
+
+## Item 3 (real CD/CHD function via BL616 firmware): scoped, not started — blocked on the RTL side, not the toolchain
+
+Checked what this item actually needs before writing any code, rather than assuming
+the toolchain doesn't exist:
+
+- **Firmware source is real and present**: `~/pcetang-dev/bl616-fork`, a git fork
+  (`rtissera/firmware-bl616`) with real commit history, not a stub.
+- **SDK and cross-toolchain are real and present**: Bouffalo SDK (`~/tangcore-work/bouffalo_sdk`)
+  and a T-Head RISC-V GCC toolchain (`~/tangcore-work/toolchain_gcc_t-head_linux`).
+- **Confirmed buildable, unmodified, end to end**: `make BL_SDK_BASE=<sdk path>
+  TANG_BOARD=console60k` from the fork root produces `tangcore_bl616.bin/.xz/.ota` —
+  a real, clean build, not a guess. (Build output removed afterward — throwaway
+  verification only, no source changes made to the fork.)
+- **The disk interface this item would ride on already exists and is generic, not
+  CD-specific**: `main.cpp`'s sector read/write path (`f_read`/`f_write` against a
+  mounted FatFs image, dispatched via `mgmt_address`/`mgmt_writedata` — the same
+  `0xf200`-series addresses `iosys_bl616.v` already implements) is what `pcxt.cpp` and
+  the NES core use for floppy/disk images today. This matches the plan already
+  recorded in this file's "CD via CHD" section: reuse this interface, don't invent a
+  new one. `libchdr` (for CHD hunk decoding) also already has a local fork
+  (`~/libchdr/contrib/tangcore-bl616`).
+
+**Real blocker found, and it's on the RTL side, not firmware or toolchain**: every CD
+board top in this project ties the RTL interface a SCSI-target handler would need to
+talk to — `CD_COMM => open`, `CD_STAT => (others => '0')`, `CD_DATA => (others => '0')`,
+`CD_STAT_GET => '0'` (`pcetang_console60k_cd.vhd`, current state) — to nothing. There is
+no live RTL-side endpoint for firmware to drive yet. Writing a SCSI-target handler
+against a dead interface can't be wired up or tested even at the most basic level.
+**Correct sequence: wire `cd.vhd`'s real `CD_COMM`/`CD_STAT`/`CD_DATA` interface to
+`iosys_bl616`'s `mgmt_*` path first (an RTL change with a real `gw_sh` result), then
+write the firmware-side handler second.** Not attempted this session — the RTL wiring
+alone is a nontrivial addition (needs its own real board-top change and resource
+re-measurement, and interacts with everything already found about audio/BSRAM margin
+above) and firmware correctness has no verification path in this environment regardless
+(no real hardware here to test against). Toolchain readiness is no longer a question;
+the RTL interface is the next real step, whenever this item is picked back up.
