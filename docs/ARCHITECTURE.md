@@ -611,3 +611,102 @@ even a tracked git repo yet (a separate open dependency flagged earlier in this
 document). No amount of correct work in `pcetang` this session changes that; Phase 3
 real `gw_sh` results are not obtainable until NECTang's own SDRAM controller widening
 lands.
+
+## Correction (2026-08-26, later same day): a real functional bug in `pce2hdmi_sd.sv`, found before hardware
+
+Before attempting Primer 25K, a second pair of eyes on the committed Console 60K CD
+result caught a real bug in `pce2hdmi_sd.sv`, line 165:
+
+```systemverilog
+wire [LINE_ABITS-1:0] mem_rd_addr = {line_toggle_rd, sx};   // WRONG: 10-bit LHS, 11-bit RHS
+```
+
+`LINE_ABITS = $clog2(540) = 10`. The concatenation `{line_toggle_rd, sx}` is 11 bits.
+Gowin's synthesizer flagged this at build time (`WARN (EX3791): Expression size 11
+truncated to fit in target size 10`) but a warning, not an error, so the prior build
+closed clean without anyone reading it. Verilog truncates from the **top**, silently
+dropping `line_toggle_rd` — the read side always addressed buffer 0 regardless of which
+buffer was being written. The ping-pong mechanism was dead: writes alternated correctly,
+reads never followed. The design would have synthesized, met timing, and shown a
+scrambled or frozen picture on real hardware.
+
+This does **not** invalidate the measured resource/timing numbers already recorded
+above (`dcee091`) — those describe real synthesis and timing closure, which the bug
+doesn't affect. It does mean the "not verified on hardware" caveat already carried by
+this file was covering a real, live defect, not just an untested-but-correct design.
+
+**Fix**: widen the LHS to `[LINE_ABITS:0]` (11 bits, matching the RHS). Re-ran
+`gw_sh build_console60k_cd.tcl` after the fix — real result, unchanged shape:
+`Logic 8683/59904 (15%), Register 3339/60780 (6%), CLS 5628/29952 (19%),
+BSRAM 104/118 (89%)`, full place-and-route to bitstream, exit 0. No new warnings at
+line 165. The picture's actual correctness is still unverified (no video simulation
+environment exists in this project, per the caveat above) — but the specific, real,
+found-defect is fixed, not just previously-unnoticed.
+
+**Lesson applied going forward**: `grep -i warn` the full synthesis log after every
+`gw_sh` run in this file's family, not just the pass/fail exit code — a clean PnR close
+does not mean the RTL is correct, only that it's routable and timing-clean.
+
+## Item 1 (Primer 25K scandoubler CD attempt): real negative result
+
+Built `pcetang_primer25k_cd.vhd` following the exact Console 60K pattern (`pce2hdmi_sd`
++ `pcetang_console60k_hdmi_pll_480p` + matching `.sdc`), `NO_CD => 0`, `EXT_VRAM0 => 1`
+(required on this board even in Phase 1 — see `docs/PORTING.md`). Real `gw_sh` result:
+synthesis aborted before place-and-route with a resource error never seen before in
+this project:
+
+```
+ERROR (RP0006): The number(60649(60048 LUTs, 601 ALUs, 0 ROM16s, 0 SSRAMs)) of logic
+in the design exceeds the resource limit(23040) of current device
+```
+
+A Logic/LUT overflow, not a BSRAM or register-count failure — a new failure class.
+`grep -c "NL0002"` (the dead-code-sweep warning that eliminates unused CD audio/SCSI
+modules in every other CD build in this project) against this build's log returned
+**0** — none of the usual sweeps happened, meaning `ARCADE_CARD`, `SCSI`, `cd.vhd`'s
+controller, `PSG`, and the CD FIFOs all survived as real, live logic instead of being
+pruned, despite being tied off identically to Console 60K's build
+(`CD_EN => '0'`, `CD_RAM_A => open`, etc. — byte-identical stub wiring, checked
+directly).
+
+**Isolation test to separate "scandoubler bug" from "CD-on-this-board doesn't fit"**:
+built the same file with `NO_CD => 1` (scandoubler swapped in, CD excluded from
+elaboration entirely — `NO_CD` is a VHDL generic gating a `generate` block, not a
+runtime enable). Real result: clean full PnR close, `Logic 8786/23040 (39%),
+Register 3846/23280 (17%), CLS 6134/11520 (54%), BSRAM 44/56 (79%)`. This is *lower*
+Logic usage than Primer 25K's own Phase 1 baseline (`12691/23040`, 56%) — the
+scandoubler itself is not the problem; it works exactly as designed on this board too.
+
+**Root cause, best-supported but not fully mechanically pinned down**: `NO_CD` gates a
+VHDL `generate` block, so with `NO_CD => 0` the entire CD/SCSI/ADPCM RTL tree is present
+in the netlist regardless of board. Whether that tree then gets *pruned* as dead code
+depends on the optimizer successfully constant-propagating through `CD_EN => '0'` far
+enough to prove none of it is reachable — which happens on Console 60K
+(`EXT_VRAM0 => 0`) and does not happen on Primer 25K (`EXT_VRAM0 => 1`), on otherwise
+identical stub wiring. Checked and ruled out one candidate mechanism directly: `EXT_VRAM0`'s
+`gen_vram0_ext`/`vram0_cache.vhd` path (`pce_top.vhd:456`) does not share any bus or
+signal with CD's ports — no structural coupling found there. The remaining plausible
+explanation is a Gowin synthesizer heuristic (optimization thoroughness scaling down
+past some netlist-size/complexity threshold, which `vram0_cache`'s extra real logic
+pushes this build over) rather than a specific RTL coupling bug — consistent with all
+observed facts, but not independently confirmed against vendor documentation, so stated
+here as the leading hypothesis, not a proven root cause.
+
+**Conclusion: this is a real negative result, not a bug to keep chasing.** Primer 25K's
+device (GW5A-25A: 56 BSRAM, 23040 LUT) is small enough that `EXT_VRAM0` is mandatory
+just to fit Phase 1's own core (no BSRAM headroom otherwise). The scandoubler
+genuinely frees BSRAM as designed, but on this specific board/toolchain combination it
+also (for the reason above) prevents CD's real, otherwise-dead logic from being swept,
+and that real logic alone overflows the LUT budget by ~2.6x. No further video-path
+change is expected to fix this — the failure is CD-vs-EXT_VRAM0's interaction with the
+optimizer, not framebuffer-vs-ADPCM BSRAM contention (the problem the scandoubler was
+built to solve, and did solve, on Console 60K). Diagnostic and isolation build files
+removed after the finding was recorded (no working deliverable to keep); this section
+is the durable record of the attempt.
+
+**Not attempted further this session**: forcing `CD_EN`'s stub through an explicit
+`generate`-gated removal (i.e., making the board top *itself* exclude the CD signal
+declarations when `NO_CD => 0` is combined with `EXT_VRAM0 /= 0`, rather than relying on
+the optimizer to prove it) was not tried — it would require modifying `pce_top.vhd`
+itself with a new, more invasive generic interaction, a larger change than this
+session's time budget for item 1 justified once the negative result was clear.

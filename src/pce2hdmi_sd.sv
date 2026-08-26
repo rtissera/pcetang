@@ -162,7 +162,7 @@ reg [LINE_ABITS-1:0] cur_line_width;     // latched from line_width[] at the sta
                                           // vram0_cache's own registered crossings.
 reg [9:0] cy_r;
 
-wire [LINE_ABITS-1:0] mem_rd_addr = {line_toggle_rd, sx};
+wire [LINE_ABITS:0] mem_rd_addr = {line_toggle_rd, sx};
 logic [8:0] sd_rdata;
 always_ff @(posedge clk_pixel) sd_rdata <= sd_buffer[mem_rd_addr];
 
