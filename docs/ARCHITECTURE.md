@@ -647,7 +647,7 @@ found-defect is fixed, not just previously-unnoticed.
 `gw_sh` run in this file's family, not just the pass/fail exit code — a clean PnR close
 does not mean the RTL is correct, only that it's routable and timing-clean.
 
-## Item 1 (Primer 25K scandoubler CD attempt): reopened — earlier "root cause" here was a misread
+## Item 1 (Primer 25K scandoubler CD attempt): real negative result, this time with evidence
 
 Built `pcetang_primer25k_cd.vhd` following the exact Console 60K pattern (`pce2hdmi_sd`
 + `pcetang_console60k_hdmi_pll_480p` + matching `.sdc`), `NO_CD => 0`, `EXT_VRAM0 => 1`
@@ -680,17 +680,51 @@ optimizer-thoroughness heuristic tied to netlist size) was never confirmed and s
 not be treated as established — flagged by a second-pass review before further work
 was built on top of it.
 
-**Follow-up in progress**: retargeted the identical `pcetang_primer25k_cd.vhd` /
-`.sdc` at a larger virtual device (`GW5AST-138B`, 138240 LUT vs the real GW5A-25A's
-23040) purely to push synthesis past the resource-check abort and see whether the
-post-tech-mapping sweep still runs and what real LUT count results once it does. This
-device swap is diagnostic only — GW5AST-138B is not what Primer 25K hardware is —
-and the `.cst` pin file is left at its real GW5A-25A mapping since constraint parsing
-happens during PnR, after the synthesis stage this test is probing (mismatch has no
-effect on the answer being sought here). Result pending; **do not treat item 1 as a
-settled negative result until that build reports back** — the "no further video-path
-change is expected to fix this" conclusion previously stated here is withdrawn pending
-that number.
+**First follow-up attempt (retargeting Primer 25K's identical build at a bigger virtual
+device, `GW5AST-138B`) was invalid and its result was discarded**: `GW5AST-138B` has no
+`PLLA` primitive (`ERROR (RP0008)`), and the quick fix — tying `clk_pixel`/`clk_5x_pixel`
+straight to `clk` to route around the missing PLL — collapses `pce2hdmi_sd`'s two-clock-
+domain CDC synchronizer into a same-clock constant path, handing the optimizer merge
+opportunities the real design doesn't have. Any LUT count from that run would describe
+a different, invalid design, not the one that matters. Caught before recording a number
+from it; both files deleted, nothing from that run is used below.
+
+**Real discriminating test**: instead of substituting Primer 25K's device, built
+**Console 60K's own CD variant with `EXT_VRAM0 => 1`** (`pcetang_console60k_cd_extvram0.vhd`
+— only the generic flipped, real GW5A device, real PLLA, no rewiring; the
+`VRAM0_RAM_A_*` ports `pce_top.vhd`'s `EXT_VRAM0` path needs were already stubbed
+`open`/`(others => '0')`/`'0'` in the existing CD variant, so `vram0_cache.vhd` just
+needed adding to the file list). Real `gw_sh` result: full place-and-route to bitstream,
+exit 0 —
+
+```
+Logic     8593/59904  (15%)
+Register  3373/60780  ( 6%)
+CLS       5671/29952  (19%)
+BSRAM     77/118      (66%)
+```
+
+— essentially identical Logic to the non-`EXT_VRAM0` CD build (`8683/59904`, `ca02c07`),
+with the full, expected `NL0002` sweep list intact (`ARCADE_CARD`, `psg`, `CDSUBC_FIFO`,
+`CDDA_FIFO`, and the rest, all still pruned — checked directly in the log, not inferred).
+**This settles it: `EXT_VRAM0` does not break dead-code pruning.** The hypothesis this
+section originally proposed and then retracted is now affirmatively dead, not just
+unconfirmed.
+
+**Conclusion, now backed by evidence rather than a misread log**: Primer 25K's
+`ERROR (RP0006)` (60649 LUTs against a 23040 limit) is a real number describing a design
+where pruning works the same as everywhere else in this project — the identical RTL,
+identical CD stub wiring, and identical `EXT_VRAM0` mechanism cost only ~8600 LUTs on
+Console 60K's device. **What is not yet explained is why the same netlist would cost
+~7x more LUTs specifically on GW5A-25A** — a real, open question (a plausible but
+unconfirmed candidate: GW5A-25A may lack hard ALU/DSP primitives that Console 60K's
+larger GW5A-family part has, forcing more of HUC6280/CD's arithmetic into soft LUT
+logic there; not checked). Regardless of the exact mechanism, **item 1 is a real
+negative result**: Primer 25K cannot fit CD via the scandoubler swap, and there is no
+specific evidence pointing at a fixable RTL or build-script defect — only an
+open, lower-priority question about *why* the margin is so much worse on this device.
+No further work planned on this item this session. Diagnostic build files
+(`pcetang_console60k_cd_extvram0.*`) removed after the finding was recorded.
 
 ## Item 2 (Nano 20K scandoubler CD attempt): clean, unambiguous real negative result
 
@@ -710,11 +744,14 @@ Primer 25K's, with none of the sweep-timing ambiguity raised above: there is no
 "maybe the count is pre-sweep" question when the abort happens two pipeline stages
 before sweeping would occur.
 
-227965 DFF is a real reduction from the original pre-scandoubler Nano 20K CD attempt's
-249280 DFF (documented earlier in this file) — the scandoubler is doing *something*
-(likely: `pce2hdmi`'s framebuffer no longer competing for the same inference pass) —
-but the reduction is only ~9%, and the device's limit is 15915. Nano 20K needs roughly
-**14x** its real DFF budget either way. This is not a margin a video-path change can
+**227965 is not directly comparable to the original pre-scandoubler attempt's 249280
+DFF** (documented earlier in this file) — both numbers come from runs that aborted
+mid-inference, at whatever point the pass happened to be when the checker fired, not
+from two completed netlists measured the same way. Reading a ~9% drop as "the
+scandoubler is doing something" would be the same mistake just retracted above for
+Primer 25K (an aborted-run count treated as a measurement). What's real and comparable
+is the ratio to the device limit: Nano 20K needs roughly **14x** its real DFF budget
+either way, on both attempts. This is not a margin a video-path change can
 close: Nano 20K's Phase 1 alone already runs at 81% BSRAM, and CD's own real memory
 footprint (ADPCM_DRAM's 64KB alone, `cd.vhd:655`) needs BSRAM blocks nowhere near
 available on GW2AR-18C's 46-block total regardless of what's freed elsewhere,
