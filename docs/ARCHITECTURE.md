@@ -711,20 +711,27 @@ with the full, expected `NL0002` sweep list intact (`ARCADE_CARD`, `psg`, `CDSUB
 section originally proposed and then retracted is now affirmatively dead, not just
 unconfirmed.
 
-**Conclusion, now backed by evidence rather than a misread log**: Primer 25K's
-`ERROR (RP0006)` (60649 LUTs against a 23040 limit) is a real number describing a design
-where pruning works the same as everywhere else in this project — the identical RTL,
-identical CD stub wiring, and identical `EXT_VRAM0` mechanism cost only ~8600 LUTs on
-Console 60K's device. **What is not yet explained is why the same netlist would cost
-~7x more LUTs specifically on GW5A-25A** — a real, open question (a plausible but
-unconfirmed candidate: GW5A-25A may lack hard ALU/DSP primitives that Console 60K's
-larger GW5A-family part has, forcing more of HUC6280/CD's arithmetic into soft LUT
-logic there; not checked). Regardless of the exact mechanism, **item 1 is a real
-negative result**: Primer 25K cannot fit CD via the scandoubler swap, and there is no
-specific evidence pointing at a fixable RTL or build-script defect — only an
-open, lower-priority question about *why* the margin is so much worse on this device.
-No further work planned on this item this session. Diagnostic build files
-(`pcetang_console60k_cd_extvram0.*`) removed after the finding was recorded.
+**Conclusion, now backed by evidence rather than a misread log**: the `EXT_VRAM0` test
+clears the *mechanism* this section originally (wrongly) blamed — pruning is unaffected
+by it, full stop. It does **not** independently establish which side of the sweep
+Primer 25K's 60649-LUT count falls on: that number was still read at the same
+`[90%] Tech-Mapping Phase 4` checkpoint established earlier to be ambiguous, and no
+build has yet gotten a Primer-25K-equivalent netlist past that checkpoint to see a
+confirmed post-sweep count. Comparing 60649 directly against Console 60K's post-sweep,
+PnR-final 8593 (a ~7x gap) is not an apples-to-apples number and is not being asserted
+as one — no DSP/ALU-primitive theory is being proposed to explain a gap that hasn't
+been confirmed to exist.
+
+What *is* established: `EXT_VRAM0` is cleared as a cause, and 60649 against a 23040
+LUT ceiling is an overflow regardless of which side of the sweep it falls on — even a
+generous post-sweep reduction on this design would need to be implausibly large to
+close a 2.6x gap. **Item 1 is a real negative result**: Primer 25K cannot fit CD via
+the scandoubler swap. No further work planned on this item this session; a clean
+follow-up if it's ever revisited would be retargeting the identical Primer 25K build at
+`GW5AT-60B` (59904 LUT, same GW5A family, has `PLLA`, no rewiring needed) to get a
+confirmed post-sweep number, rather than guessing at what drives the gap. Diagnostic
+build files (`pcetang_console60k_cd_extvram0.*`) removed after the finding was
+recorded.
 
 ## Item 2 (Nano 20K scandoubler CD attempt): clean, unambiguous real negative result
 
