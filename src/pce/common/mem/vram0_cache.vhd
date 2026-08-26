@@ -128,6 +128,20 @@
 --
 -- NOT VERIFIED ON HARDWARE. GHDL-tested against synthetic access patterns (sim/
 -- tb_vram0_cache.vhd) before integration, same discipline as the sprite-line-buffer fix.
+--
+-- REAL BUG FOUND AND FIXED (2026-08-26): ram_a_rd_n was driven as `not seq_is_write`
+-- (two call sites, byte_seq's SEQ_REQ_LO/SEQ_REQ_HI states) -- inverted against BOTH real
+-- controllers this module talks to. sdram.sv:166 (`we <= RAM_A_RD_n`) and sdram32.sv:286
+-- (`we <= a_rd_n_d`) independently agree on RAM_A_RD_n: 0=read, 1=write. The inverted
+-- polarity meant every real write-drain issued a READ command and every real read-refill
+-- issued a WRITE -- VRAM0 external memory would never have worked on real hardware.
+-- GHDL simulation never caught this because tb_vram0_cache.vhd's mock SDRAM responder
+-- mirrors the same (wrong) polarity assumption as this file, so both sides agreed with
+-- each other while disagreeing with the real controllers. Fixed by removing the `not`.
+-- No dbg_deadline_miss/dbg_fifo_overflow instrumentation existed to catch this at runtime
+-- either -- both debug outputs are tied to `open` in pce_top.vhd's gen_vram0_ext block on
+-- every board using this module today. Found via an Opus research pass cross-reading this
+-- file against both real consumer controllers directly, not from a hardware report.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -468,7 +482,7 @@ begin
                seq_tag    <= tag_of(seq_addr);
                seq_way    <= way_of(seq_addr);
                ram_a_addr <= "00000" & seq_addr & '0';
-               ram_a_rd_n <= not seq_is_write;
+               ram_a_rd_n <= seq_is_write;
                ram_a_di   <= seq_wdata(7 downto 0);
                ram_a_req  <= '1';
                seq_state  <= SEQ_WAIT_LO_HI;
@@ -488,7 +502,7 @@ begin
             -- this side of the interface.
             when SEQ_REQ_HI =>
                ram_a_addr <= "00000" & seq_addr & '1';
-               ram_a_rd_n <= not seq_is_write;
+               ram_a_rd_n <= seq_is_write;
                ram_a_di   <= seq_wdata(15 downto 8);
                ram_a_req  <= '1';
                seq_state  <= SEQ_WAIT_HI_HI;
