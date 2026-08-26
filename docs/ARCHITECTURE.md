@@ -1221,3 +1221,111 @@ scoped to CD only, per the capacity/bandwidth ceiling already established for SG
   specific one — despite this file's own header talking about HDMI/UART pins as if it
   had its own. That's accurate (nand2mario's primer25k pin assignments are board-wide,
   not build-specific), just worth naming so it isn't mistaken for an oversight.
+
+## Real syscard boot (2026-08-27): ROM path fixed, real work; SCSI target stub scoped, not started
+
+Follow-up to the section above, prompted directly by a user request: "make real syscard
+boot (for pcecd) on 25k." This split into two pieces of very different size once
+investigated — the first is done and real, the second is scoped but deliberately not
+started this session.
+
+### Part 1 (done): `ROM_SZ` and a real 3-way SDRAM address map
+
+The `ROM_SZ => x"008"` left over from the port-B bridge work above was still the 32KB
+HuCard decode noted as a real caveat in that section — `pce_top.vhd:646`'s address mux
+picks the cart-ROM mirror pattern by this value regardless of how much SDRAM sits behind
+it, so the CPU could only ever reach a 32KB mirror of whatever was loaded, real syscard
+bytes or not. Changed to `ROM_SZ => x"040"` (256K, straight `CPU_A(17:0)` mapping — the
+real size of `syscard3.pce`, no mirroring needed since it matches exactly).
+
+This also meant the provisional 1MB-ROM address layout from the section above no longer
+made sense — a 256KB ROM doesn't need 1MB, and `pce_top.vhd`'s `CD_RAM_A` window (a
+separate 256KB region CD-RAM will eventually need real backing for) was about to be
+designed into a corner if ROM kept claiming everything above VRAM0. Re-split bank 0's
+2MB window three ways instead of two:
+- **VRAM0** at `0x000000`, 64KB — traced to `vram0_cache.vhd`'s own `seq_addr` (a 15-bit
+  word address; +1 bit for byte select = 16 address bits = 64KB), not the 128KB guess
+  the prior section used. Real PCE VRAM0 is 32K words × 16-bit = 64KB, matching exactly.
+- **CD-RAM** at `0x010000`, 256KB — reserved by a named constant
+  (`CDRAM_SDRAM_BASE`) but not yet wired to anything; see Part 2 below for why.
+- **ROM** at `0x050000`, 256KB — the constant this section's fix actually uses.
+
+Checked, not assumed, before treating the ROM load path as fine at 256KB:
+`iosys_bl616.v`'s frame protocol caps a single `0x07 <data>` frame at 2047 bytes
+(`RECV_LEN1`'s `rx_data < 8` check), but `rom_do`/`rom_do_valid` in this RTL don't care
+about frame boundaries — they just stream bytes for as long as `rom_loading(0)` stays
+asserted, across as many frames as the sender chunks it into. The existing HuCard path
+already loads ROMs larger than one frame this way, so 256KB across ~128 frames is more
+of the same, not a new mechanism. Also checked `ROM_POP`/`CPU_PRAM_SEL_N`
+(`pce_top.vhd:686`) — that gates a HuCard-specific "Populous" cart RAM window, unrelated
+to CD/syscard; `ROM_POP => '0'` (unchanged) is correct.
+
+**Direct GowinSynthesis check**: `Logic 13180/23040, BSRAM 56/56`, no `RP0006` —
+essentially unchanged from the prior section's result, as expected (a decode/address
+change, not new resource demand). Real `gw_sh` PnR re-run to confirm timing still closes
+with the changed decode mux; result to be recorded once it completes.
+
+**Known, not yet addressed**: the read bridge's fixed 4-cycle settle window (see the
+port-B bridge section above) runs on *every* `ROM_RD`, and a syscard executes directly
+from ROM continuously (unlike a HuCard game that copies to work RAM) rather than fetching
+occasionally. Port B's own line cache should still hit on sequential code fetches most of
+the time, but this hasn't been measured — it's a real open question for "does it run at
+a normal speed," separate from "does it fit and does it boot," which is what this section
+and the one above answer.
+
+### Part 2 (scoped, not started): syscard boot needs a real SCSI target stub, not just a bigger ROM
+
+Tracing what happens after the CPU can actually fetch the full syscard found a second,
+larger gap: `CD_EN => '0'` and `CD_RAM_A/CD_RAM_DO/CD_RAM_RD/CD_RAM_WR` are all still
+`open`, `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM`/`CD_DOUT_*` are all still stubbed
+constants — the same gap this document's Item 3 already named ("CD_COMM/CD_STAT stubbed
+everywhere," scoped as BL616-firmware work, not started). Real syscard BIOS code issues
+SCSI commands (at minimum TEST UNIT READY, then REQUEST SENSE once that reports not-ready)
+essentially immediately during boot, per how every real PCE-CD/TurboGrafx-CD unit behaves
+with no disc inserted — it doesn't hang, it shows a "please insert a CD-ROM" screen. That
+behavior requires *something* to answer those SCSI commands; right now nothing does.
+
+**Traced the real protocol directly from `SCSI.vhd` and `cd.vhd`, not inferred from the
+SCSI spec**: `SCSI.vhd` implements a complete, self-paced SCSI bus phase timing model in
+RTL (`SP_FREE` → `SP_COMM_*` → `SP_STAT_*` → `SP_MSGIN_*` → back to `SP_FREE`, all gated
+by real microsecond-scale internal counters, e.g. a ~1.05ms `STAT_COUNT` delay before the
+STATUS phase — the code comments this was tuned against a real game, "Sailor Moon," that
+hung without it). The board-level `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM`/`CD_COMM_SEND`
+boundary is the real seam: `CD_COMM_SEND` pulses once the CPU has assembled a full SCSI
+command; `CD_STAT_GET` is a board-driven pulse telling `SCSI.vhd` "the response is ready,
+transition to STATUS phase now," reading whatever is currently on `CD_STAT`/`CD_MSG` at
+that moment. This part is genuinely simple to stub — the bus doesn't strictly need real
+firmware, just a board-side responder driving `CD_STAT`/`CD_MSG` and pulsing
+`CD_STAT_GET`.
+
+**What makes it real work, not a quick constant tie**: REQUEST SENSE's response isn't a
+status byte, it's data — real sense bytes (sense key `0x02` NOT READY, ASC `0x3A` MEDIUM
+NOT PRESENT, for the honest "no disc" case) delivered through `cd.vhd`'s own DATA-IN
+phase, which reads from an internal FIFO (`CDDA_FIFO`, `cd.vhd:739`) fed by the board's
+`CD_DATA`/`CD_DATA_WR` ports 4 bytes at a time (`cd.vhd:713-731`) — currently tied to
+`(others => '0')`/`'0'`, so that FIFO is permanently empty and the DATA-IN phase never
+triggers. A responder that only answers TEST UNIT READY would leave a syscard that
+politely asks "why not ready?" via REQUEST SENSE stuck with no answer — worse than not
+implementing REQUEST SENSE at all, since the syscard would reasonably expect *a* response
+to a command it's allowed to issue.
+
+**Also unresolved, and deliberately not guessed at**: whether the *current* stubbed state
+(nothing ever pulses `CD_STAT_GET`) hangs the CPU outright, or whether the syscard's own
+BIOS polling has a timeout and falls through to some degraded state. `SCSI.vhd:187-212`
+shows the bus simply parks in `SP_FREE` forever if `STAT_PEND` never sets — that's
+inertness, not a corruption risk, but whether *the CPU* hangs depends on syscard's own
+polling loop, which lives in BIOS code this project doesn't control or have source for.
+Not yet determined empirically (no build with `CD_EN => '1'` and everything else still
+stubbed has been tried, which would answer this directly and cheaply before writing any
+responder logic at all).
+
+**Recommended next step, not yet done**: before writing a SCSI target stub against an
+inferred command set, either (a) find the MiSTer TG16 core's own HPS-side CD handler —
+same donor lineage, same `CD_STAT`/`CD_COMM` boundary, and a known-working reference for
+the real minimum command set and real sense byte values, rather than reconstructing them
+from the SCSI-3 spec; or (b) instrument `CD_COMM`'s first byte to somewhere observable
+(OSD, UART) and read back what a real syscard boot actually sends, in what order, turning
+the question into a measurement instead of an inference — this project's standing
+discipline elsewhere in this document. Ordering matters: `CD_EN => '1'` and CD-RAM real
+backing come before a SCSI stub is even reachable, so the sequence is ROM path (done) →
+CD-RAM backing + `CD_EN` → SCSI target stub, not all three at once.
