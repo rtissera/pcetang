@@ -1129,11 +1129,52 @@ path has no hidden constraint analogous to the VDC's. **A port-B bridge assertin
 This resolves one of the two open questions; the bank-0/Phase-3 address-space
 collision above remains the real open design decision.
 
-**Net position**: CD on Primer 25K with TangCore, undegraded — capacity-confirmed,
-real, not yet built. One design question resolved (CPU wait-state tolerance, real and
-adequate); one real open design question (bank-0/Phase-3 collision, CPU
-collision) remains before writing the port-B bridge.
+**Net position (superseded below)**: CD on Primer 25K with TangCore, undegraded —
+capacity-confirmed, real, not yet built. One design question resolved (CPU wait-state
+tolerance, real and adequate); one real open design question (bank-0/Phase-3 collision)
+remains before writing the port-B bridge.
 
 **SGX on Primer 25K with TangCore: a real dead end**, blocked on Logic-cell-fabric
 capacity (97% before TangCore or real audio) and SDRAM bandwidth, not BSRAM — no
 version of the SDRAM-offload work above is expected to change this conclusion.
+
+### Port-B bridge built (2026-08-26): clean synthesis-stage fit, full PnR in progress
+
+The bank-0/Phase-3 collision was resolved pragmatically rather than left blocking: a
+provisional 1MB base offset (`ROM_SDRAM_BASE` in `pcetang_primer25k_cd.vhd`) puts cart/
+syscard ROM in the upper half of bank 0's 2MB window, VRAM0 (port A, needs at most 128KB)
+in the lower half. This is explicitly documented at its declaration as not meant to
+survive Phase 3's eventual bank-widening work — that work supersedes this layout
+entirely, so committing to it now costs nothing real later beyond changing one constant.
+
+`sdram.sv` port B, previously read-only and unused by any board, was given a write side
+(`RAM_B_WE`/`RAM_B_DI`) — surgery on shared TangCore RTL, authorized by the active goal.
+A write always forces a real bus cycle (excluded from the line-cache hit path, since the
+cache's `last_data` shadow copy is never updated by a write) and invalidates the cached
+line afterward (`last_a[1] <= '1` on completion when `we` was set), since a stale hit
+would otherwise hand back pre-write data on the next read. Verified by reading the
+existing hit/miss/launch logic directly (`sdram.sv:139-229`), not assumed.
+
+Port B's request line is genuinely different from port A's: A is rising-edge detected
+(`~old_a_req & RAM_A_REQ`) and can be held high through a whole wait; B is edge-detected
+either direction (`old_b_req ^ RAM_B_REQ`), so it must actually toggle per request. The
+bridge (`pcetang_primer25k_cd.vhd`) is a small settle-then-wait FSM, one instance for
+reads (pce_top's `ROM_RD`/`ROM_A`/`ROM_DO`/`ROM_RDY`) and one for writes (iosys_bl616's
+`rom_do`/`rom_do_valid`), muxed onto the single shared port since load and gameplay never
+overlap in time (the core sits in reset for the whole load — checked in
+`iosys_bl616.v`, `rom_do_valid` fires once per received UART byte, far slower than the
+bridge's few-cycle turnaround, so no backpressure/overrun risk either). Same relaxed-CDC
+style already used for port A in this codebase (a request is toggled and then held
+address-stable until the response is seen; no formal 2-flop synchronizer, matching the
+existing, already-`gw_sh`-proven port-A convention rather than inventing a new one) — a
+4-clk_pce settle window (clk_sdram is 120 MHz vs. clk_pce's 42.857 MHz, ~2.8x) gives over
+10x margin for `sdram.sv` to either latch a cache hit or start asserting `RAM_B_WAIT`.
+
+This replaces the on-chip `dpram` cart ROM buffer entirely — one of the two BSRAM-heavy
+pieces that pushed the combined build to 56/56 BSRAM and cascaded into `RP0006`.
+
+**Direct GowinSynthesis check (resource-fit only, no .sdc/PnR)**: `Logic 13210/23040
+(58%), BSRAM 56/56 (100%)`, no `RP0006` — a real, clean fit, down from `60649/23040`
+(over) before this change. A full `gw_sh` PnR run (with real timing constraints) is in
+progress to confirm actual timing closure; that result, not this one, is the real
+answer and will be recorded here once it completes.
