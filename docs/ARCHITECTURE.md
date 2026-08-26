@@ -408,18 +408,38 @@ own discipline (see Phase 1's "measure, don't deduce" note above) exists to catc
 chasing a synthesis pass here without also wiring real audio would misrepresent, not
 solve, the problem.
 
-**Primer 25K and Nano 20K are not better starting points — from numbers already real
-and measured, no rebuild needed to know this.** Primer 25K's Phase 1 (TangCore infra,
-no CD) is already `BSRAM 56/56 (100%)` (see Phase 1 section above) — zero headroom
-before CD's own cost is even added, strictly worse than Console 60K's 90% starting
-point. Nano 20K's Phase 1 is `37/46 (81%)`, only 9 blocks free, against NECTang's own
-measured bare-CD-with-zero-TangCore-infra result of `46/46 (100%)` on the identical
-chip (`docs/PORTING.md`, this repo's sibling) — CD alone already claims the entire
-budget with none of Phase 1's TangCore/HDMI/OSD overhead counted. Attempting either
-board would very likely reproduce the same "doesn't fit" result, at real `gw_sh` cost
-(~1h+ each) for a result already inferable from numbers on hand. Not attempted this
-session on that basis — a defensible non-guess, but flagged as inference rather than
-direct measurement in case a future session wants to confirm it for real.
+**Primer 25K and Nano 20K: real attempts, both confirm the inference (2026-08-26), user
+explicitly asked to try them rather than stop at the Console 60K result.** Both fail
+fast (inference-stage, not a multi-hour PnR run) — real `gw_sh`, not guessed:
+
+**Primer 25K** (`pcetang_primer25k.vhd`, `NO_CD` flipped to `0`): `ERROR (IF0008)`, a
+memory failed to map to any BSRAM primitive at all and fell back to registers —
+294912 DFF needed against the 23280 limit. Root cause understood, not just observed:
+Primer 25K's Phase 1 alone is already `56/56 (100%)` BSRAM (zero headroom), and CD's
+own real cost is nontrivial (NECTang's own CD-alone-no-infra Primer 25K build needs
+54/56 blocks by itself, `docs/PORTING.md`). With no BSRAM primitives left to allocate,
+Gowin's inferencer falls back to registers for whichever memory loses the race, and
+that DFF count alone blows the budget ~13x over. Same underlying finding as Console 60K
+(CD's real memory demand exceeds what's left after Phase 1's TangCore/HDMI/OSD layer),
+surfacing through a different failure mode (inference-time fallback vs. post-mapping
+routing collapse) because Primer 25K's starting margin was zero, not Console 60K's ~10%.
+
+**Nano 20K** (`pcetang_nano20k.vhd`, `NO_CD` flipped to `0`): `ERROR (RP0001)`, the
+same registers-instead-of-BSRAM class of failure — 249280 DFF needed against a 15915
+limit, ~15x over. Consistent with Phase 1 already at `37/46 (81%)` while NECTang's own
+bare-CD-zero-infra Nano 20K build needs the *entire* `46/46 (100%)` on its own — the
+smallest chip in the lineup, predictably the worst margin.
+
+**All three boards now have a real, measured "CD does not fit on top of Phase 1"
+result** — two different concrete failure signatures (routing collapse at 100% BSRAM
+on Console 60K; registers-fallback inference failure on Primer 25K and Nano 20K), both
+traced to the same root cause: CD's own real BSRAM cost (independently confirmed by
+NECTang's own zero-TangCore-infra CD builds: Console 60K fits with 90% baseline,
+Primer 25K needs 54/56 alone, Nano 20K needs 46/46 alone) has nowhere to go once Phase
+1's TangCore/HDMI/OSD integration has already spent 81-100% of each board's BSRAM.
+This is not a synthesis-tool quirk or a guessable RTL bug on either board — reverted
+all three top-level files back to `NO_CD=>1` so the tracked builds stay the real, clean
+Phase 1 references.
 
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
