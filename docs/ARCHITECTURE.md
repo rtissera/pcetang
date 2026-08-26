@@ -1208,3 +1208,16 @@ inferred.
 
 **SGX on Primer 25K remains the confirmed dead end** described above — this work was
 scoped to CD only, per the capacity/bandwidth ceiling already established for SGX.
+
+**Two things this result does not claim**, so the next reader doesn't over-read it:
+- `pcetang_primer25k_cd.vhd` still hardcodes `ROM_SZ => x"008"` (32KB HuCard) at the
+  `pce_top` port map — `pce_top.vhd:646`'s address decode picks the cart-ROM mapper by
+  this value, not by how much SDRAM space is behind it. "Syscard ROM lives in SDRAM
+  now" is a real statement about where the bytes are stored and fetched from; it is not
+  a statement that a real syscard (typically 128-256KB) would boot — `ROM_SZ` would need
+  to be wired to whatever real size iosys_bl616 loads before that's true. Not fixed here
+  (out of scope for the fit/timing question this section answers).
+- The CD build uses `pcetang_primer25k.cst` — the same pin file as Phase 1, not a CD-
+  specific one — despite this file's own header talking about HDMI/UART pins as if it
+  had its own. That's accurate (nand2mario's primer25k pin assignments are board-wide,
+  not build-specific), just worth naming so it isn't mistaken for an oversight.
