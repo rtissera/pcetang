@@ -1108,22 +1108,31 @@ plan, but it means CD's fix and Phase 3's eventual fix would compete for the exa
 scarce 2MB, and a layout chosen now would need undoing if bank-widening work ever
 lands. Not decided; flagged as a real design choice, not defaulted into.
 
-**A second, more immediate open question found before writing any bridge RTL**:
-`sdram.sv`'s port B (and its `RAM_B_WAIT` signal specifically) is real but **untested
-infrastructure** — the file's own header calls it a PCE-specific addition absent from
-the donor ZX Next design, and no board in this project has ever driven it. Before
-building a CDC bridge from `pce_top.vhd`'s `ROM_RD`/`ROM_A`/`ROM_DO`/`ROM_RDY` interface
-to port B, the real open question is whether the HuC6280 CPU (`HUC6280_CPU.vhd`/
-`HUC6280_MC.vhd`) can tolerate the wait-state duration a real SDRAM round trip would
-assert on `WAIT_N` — `vram0_cache.vhd` exists specifically because the VDC has *no*
-wait input and can't stall at all; whether the CPU path has a similar hard constraint
-(vs. a simple, tolerant wait-state input) has not been checked yet, and answering that
-comes before designing the handshake, not after — the same class of care that the
-`ram_a_rd_n` polarity bug above should have gotten the first time.
+**Second open question, checked and resolved positively**: `sdram.sv`'s port B (and its
+`RAM_B_WAIT` signal specifically) is real but **untested infrastructure** — the file's
+own header calls it a PCE-specific addition absent from the donor ZX Next design, and
+no board in this project has ever driven it. Before building a CDC bridge from
+`pce_top.vhd`'s `ROM_RD`/`ROM_A`/`ROM_DO`/`ROM_RDY` interface to port B, the real
+question was whether the HuC6280 CPU can tolerate the wait-state duration a real SDRAM
+round trip would assert on `WAIT_N` — unlike the VDC, which has *no* wait input at all
+and is why `vram0_cache.vhd`'s whole cache-based design exists in the first place.
+Checked directly in `HUC6280.vhd:88-119`: when `CPU_CS='1'` (cartridge access selected)
+and the internal cycle counter reaches its check point, the logic is
+`if WAIT_N = '1' then <advance the counter, pulse CPU_CE> end if` — with no `else`
+branch. If `WAIT_N='0'`, the counter simply holds at that value and re-checks every
+clock, indefinitely, with no timeout and no corruption risk. This is a real,
+clean, arbitrary-duration wait-state mechanism, already built into the CPU
+specifically for external/cartridge memory access (`pce_top.vhd`'s existing
+`WAIT_N => ROM_RDY and not CPU_PAUSE_EN` wiring already routes through it) — the CPU
+path has no hidden constraint analogous to the VDC's. **A port-B bridge asserting
+`ROM_RDY='0'` for a real SDRAM round trip is architecturally sound from the CPU side.**
+This resolves one of the two open questions; the bank-0/Phase-3 address-space
+collision above remains the real open design decision.
 
 **Net position**: CD on Primer 25K with TangCore, undegraded — capacity-confirmed,
-real, not yet built. Two real open design questions (bank-0/Phase-3 collision, CPU
-wait-state tolerance) need answers before writing the port-B bridge, not after.
+real, not yet built. One design question resolved (CPU wait-state tolerance, real and
+adequate); one real open design question (bank-0/Phase-3 collision, CPU
+collision) remains before writing the port-B bridge.
 
 **SGX on Primer 25K with TangCore: a real dead end**, blocked on Logic-cell-fabric
 capacity (97% before TangCore or real audio) and SDRAM bandwidth, not BSRAM — no
