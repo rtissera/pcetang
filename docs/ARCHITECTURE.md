@@ -647,66 +647,78 @@ found-defect is fixed, not just previously-unnoticed.
 `gw_sh` run in this file's family, not just the pass/fail exit code — a clean PnR close
 does not mean the RTL is correct, only that it's routable and timing-clean.
 
-## Item 1 (Primer 25K scandoubler CD attempt): real negative result
+## Item 1 (Primer 25K scandoubler CD attempt): reopened — earlier "root cause" here was a misread
 
 Built `pcetang_primer25k_cd.vhd` following the exact Console 60K pattern (`pce2hdmi_sd`
 + `pcetang_console60k_hdmi_pll_480p` + matching `.sdc`), `NO_CD => 0`, `EXT_VRAM0 => 1`
-(required on this board even in Phase 1 — see `docs/PORTING.md`). Real `gw_sh` result:
-synthesis aborted before place-and-route with a resource error never seen before in
-this project:
+(required on this board even in Phase 1). Real `gw_sh` result: synthesis aborted before
+place-and-route with a resource error never seen before in this project:
 
 ```
 ERROR (RP0006): The number(60649(60048 LUTs, 601 ALUs, 0 ROM16s, 0 SSRAMs)) of logic
 in the design exceeds the resource limit(23040) of current device
 ```
 
-A Logic/LUT overflow, not a BSRAM or register-count failure — a new failure class.
-`grep -c "NL0002"` (the dead-code-sweep warning that eliminates unused CD audio/SCSI
-modules in every other CD build in this project) against this build's log returned
-**0** — none of the usual sweeps happened, meaning `ARCADE_CARD`, `SCSI`, `cd.vhd`'s
-controller, `PSG`, and the CD FIFOs all survived as real, live logic instead of being
-pruned, despite being tied off identically to Console 60K's build
-(`CD_EN => '0'`, `CD_RAM_A => open`, etc. — byte-identical stub wiring, checked
-directly).
+Isolation build (`NO_CD => 1`, scandoubler still swapped in, CD excluded from
+elaboration entirely — `NO_CD` gates a VHDL `generate` block, not a runtime enable):
+clean full PnR close, `Logic 8786/23040 (39%), Register 3846/23280 (17%),
+CLS 6134/11520 (54%), BSRAM 44/56 (79%)`. This much is solid: `pce2hdmi_sd` itself is
+not the problem on this board.
 
-**Isolation test to separate "scandoubler bug" from "CD-on-this-board doesn't fit"**:
-built the same file with `NO_CD => 1` (scandoubler swapped in, CD excluded from
-elaboration entirely — `NO_CD` is a VHDL generic gating a `generate` block, not a
-runtime enable). Real result: clean full PnR close, `Logic 8786/23040 (39%),
-Register 3846/23280 (17%), CLS 6134/11520 (54%), BSRAM 44/56 (79%)`. This is *lower*
-Logic usage than Primer 25K's own Phase 1 baseline (`12691/23040`, 56%) — the
-scandoubler itself is not the problem; it works exactly as designed on this board too.
+**A previous version of this section claimed the root cause was "`EXT_VRAM0` prevents
+Gowin's dead-code sweep from pruning CD's tied-off logic," based on `grep -c "NL0002"`
+returning 0 against the failing build's log. That claim does not hold up and is
+retracted.** Checking the *position* of `NL0002` lines in the passing Console 60K CD
+log shows they are emitted right after `[90%] Tech-Mapping Phase 4 completed`, in the
+same narrow window where the Primer 25K build's `ERROR (RP0006)` fired. The failing
+build never reached the point in the pipeline where sweep results get reported — zero
+`NL0002` lines is the expected shape of an early abort, not evidence that sweeping
+failed to happen. The 60649-LUT count itself may be a pre-sweep figure; there is no
+log evidence either way from the failing run alone, since it aborts at exactly the
+ambiguous point. The candidate mechanism this section previously proposed (a Gowin
+optimizer-thoroughness heuristic tied to netlist size) was never confirmed and should
+not be treated as established — flagged by a second-pass review before further work
+was built on top of it.
 
-**Root cause, best-supported but not fully mechanically pinned down**: `NO_CD` gates a
-VHDL `generate` block, so with `NO_CD => 0` the entire CD/SCSI/ADPCM RTL tree is present
-in the netlist regardless of board. Whether that tree then gets *pruned* as dead code
-depends on the optimizer successfully constant-propagating through `CD_EN => '0'` far
-enough to prove none of it is reachable — which happens on Console 60K
-(`EXT_VRAM0 => 0`) and does not happen on Primer 25K (`EXT_VRAM0 => 1`), on otherwise
-identical stub wiring. Checked and ruled out one candidate mechanism directly: `EXT_VRAM0`'s
-`gen_vram0_ext`/`vram0_cache.vhd` path (`pce_top.vhd:456`) does not share any bus or
-signal with CD's ports — no structural coupling found there. The remaining plausible
-explanation is a Gowin synthesizer heuristic (optimization thoroughness scaling down
-past some netlist-size/complexity threshold, which `vram0_cache`'s extra real logic
-pushes this build over) rather than a specific RTL coupling bug — consistent with all
-observed facts, but not independently confirmed against vendor documentation, so stated
-here as the leading hypothesis, not a proven root cause.
+**Follow-up in progress**: retargeted the identical `pcetang_primer25k_cd.vhd` /
+`.sdc` at a larger virtual device (`GW5AST-138B`, 138240 LUT vs the real GW5A-25A's
+23040) purely to push synthesis past the resource-check abort and see whether the
+post-tech-mapping sweep still runs and what real LUT count results once it does. This
+device swap is diagnostic only — GW5AST-138B is not what Primer 25K hardware is —
+and the `.cst` pin file is left at its real GW5A-25A mapping since constraint parsing
+happens during PnR, after the synthesis stage this test is probing (mismatch has no
+effect on the answer being sought here). Result pending; **do not treat item 1 as a
+settled negative result until that build reports back** — the "no further video-path
+change is expected to fix this" conclusion previously stated here is withdrawn pending
+that number.
 
-**Conclusion: this is a real negative result, not a bug to keep chasing.** Primer 25K's
-device (GW5A-25A: 56 BSRAM, 23040 LUT) is small enough that `EXT_VRAM0` is mandatory
-just to fit Phase 1's own core (no BSRAM headroom otherwise). The scandoubler
-genuinely frees BSRAM as designed, but on this specific board/toolchain combination it
-also (for the reason above) prevents CD's real, otherwise-dead logic from being swept,
-and that real logic alone overflows the LUT budget by ~2.6x. No further video-path
-change is expected to fix this — the failure is CD-vs-EXT_VRAM0's interaction with the
-optimizer, not framebuffer-vs-ADPCM BSRAM contention (the problem the scandoubler was
-built to solve, and did solve, on Console 60K). Diagnostic and isolation build files
-removed after the finding was recorded (no working deliverable to keep); this section
-is the durable record of the attempt.
+## Item 2 (Nano 20K scandoubler CD attempt): clean, unambiguous real negative result
 
-**Not attempted further this session**: forcing `CD_EN`'s stub through an explicit
-`generate`-gated removal (i.e., making the board top *itself* exclude the CD signal
-declarations when `NO_CD => 0` is combined with `EXT_VRAM0 /= 0`, rather than relying on
-the optimizer to prove it) was not tried — it would require modifying `pce_top.vhd`
-itself with a new, more invasive generic interaction, a larger change than this
-session's time budget for item 1 justified once the negative result was clear.
+Same swap as items above: `pce2hdmi` -> `pce2hdmi_sd` in `pcetang_nano20k.vhd`, no new
+PLL needed (Nano 20K's Phase 1 already runs `clk_27`/`clk_135` — the same 27 MHz-class
+pair `pce2hdmi_sd` wants — via its existing `nano20k_pll.vhd`, unchanged), `NO_CD => 0`.
+Real `gw_sh` result:
+
+```
+ERROR (RP0001) : The number(227965) of DFF in the design exceeds the resource
+limit(15915) of current device(GW2AR-LV18QN88C8/I7)
+```
+
+This fails during the **inference** stage (`Running inference ... ERROR`), before
+`Tech-Mapping` even starts — a materially earlier and more clear-cut failure point than
+Primer 25K's, with none of the sweep-timing ambiguity raised above: there is no
+"maybe the count is pre-sweep" question when the abort happens two pipeline stages
+before sweeping would occur.
+
+227965 DFF is a real reduction from the original pre-scandoubler Nano 20K CD attempt's
+249280 DFF (documented earlier in this file) — the scandoubler is doing *something*
+(likely: `pce2hdmi`'s framebuffer no longer competing for the same inference pass) —
+but the reduction is only ~9%, and the device's limit is 15915. Nano 20K needs roughly
+**14x** its real DFF budget either way. This is not a margin a video-path change can
+close: Nano 20K's Phase 1 alone already runs at 81% BSRAM, and CD's own real memory
+footprint (ADPCM_DRAM's 64KB alone, `cd.vhd:655`) needs BSRAM blocks nowhere near
+available on GW2AR-18C's 46-block total regardless of what's freed elsewhere,
+triggering the same register-fallback-cascade class of failure documented for the
+pre-scandoubler attempt. **Real, settled negative result — no further work planned on
+this specific approach for Nano 20K.** Diagnostic build files removed after the
+finding was recorded.
