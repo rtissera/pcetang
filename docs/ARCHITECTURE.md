@@ -1262,8 +1262,17 @@ to CD/syscard; `ROM_POP => '0'` (unchanged) is correct.
 
 **Direct GowinSynthesis check**: `Logic 13180/23040, BSRAM 56/56`, no `RP0006` —
 essentially unchanged from the prior section's result, as expected (a decode/address
-change, not new resource demand). Real `gw_sh` PnR re-run to confirm timing still closes
-with the changed decode mux; result to be recorded once it completes.
+change, not new resource demand).
+
+**Real `gw_sh` PnR, confirmed**: `Logic 14002/23040 (61%)`, `BSRAM 56/56 (100%)`, **0
+Setup Violated Endpoints, 0 Hold Violated Endpoints** across 28935 endpoints / 49200
+paths. `clk_pce` 42.857 MHz constraint / 44.923 MHz actual Fmax, `clk_sdram` 120.000 MHz
+/ 130.638 MHz actual — both close with real margin, essentially matching the port-B
+bridge section's numbers above (the `ROM_SZ`/address-map change is a decode/constant
+change, not new logic, so no material resource or timing shift is expected or seen).
+**Part 1 is gw_sh-confirmed real: the CPU can now correctly address a full 256KB
+syscard through the port-B bridge.** Part 2 (the SCSI target stub below) is what
+actually determines whether a real syscard *boots* — Part 1 alone does not claim that.
 
 **Known, not yet addressed**: the read bridge's fixed 4-cycle settle window (see the
 port-B bridge section above) runs on *every* `ROM_RD`, and a syscard executes directly
