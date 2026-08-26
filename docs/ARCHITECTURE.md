@@ -388,6 +388,39 @@ board with more BSRAM headroom than Console 60K's TangCore-integrated Phase 1 le
 Not attempted further this session — a real decision point for the user, not something
 to keep guessing at silently.
 
+**Why further trimming would be misleading, not just unproductive — checked directly,
+not assumed (2026-08-26).** The CDDA_FIFO/CDSUBC_FIFO/PSG sweeps aren't random dead
+code — traced to a real, single cause: `pcetang_console60k.vhd`'s `pce_top`
+instantiation ties **every** audio output to `open` (`CDDA_SL/SR => open, ADPCM_S =>
+open, PSG_SL/SR => open`, line 309 — real audio mixing was never wired in this repo,
+same silent-audio gap noted for Phase 1). With no observable sink, the synthesizer
+correctly proves PSG, CD's ADPCM/CDDA decode chain, and their FIFOs are dead and
+removes them for free. **This means the 118/119-block "doesn't fit" result already
+excludes CD's real audio pipeline entirely** — it's the resource cost of CD's
+data/SCSI path alone, not a functionally complete CD build. Wiring real audio (which
+any actual playable CD build needs eventually, same as Phase 1's video path needed
+`pce2hdmi.sv`) would put PSG/CDDA/ADPCM's BSRAM back into the count and make the fit
+problem strictly worse, not better. Trimming OSD/FIFO memory elsewhere to force a
+"fit" while audio stays dead-code-eliminated would report a real `gw_sh` pass for a
+build that isn't the real deliverable — the same category of mistake this project's
+own discipline (see Phase 1's "measure, don't deduce" note above) exists to catch.
+**Conclusion: Console 60K CD-fit is a real no, not a some-more-guessing-away no**, and
+chasing a synthesis pass here without also wiring real audio would misrepresent, not
+solve, the problem.
+
+**Primer 25K and Nano 20K are not better starting points — from numbers already real
+and measured, no rebuild needed to know this.** Primer 25K's Phase 1 (TangCore infra,
+no CD) is already `BSRAM 56/56 (100%)` (see Phase 1 section above) — zero headroom
+before CD's own cost is even added, strictly worse than Console 60K's 90% starting
+point. Nano 20K's Phase 1 is `37/46 (81%)`, only 9 blocks free, against NECTang's own
+measured bare-CD-with-zero-TangCore-infra result of `46/46 (100%)` on the identical
+chip (`docs/PORTING.md`, this repo's sibling) — CD alone already claims the entire
+budget with none of Phase 1's TangCore/HDMI/OSD overhead counted. Attempting either
+board would very likely reproduce the same "doesn't fit" result, at real `gw_sh` cost
+(~1h+ each) for a result already inferable from numbers on hand. Not attempted this
+session on that basis — a defensible non-guess, but flagged as inference rather than
+direct measurement in case a future session wants to confirm it for real.
+
 **Phase 3 (Arcade Card) is separately, structurally blocked — not something this
 session's FPGA work can unblock.** Per NECTang's own `docs/PORTING.md` ("Arcade Card
 and backup RAM" section): `AC_RAM_A` is 21 bits wanting the *entire* reachable 2MB
