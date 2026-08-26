@@ -20,6 +20,14 @@
 -- stubs -- real CD/CHD function needs BL616 firmware SCSI-target work, unstarted,
 -- separate from and unblocked by this FPGA-side result.
 --
+-- AUDIO (2026-08-26): PSG_SL/PSG_SR/CDDA_SL/CDDA_SR/ADPCM_S are wired real (previously
+-- open), into pce2hdmi_sd.sv's new audio ports -- deliberately, to correct a
+-- silent-audio measurement (docs/ARCHITECTURE.md's Phase 2 section). This is NOT a real
+-- mixer: summed only, no resampling, no CDC synchronizer across the clk_pce/clk_audio
+-- boundary (relies on the SDC's asynchronous clock group, so no real timing check runs
+-- on this path either). Real numbers with this wiring: BSRAM 110/118 (94%). Real audio
+-- correctness (mixing, resampling, CDC) is unstarted work, same status as the picture.
+--
 -- Otherwise identical to pcetang_console60k.vhd: ROM loading via iosys_bl616, real
 -- joypad input.
 --

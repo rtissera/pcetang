@@ -265,6 +265,33 @@ about congestion or utilization — the real cause here was one missing clock
 declaration, not the numbers that looked suspicious (BSRAM 100%, CLS 89%) at first
 glance.
 
+**Correction (2026-08-26, later same day): "clean" here means "silent."** Every Phase 1
+top ties `PSG_SL`/`PSG_SR => open` (`pcetang_console60k.vhd`'s own header already named
+this: "nothing wires PSG/CDDA/ADPCM outputs to anything"), so `psg` and its BSRAM get
+dead-code-swept on all three boards, same as the Phase 2 CD builds until the correction
+above. The Phase 2 audio-observability test (Console 60K CD variant, `66110ee`) measured
+this cost directly and for real: wiring `PSG_SL`/`PSG_SR` live costs **6 more BSRAM
+blocks** than the silent baseline. PSG is the same RTL regardless of board or CD — this
+number doesn't shrink on a smaller device.
+
+**Primer 25K's Phase 1 result above, `BSRAM 56/56 (100%)`, is a zero-headroom result.**
+It does not need a new `gw_sh` run to show what adding PSG's 6 blocks would do: there is
+no free block to put them in. **This "clean" Phase 1 build describes a PC Engine with
+no sound and no room to add any**, not a placeholder gap that can be closed later
+without changing something else first. This is a materially stronger claim than "not
+verified on hardware" — it's a real, already-measured capacity shortfall on the goal's
+own Phase 1 deliverable for this board.
+
+Console 60K's Phase 1 has real headroom (Phase 1 alone measures well under its device's
+118-block ceiling — see its own numbers earlier in this section) and the CD-variant
+audio result is at least a same-board, same-device data point suggesting it's fine.
+Nano 20K's Phase 1 is `37/46 (81%)`, 9 blocks free against a 6-block cost — plausible on
+the numbers, but **not directly measured**: Nano 20K's Phase 1 top uses `pce2hdmi.sv`,
+not the `pce2hdmi_sd.sv` variant PSG was wired into here, so confirming it would mean
+adding the same audio ports to the shared `pce2hdmi.sv` file all three Phase 1 tops
+depend on — a wider blast radius than the CD-only variant this fix was made in, and a
+deliberate follow-up, not a quick one. Not attempted this session.
+
 **Phase 1 (Nano 20K): real bitstream, clean on the first real attempt after one SDC
 fix, 2026-08-26.** Caught before building, not after: PCE is NTSC-native 60 Hz, and
 `nano20k_pll.vhd`'s existing HDMI clock pair (`clk_135`/`clk_27`, unused until now) was
