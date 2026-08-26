@@ -15,23 +15,36 @@
 -- was measured, not a plan. See docs/ARCHITECTURE.md's "Goal revised" section for the
 -- full investigation.
 --
--- CURRENT CHANGE (2026-08-26, NOT YET gw_sh-VERIFIED): the on-chip cart/syscard ROM
--- buffer (a dpram, one of the two BSRAM-heavy pieces above) is replaced by a bridge to
--- `sdram.sv`'s port B, which was already built but never wired to anything. Port B is
--- given a real write side (`RAM_B_WE`/`RAM_B_DI`, added to sdram.sv itself -- authorized
--- surgery per the active goal) so the same port serves both ROM loading (write, from
--- iosys_bl616) and gameplay fetch (read, from pce_top's ROM_RD/ROM_A/ROM_DO/ROM_RDY) --
--- the two never overlap in time, so no arbitration is needed, just a static mux on
--- rom_loading_r. Both directions use the same small settle-then-wait bridge FSM (see
--- rd_state/wr_state below). Design questions this rests on, both resolved before writing
--- it (see docs/ARCHITECTURE.md): the HuC6280 CPU's WAIT_N has no timeout, so an SDRAM
--- round-trip stall is architecturally safe; the bank-0/Phase-3 addressing collision is
--- handled with a provisional 1MB ROM offset (`ROM_SDRAM_BASE`), documented at its
--- declaration as not meant to survive Phase 3's eventual bank-widening work.
+-- REAL gw_sh-VERIFIED (2026-08-26): the on-chip cart/syscard ROM buffer (a dpram, one of
+-- the two BSRAM-heavy pieces above) was replaced by a bridge to `sdram.sv`'s port B,
+-- which was already built but never wired to anything. Port B was given a real write
+-- side (`RAM_B_WE`/`RAM_B_DI`, added to sdram.sv itself -- authorized surgery per the
+-- active goal) so the same port serves both ROM loading (write, from iosys_bl616) and
+-- gameplay fetch (read, from pce_top's ROM_RD/ROM_A/ROM_DO/ROM_RDY) -- the two never
+-- overlap in time, so no arbitration is needed, just a static mux on rom_loading_r. Both
+-- directions use the same small settle-then-wait bridge FSM (see rd_state/wr_state
+-- below). Full `gw_sh` PnR: `Logic 14031/23040 (61%), BSRAM 56/56 (100%)`, 0 setup/hold
+-- violations across 28953 endpoints, every clock's Fmax beats its constraint. See
+-- docs/ARCHITECTURE.md's "Goal revised" section for the full result.
 --
--- NOT YET RUN THROUGH A REAL gw_sh BUILD. This is the first attempt at the actual fix,
--- not a re-confirmation -- treat the resource/functional outcome as unknown until a real
--- PnR result is recorded here.
+-- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): `ROM_SZ` changed from `x"008"`
+-- (32K HuCard decode) to `x"040"` (256K, the real syscard3.pce size) so the CPU actually
+-- addresses the full syscard rather than a 32KB mirror of it. `ROM_SDRAM_BASE`/
+-- `ROM_SDRAM_ABITS` moved to a real 3-way split of bank 0's 2MB window (VRAM0 at
+-- 0x000000, a reserved-but-not-yet-wired CD-RAM slice at 0x010000, ROM at 0x050000 --
+-- see the constants' own comments) instead of the earlier provisional 1MB-ROM layout,
+-- since a 256KB ROM doesn't need anywhere near 1MB and CD-RAM (pce_top's `CD_RAM_A`
+-- window, 256KB) needs its own real space before it can be wired up.
+--
+-- This is a ROM-path-only fix. `CD_EN` is still `'0'` and `CD_RAM_*`/`CD_STAT`/`CD_COMM`
+-- are still open/stubbed -- with `CD_EN` low, `pce_top.vhd`'s CD subsystem is inert, and
+-- syscard code that issues any SCSI command (which real syscard boot code does almost
+-- immediately, per its own BIOS behavior) will get no response, since nothing drives
+-- `CD_STAT_GET`. Whether that hangs the CPU or falls through depends on the syscard's own
+-- polling code, not this RTL -- not yet determined. A real SCSI target stub (minimum:
+-- TEST UNIT READY + REQUEST SENSE, including the DATA-IN FIFO path for sense bytes) is
+-- separately scoped, not started -- see docs/ARCHITECTURE.md's "Real syscard boot"
+-- section for the investigation and why it isn't a small add-on.
 --
 -- HDMI/UART pins reused directly from nand2mario's own nestang primer25k.cst (this
 -- board, his own working config) rather than adapted from a different board/protocol
@@ -232,16 +245,26 @@ architecture rtl of pcetang_primer25k_cd is
    -- "Goal revised" section for the measured root cause). NOT YET gw_sh-verified -- see
    -- this file's header.
    --
-   -- Provisional base offset into bank 0's 2MB SDRAM window: VRAM0 (port A) needs at most
-   -- 128KB (PCE VRAM0 is 64K x 16-bit), so 1MB of headroom before ROM starts is generous
-   -- margin without needing to track VRAM0's exact footprint here. ROM gets the remaining
-   -- 1MB (up to 8Mbit), enough for a real syscard (typically 128-256KB) with room to
-   -- spare, but this is a real ceiling -- SF2-class oversized HuCard mappers won't fit.
-   -- Revisit when sdram.sv's bank-0 addressing itself gets widened for Phase 3 (Arcade
-   -- Card) -- that work supersedes this layout anyway, so this constant is not meant to be
-   -- permanent.
-   constant ROM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#100000#, 21);
-   constant ROM_SDRAM_ABITS : integer := 20;  -- 1MB of address space for ROM
+   -- Provisional 3-way split of bank 0's 2MB SDRAM window (see docs/ARCHITECTURE.md's
+   -- "Real syscard boot" section). Revisit when sdram.sv's bank-0 addressing itself gets
+   -- widened for Phase 3 (Arcade Card) -- that work supersedes this layout anyway, so
+   -- none of these constants are meant to be permanent.
+   --   0x000000-0x00FFFF (64KB):  VRAM0 (port A). Real footprint, not a guess -- traced
+   --                              to vram0_cache.vhd's own seq_addr (15-bit word address,
+   --                              15+1=16 address bits = 64KB), matching real PCE VRAM0
+   --                              (32K x 16-bit).
+   --   0x010000-0x04FFFF (256KB): CD-RAM (pce_top's CD_RAM_A window, "1000"&CPU_A(17:0)).
+   --                              Reserved here, not yet wired -- CD_RAM_* is still open/
+   --                              stubbed (CD_EN => '0'). Real backing is a separate,
+   --                              larger task (see ARCHITECTURE.md); this constant exists
+   --                              so ROM's own placement below doesn't collide with it
+   --                              later.
+   --   0x050000-0x08FFFF (256KB): cart/syscard ROM (this constant, used below). A real
+   --                              syscard (syscard3.pce) is exactly 256KB -- ROM_SZ=>x"040"
+   --                              below decodes exactly this size, no slack needed.
+   constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);  -- reserved, not yet wired
+   constant ROM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#050000#, 21);
+   constant ROM_SDRAM_ABITS : integer := 18;  -- 256KB, exact real syscard size
 
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
@@ -502,7 +525,7 @@ begin
       ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
       ROM_DO    => rom_do_i,
-      ROM_SZ    => x"008",
+      ROM_SZ    => x"040",  -- 256K real syscard decode (was x"008"/32K HuCard, see header)
       ROM_POP   => '0',
       ROM_CLKEN => open,
 
