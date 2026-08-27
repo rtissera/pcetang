@@ -7,7 +7,7 @@
 // non-register" -- same bug class as this project's `arcade.sv` fork (Gowin's
 // SystemVerilog parser treats an implicit/`wire`-declared signal as a net, not `logic`).
 // Fixed by declaring both explicitly `logic`, the standard SystemVerilog fix for this
-// exact error class. No behavioral change -- see docs/PORTING.md.
+// exact error class. No behavioral change -- see NECTang's docs/PORTING.md.
 
 // Code layout:
 // {clock bit, 32'bcode flags, 32'b address, 32'b compare, 32'b replace}

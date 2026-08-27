@@ -32,7 +32,7 @@
 -- instantiates cd.vhd unconditionally, not inside a generate) compiles at all. Before
 -- CD_EN is ever driven high in a real build, verify against cd.vhd's/SCSI.vhd's actual
 -- pop cadence whether the one-cycle bubble matters -- a GHDL testbench, not inference,
--- per this project's own working style (see docs/PORTING.md).
+-- per this project's own working style (see NECTang's docs/PORTING.md).
 
 library ieee;
 use ieee.std_logic_1164.all;

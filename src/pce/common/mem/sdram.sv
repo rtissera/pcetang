@@ -21,7 +21,7 @@
 // src/common/mem/sdram32.sv (the Nano 20K variant of this same donor) -- see that file's
 // header for the fuller rationale, not repeated here. Port A carries VRAM0 (needs writes
 // and real wait-state feedback -- the VDC has zero tolerance for a late response, see
-// docs/PORTING.md's "VRAM0 external memory" design consult). Port B carries cartridge ROM
+// NECTang's docs/PORTING.md's "VRAM0 external memory" design consult). Port B carries cartridge ROM
 // (latency-tolerant via pce_top.vhd's existing ROM_RDY -> WAIT_N path).
 // Arbitration priority swapped so A beats B, and RAM_B_WAIT added (the original has no
 // completion signal on port B at all).

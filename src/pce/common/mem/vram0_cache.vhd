@@ -8,7 +8,7 @@
 -- on Nano 20K; both were widened to 16 bits alongside this file, see "port A width" below.
 --
 -- Why this exists: GW2AR-18C's on-chip BSRAM cannot hold VRAM0 alongside the rest of the
--- engine (docs/PORTING.md, "Nano 20K's ceiling"). VRAM0 moves to external SDRAM via port
+-- engine (NECTang's docs/PORTING.md, "Nano 20K's ceiling"). VRAM0 moves to external SDRAM via port
 -- A of whichever controller the board has instead. The VDC (huc6270.vhd) has no
 -- wait-state input anywhere and real hardware's video timing cannot stall -- confirmed by reading huc6260.vhd: H_CNT/
 -- V_CNT run unconditionally off raw CLK, not gated by DCK_CE, so stalling the VDC's
@@ -215,7 +215,7 @@ entity vram0_cache is
       ram_a_wait : in  std_logic;
 
       -- Instrumentation, not function: both pulse for one `clock` cycle on the event they
-      -- name. Wire to spare LEDs/a counter on a real bring-up; see docs/PORTING.md.
+      -- name. Wire to spare LEDs/a counter on a real bring-up; see NECTang's docs/PORTING.md.
       dbg_deadline_miss : out std_logic;   -- a refill did not complete before the next DCK_CE
       dbg_fifo_overflow : out std_logic    -- the write FIFO was full when a new write arrived
    );
@@ -624,7 +624,8 @@ begin
    -- itself is never lost long-term (write_fifo captures it unconditionally off wren_a,
    -- independent of this signal, so it still reaches sdram32), but a read of that address
    -- before the FIFO drains and something re-triggers a refill for it would see stale
-   -- data -- a real, if narrow, gap, added to sim/tb_vram0_cache.vhd's case 5.
+   -- data -- a real, if narrow, gap, added as case 5 to NECTang's sim/tb_vram0_cache.vhd
+   -- (that sibling project's testbench, not present in this repo).
    -- Deferring on any wren_a is safe and self-correcting the same way a same-address
    -- collision already was: the sequencer's SEQ_DONE -> SEQ_IDLE transition and
    -- refill_pending's clear both happen unconditionally regardless of whether the install

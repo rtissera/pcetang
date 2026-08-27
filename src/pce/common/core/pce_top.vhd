@@ -2,7 +2,7 @@
 
 -- FORKED from upstream/tg16-mister/rtl/pce_top.vhd. One change: a new EXT_VRAM0 generic
 -- (default 0, byte-identical to the donor) that, when nonzero, replaces VRAM0's on-chip
--- dpram with src/common/mem/vram0_cache.vhd -- Nano 20K only, see docs/PORTING.md's
+-- dpram with src/common/mem/vram0_cache.vhd -- Nano 20K only, see NECTang's docs/PORTING.md's
 -- "VRAM0 external memory" section for why (GW2AR-18C can't fit VRAM0 in on-chip BSRAM
 -- alongside the rest of the engine) and the design that module implements. Console 60K/
 -- Primer 25K leave EXT_VRAM0 at its default and get the exact donor behaviour, unchanged.
@@ -38,7 +38,7 @@ entity pce_top is
 		-- incompatible with this board regardless of VRAM0, confirmed by a real gw_sh
 		-- run with EXT_VRAM0=1 and CD still present: fits (barely, 46/46) but drags
 		-- MCODE and vram0_cache's own metadata into logic fallback too and leaves 1545
-		-- setup violations. See docs/PORTING.md's "VRAM0 external memory" section.
+		-- setup violations. See NECTang's docs/PORTING.md's "VRAM0 external memory" section.
 		NO_CD : integer := 0
 	);
 	port(
@@ -181,7 +181,7 @@ signal CPU_ROM_SEL_N	: std_logic;
 
 -- RAM signals
 -- RAM_A's "when SGX='1' else" mux was tested as the Gowin BSRAM inference failure
--- (ERROR (IF0008), full engine only) but is NOT the cause -- see docs/PORTING.md's SGX
+-- (ERROR (IF0008), full engine only) but is NOT the cause -- see NECTang's docs/PORTING.md's SGX
 -- section. Reverted to this original form because SGX doesn't fit Nano 20K on Logic
 -- capacity regardless (real, measured, ERROR (RP0006)), so chasing a production fix
 -- for the inference bug is moot for now; this form correctly preserves 8K mirroring

@@ -9,10 +9,12 @@
 -- 1. SPR_LINE_BUF0/1's port B originally read the current pixel for display AND wrote a
 -- same-cycle, same-address clear on the SAME synchronous BRAM port. GW5A's BSRAM only
 -- supports write-through (WRITE_MODE 2'b01), not read-old-data (2'b10, ERROR (PA2122)) --
--- see NECTang.md and docs/PORTING.md. Under write-through this coincidence corrupts the
--- pixel data (confirmed by sim/tb_spr_line_buf.vhd: captured(0..9) all read back zero).
+-- see NECTang's NECTang.md and docs/PORTING.md (NECTang is this project's sibling
+-- standalone-board port, a separate checkout, not vendored into this repo). Under
+-- write-through this coincidence corrupts the pixel data (confirmed by NECTang's
+-- sim/tb_spr_line_buf.vhd: captured(0..9) all read back zero).
 --
--- Fix (validated by sim/tb_spr_line_buf2.vhd before being applied here): retime the
+-- Fix (validated by NECTang's sim/tb_spr_line_buf2.vhd before being applied here): retime the
 -- clear-write to fire one raw CLK cycle AFTER the read of that same address, instead of
 -- coincident with it. Safe because DCK_CE (this chip's own pixel-clock enable, from
 -- huc6260.vhd's CLKEN_CNT divider) only pulses once every 4-8 raw CLK cycles -- ample
@@ -41,7 +43,7 @@
 -- buffer's addresses can be statically proven never to coincide. Every OTHER memory in
 -- this design (PRAM/RAM/VRAM0/voltab/palette) was isolated and confirmed clean on GW5A.
 -- Both fixes force WRITE_MODE to 2'b01 explicitly via a direct Gowin primitive
--- instantiation instead of relying on inference -- see docs/PORTING.md's "ROOT CAUSE
+-- instantiation instead of relying on inference -- see NECTang's docs/PORTING.md's "ROOT CAUSE
 -- FOUND" section, and re-check for a third instance if GW5A place-and-route ever reports
 -- this error again after these two fixes (don't assume there can only be two).
 --
@@ -1108,7 +1110,7 @@ begin
 	
 	-- GOWIN FIX: the delayed clear-write pulse/address (registered every raw CLK cycle,
 	-- unconditionally -- NOT gated by DCK_CE, so it lands exactly one raw cycle after the
-	-- read it corresponds to). See this file's header comment and docs/PORTING.md.
+	-- read it corresponds to). See this file's header comment and NECTang's docs/PORTING.md.
 	process (CLK, RST_N)
 	begin
 		if RST_N = '0' then
@@ -1133,7 +1135,7 @@ begin
 	-- primitive documentation states same-address cross-port read+write isn't supported,
 	-- and this buffer's addresses can't be statically proven never to coincide. Forces
 	-- the write mode directly via dpram9_dpb_wm01 instead of relying on inference -- see
-	-- that file's header and docs/PORTING.md's "ROOT CAUSE FOUND" section.
+	-- that file's header and NECTang's docs/PORTING.md's "ROOT CAUSE FOUND" section.
 	SPR_LINE_BUF0 : entity work.dpram9_dpb_wm01
 	port map(
 		clock		=> CLK,

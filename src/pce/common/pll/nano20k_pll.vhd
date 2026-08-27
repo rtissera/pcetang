@@ -6,7 +6,7 @@
 -- boards (../TangNano60K/src/boards/tang_nano20k/nano20k_pll.vhd), same author, same
 -- GPL-3.0 -- see THIRD_PARTY_LICENSES.md. The frequencies below are PCE-specific and
 -- replace that file's Z80-core-specific 140.4/28.08/14.04/7.02/70 MHz chain entirely --
--- this core doesn't need any of those rates. See docs/PORTING.md's Clocking section for
+-- this core doesn't need any of those rates. See NECTang's docs/PORTING.md's Clocking section for
 -- why: HuC6280/huc6260's divide-by-N clock chains need a real ~42.9545 MHz master clock
 -- (12x the NTSC colorburst frequency), not an arbitrary fast clock tolerant of any input
 -- rate the way an earlier (wrong) assumption in that doc once claimed.
@@ -29,7 +29,7 @@
 -- (clk_135_i) on the way to the 27 MHz pixel clock; that same net is exposed here for
 -- src/common/mem/sdram32.sv, the ZX Next port's on-package-SDRAM controller for this
 -- exact board (../TangNano60K/src/common/mem/sdram32.sv, hardware-verified there at
--- 140 MHz -- see docs/PORTING.md's "Nano 20K external memory" section for why 135 was
+-- 140 MHz -- see NECTang's docs/PORTING.md's "Nano 20K external memory" section for why 135 was
 -- chosen over adding a third PLL, which GW2AR-18C does not have).
 
 library ieee;

@@ -8,7 +8,7 @@
 -- address (CLR_A) with q_b actively read -- the same two-independently-addressed-writers
 -- shape that hit ERROR (PA2122) for SPR_LINE_BUF0/1, confirmed to hit it here too once
 -- SPR_LINE_BUF0/1's own instance was no longer occupying the position Gowin's error
--- reports first (see docs/PORTING.md's "ROOT CAUSE FOUND" section).
+-- reports first (see NECTang's docs/PORTING.md's "ROOT CAUSE FOUND" section).
 --
 -- Unlike the 9-bit sprite buffers (needing DPX9B, the 18Kbit variant), this shape's
 -- 16-bit width fits DPB (the 16Kbit variant) natively -- UG285 Table 2-2's "1K x 16" row:

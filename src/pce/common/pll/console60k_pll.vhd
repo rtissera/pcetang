@@ -7,7 +7,7 @@
 -- same GPL-3.0 -- see THIRD_PARTY_LICENSES.md. That file's actual generic VALUES are
 -- Z80-core-specific (28.000 MHz exactly, from a 1400 MHz VCO) and NOT reused here -- this
 -- is a fresh, independent PLLA instance for PCE's own ~42.9545 MHz core master clock
--- requirement (see docs/PORTING.md's Clocking section), not a shared/retuned instance.
+-- requirement (see NECTang's docs/PORTING.md's Clocking section), not a shared/retuned instance.
 --
 -- PLLA formula, reverse-derived from that proven file (not from Gowin documentation this
 -- session had access to -- confirm independently if this doesn't match a datasheet):
@@ -26,7 +26,7 @@
 -- the range the sibling file already proved valid (1400 MHz), so lower risk than it looks.
 --
 -- No HDMI stage in this file -- this PLL exists only to get a first core resource/timing
--- data point (docs/PORTING.md), same scope as nano20k_core_test.vhd's Nano 20K build.
+-- data point (NECTang's docs/PORTING.md), same scope as nano20k_core_test.vhd's Nano 20K build.
 -- Add an HDMI PLLA (a second instance, or a second tap on this one) when video output
 -- work starts.
 --

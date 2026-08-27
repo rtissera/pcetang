@@ -4,13 +4,16 @@
 -- Altera altsyncram to Gowin GW2AR/GW5A BSRAM inference.
 --
 -- Entity names and port/generic names match TurboGrafx16_MiSTer's rtl/dpram.vhd EXACTLY
--- (see docs/PORTING.md's memory-template table) so donor .vhd files instantiate these
--- unmodified. This is a different signature convention from the ZX Spectrum Next port's
--- own src/common/mem/bram_gowin.vhd (address_a/data_a vs that port's differently-named
--- ports) -- only the underlying technique is shared, not the file.
+-- (see NECTang's docs/PORTING.md memory-template table -- NECTang is this project's
+-- sibling standalone-board port, a separate checkout, not vendored into this repo) so
+-- donor .vhd files instantiate these unmodified. This is a different signature convention
+-- from the ZX Spectrum Next port's own src/common/mem/bram_gowin.vhd (address_a/data_a vs
+-- that port's differently-named ports) -- only the underlying technique is shared, not
+-- the file.
 --
--- Technique proven on the ZX Next port (see ../../../NECTang.md and that repo's
--- docs/PORTING.md): a SHARED VARIABLE with blocking (:=) writes, not a signal with
+-- Technique proven on the ZX Next port (a separate project this codebase's sdram.sv/
+-- bram_gowin.vhd convention derives from, not vendored here -- see that project's own
+-- docs, not a path in this repo): a SHARED VARIABLE with blocking (:=) writes, not a signal with
 -- non-blocking (<=) writes. Gowin's block-RAM inference for a signal-based
 -- write-then-read template maps to WRITE_MODE 2'b10 (read-old-data-during-write), which
 -- GW5A's BSRAM does not support (ERROR (PA2122)). The shared-variable/blocking-write form
@@ -20,7 +23,7 @@
 -- read_during_write_mode_port_a/b => "NEW_DATA_NO_NBE_READ" on its altsyncram instances --
 -- i.e. the donor already assumes new-data/write-through on ordinary same-port
 -- coincident read+write. That assumption does NOT necessarily hold for every consumer;
--- see docs/PORTING.md's writeup on huc6270.vhd's SPR_LINE_BUF0/1 before assuming this
+-- see NECTang's docs/PORTING.md's writeup on huc6270.vhd's SPR_LINE_BUF0/1 before assuming this
 -- wrapper is a safe drop-in for the sprite line buffers specifically -- that one needs a
 -- simulation-verified answer, not an inferred one.
 --
@@ -69,7 +72,7 @@ architecture rtl of dpram is
 
 	-- mem_init_file selects a mif2vhd.py-generated package by the exact string the donor
 	-- instantiates with (rtl/HUC6280/psg.vhd's "HUC6280/voltab.mif", rtl/huc6260.vhd's
-	-- "huc6260_palette_init.mif") -- see docs/PORTING.md's ".mif files" section. Anything
+	-- "huc6260_palette_init.mif") -- see NECTang's docs/PORTING.md's ".mif files" section. Anything
 	-- else zero-inits, same as before either conversion existed.
 	impure function init_mem return mem_t is
 		variable m : mem_t := (others => (others => '0'));
@@ -129,7 +132,7 @@ end rtl;
 -- `dpram_difclk` entity. UNVERIFIED on GW5A this session -- the ZX Next port never
 -- needed a genuinely dual-clock BSRAM (its dpram is single-clock like the plain `dpram`
 -- above). Two clock domains into one shared-variable array is exactly the shape a GHDL
--- testbench should check before trusting on real hardware -- see docs/PORTING.md.
+-- testbench should check before trusting on real hardware -- see NECTang's docs/PORTING.md.
 --------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;
@@ -213,7 +216,7 @@ end rtl;
 -- Single port. Matches rtl/dpram.vhd's `spram` entity. No confirmed consumer found in
 -- rtl/*.vhd this session (grep outside dpram.vhd itself came up empty) -- included for
 -- completeness/signature-matching; verify against the full fetched tree before relying
--- on it, per docs/PORTING.md.
+-- on it, per NECTang's docs/PORTING.md.
 --------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;

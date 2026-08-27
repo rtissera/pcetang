@@ -22,7 +22,7 @@
 // assignment to a non-register" -- Gowin's SystemVerilog parser treats an implicit or
 // `wire`-declared signal as a net, not `logic`, unlike some other tools' SV defaults.
 // Fixed by declaring all three explicitly `logic`, the standard SystemVerilog fix for
-// this exact error class. No behavioral change -- see docs/PORTING.md.
+// this exact error class. No behavioral change -- see NECTang's docs/PORTING.md.
 //
 
 module ARCADE_CARD

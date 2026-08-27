@@ -33,13 +33,13 @@
 //  ../TangNano60K/src/common/mem/sdram32.sv, same author, same board -- see
 //  THIRD_PARTY_LICENSES.md. Clocked from clk_sdram (135 MHz, tapped off the HDMI rPLL
 //  rather than the 140.4 MHz this file was tuned against) in this port; see
-//  src/common/pll/nano20k_pll.vhd and docs/PORTING.md for why, and re-check SAMPLE_SKEW
+//  src/common/pll/nano20k_pll.vhd and NECTang's docs/PORTING.md for why, and re-check SAMPLE_SKEW
 //  against a real timing report before trusting it at that different rate.
 //
 //  PCE PORT: no longer byte-identical to the ZX Next original. Two changes, both marked
 //  "PCE PORT" at the site:
 //    - Port A carries VRAM0 here (needs writes and real wait-state feedback -- the VDC has
-//      no tolerance for a late response, see docs/PORTING.md's "Nano 20K external memory"
+//      no tolerance for a late response, see NECTang's docs/PORTING.md's "Nano 20K external memory"
 //      design consult). Port B carries cartridge ROM (read-only, already latency-tolerant
 //      via pce_top.vhd's existing ROM_RDY -> WAIT_N path). Arbitration priority swapped so
 //      A (VRAM, zero tolerance) beats B (ROM, tolerant) -- the ZX Next original gave B

@@ -17,7 +17,7 @@
 -- operations to the same address at the same time is not allowed." Confirmed present
 -- even with the completely unmodified upstream donor wiring (no mux, no retiming) --
 -- this predates and is independent of this port's own sprite-buffer fix. See
--- docs/PORTING.md's "ROOT CAUSE FOUND" section for the full isolation trail.
+-- NECTang's docs/PORTING.md's "ROOT CAUSE FOUND" section for the full isolation trail.
 --
 -- Template: this file's generic/port structure is transcribed directly from UG285
 -- Section 3.1's official VHDL instantiation example (page 16-17, "Vhdl Instantiation"),
