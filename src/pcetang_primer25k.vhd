@@ -94,7 +94,13 @@ architecture rtl of pcetang_primer25k is
          RAM_B_WE   : in    std_logic;
          RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
-         RAM_B_WAIT : out   std_logic
+         RAM_B_WAIT : out   std_logic;
+         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_REQ  : in    std_logic;
+         RAM_C_RD_n : in    std_logic;
+         RAM_C_DI   : in    std_logic_vector(7 downto 0);
+         RAM_C_DO   : out   std_logic_vector(7 downto 0);
+         RAM_C_WAIT : out   std_logic
       );
    end component;
 
@@ -272,7 +278,13 @@ begin
       RAM_B_WE   => '0',
       RAM_B_DI   => (others => '0'),
       RAM_B_DO   => open,
-      RAM_B_WAIT => ram_b_wait_nc
+      RAM_B_WAIT => ram_b_wait_nc,
+      RAM_C_ADDR => (others => '0'),
+      RAM_C_REQ  => '0',
+      RAM_C_RD_n => '1',
+      RAM_C_DI   => (others => '0'),
+      RAM_C_DO   => open,
+      RAM_C_WAIT => open
    );
 
    joy1_ds2 <= (others => '0');
