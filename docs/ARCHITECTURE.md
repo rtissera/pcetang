@@ -1631,6 +1631,40 @@ Console 60K's CD build re-confirmed `GowinSynthesis`-clean after both the offloa
 the shim; full `gw_sh` PnR not re-run there this session (the shim is a bit-identical
 replacement of the prior design, so regression risk is low, but end-to-end numbers
 are not re-measured). Primer 25K Phase 1 (non-CD) re-confirmed `GowinSynthesis`-clean.
+
+**Update (2026-08-27): audio wired for real (P2, per an independent Fable-model
+audit).** Every margin number for this build above excluded audio entirely --
+`PSG_SL`/`PSG_SR`/`CDDA_SL`/`CDDA_SR`/`ADPCM_S` were tied `open`, silently
+dead-code-sweeping `pce_top`'s PSG/CD-audio logic and its BSRAM, same as every other
+board except `pcetang_console60k_cd.vhd`. Fixed with the exact same pattern already
+proven there: wired into `pce2hdmi_sd`'s already-existing (previously zero-tied)
+`psg_sl`/`psg_sr`/`cdda_sl`/`cdda_sr`/`adpcm_s` ports -- this build already used
+`pce2hdmi_sd.sv`, so no shared-file change was needed, just the port wiring itself.
+Same caveats as Console 60K's own audio note: summed only, no resampling, no CDC
+synchronizer across the `clk_pce`/`clk_audio` boundary -- audio correctness itself is
+unstarted work, this only makes it non-silent.
+
+Real `gw_sh` PnR (`impl/pnr/pcetang_primer25k_cd.fs`, via `gowin-edu` -- see
+[[pcetang-gwsh-toolchain]] for a real, unrelated `gowin-pro` `gw_sh` breakage hit and
+worked around along the way):
+
+```
+Logic     13069/23040  (57%)
+Register  6824/23280   (30%)
+CLS       9408/11520   (82%)
+BSRAM     35/56        (63%)  -- SP 1, SDPB 4, SDPX9B 1, DPB 7, DPX9B 7, pROM 6
+DSP       1/28         (4%)
+clk_pce:    42.857 MHz constraint, 43.837 MHz actual Fmax (+2.29%)
+clk_sdram:  120.000 MHz constraint, 120.905 MHz actual Fmax (+0.75%)
+clk_pixel:  27.000 MHz constraint, 82.862 MHz actual Fmax
+Setup/Hold TNS: 0 ns on every clock (0 violations)
+```
+
+**BSRAM went from `29/56 (52%)` to `35/56 (63%)` -- exactly +6 blocks**, matching the
+PSG-alone cost Console 60K's own audio-observability test measured directly
+(`110 - 104 = 6`, cited earlier in this section) almost exactly, on a completely
+different device family. Both clocks still close with real, positive margin, 0
+violations. 21 blocks of headroom remain against the 56-block ceiling.
 Console 60K Phase 1 and Nano 20K are unaffected (`NO_CD=>1`, `cd.vhd` never
 elaborated) and were not re-run.
 

@@ -65,6 +65,13 @@
 -- no simulation testbench for this responder exists. What IS real: `gw_sh` will confirm
 -- whether this closes timing and fits, which is the first checkable fact about it.
 --
+-- AUDIO (2026-08-27): PSG_SL/PSG_SR/CDDA_SL/CDDA_SR/ADPCM_S wired real (previously
+-- open) into pce2hdmi_sd's already-existing psg_sl/psg_sr/cdda_sl/cdda_sr/adpcm_s
+-- ports -- same pattern as pcetang_console60k_cd.vhd (that file's header has the real
+-- caveats: summed only, no resampling, no CDC synchronizer across clk_pce/clk_audio,
+-- audio correctness itself unstarted). Every prior margin number in this file's
+-- header predates this and excluded PSG's real measured cost.
+--
 -- HDMI/UART pins reused directly from nand2mario's own nestang primer25k.cst (this
 -- board, his own working config) rather than adapted from a different board/protocol
 -- like Console 60K's guess -- higher confidence, still not hardware-verified here.
@@ -450,6 +457,8 @@ architecture rtl of pcetang_primer25k_cd is
 
    signal joy_out : std_logic_vector(1 downto 0);
    signal joy_in  : std_logic_vector(3 downto 0);
+
+   signal psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : signed(15 downto 0);
 
    signal brm_a  : std_logic_vector(10 downto 0);
    signal brm_di : std_logic_vector(7 downto 0);
@@ -859,7 +868,7 @@ begin
       CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => '0',
       CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => '0',
 
-      CDDA_SL => open, CDDA_SR => open, ADPCM_S => open, PSG_SL => open, PSG_SR => open,
+      CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
       BG_EN => '1', SPR_EN => '1', GRID_EN => (others => '0'), CPU_PAUSE_EN => '0',
 
@@ -882,8 +891,9 @@ begin
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
       clk_pixel => clk_pixel, clk_5x_pixel => clk_5x_pixel,
-      psg_sl => (others => '0'), psg_sr => (others => '0'),
-      cdda_sl => (others => '0'), cdda_sr => (others => '0'), adpcm_s => (others => '0'),
+      psg_sl => std_logic_vector(psg_sl), psg_sr => std_logic_vector(psg_sr),
+      cdda_sl => std_logic_vector(cdda_sl), cdda_sr => std_logic_vector(cdda_sr),
+      adpcm_s => std_logic_vector(adpcm_s),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );
