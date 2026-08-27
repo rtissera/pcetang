@@ -1979,3 +1979,98 @@ the worst-case burst (all-cold sprites on one scanline still needs the real fix
 discussed above), but it should substantially reduce how often real gameplay even
 approaches that worst case -- not measured/quantified this session, a real next step
 if a game-content-driven measurement is ever wanted.
+
+## Bug 3 diagnosed for real (2026-08-27): confirmed exactly as originally claimed, no cheap fix exists, one separate real bug found and fixed instead
+
+User asked to fix Bug 3 next (miss detection allegedly "one dot late"). A static
+re-read of the current RTL (post Bug 1/2/width fixes) produced a DIFFERENT, more
+benign timing picture than the original claim -- disagreeing with a real, previously
+GHDL-verified finding is exactly the situation this project's own standing practice
+says to re-verify via simulation, not resolve by more reading. Dispatched a
+diagnosis-only agent (not authorized to edit the file) to settle it with a fresh GHDL
+sim before writing any fix.
+
+**Verdict: the original claim was exactly right; the static re-read's error was a
+wrong assumption about `dck_ce`/`address_a` phase.** Confirmed by reading
+`huc6270.vhd` directly: `DOT_CNT` is registered (advances the cycle AFTER `DCK_CE`),
+`SLOT`/`RAM_A` are combinational from `DOT_CNT`, and `RAM_WE <= DCK_CE`. Net effect:
+`address_a` becomes the NEW dot's target the cycle AFTER `dck_ce` pulses, not the same
+cycle. `req_valid_d` (`dck_ce` delayed by exactly one register stage) therefore always
+checks `hit` against `req_addr_d` while it still holds the ENDING dot's address, not
+the new one -- structurally, at every dot, regardless of SDRAM speed. Real GHDL
+measurement: miss-check lands 93.3ns (exactly one whole dot) after the dot that needed
+the data already ended -- reproducing the original claim's number exactly, dwell-sweep
+confirmed at DWELL = 4/6/8/9/12/16/20 (every case fails identically).
+
+**Real severity, measured for the first time**: even a 12-line working set with ZERO
+cache conflicts (the single best case this cache can ever see -- every miss is a
+first-touch compulsory miss, no eviction, no thrashing) returns **wrong data on
+17-34% of read dots** over 16 passes. `dbg_deadline_miss` fires at a comparable rate.
+Neither is wired to anything observable on any board (`open` in `pce_top.vhd`'s
+`gen_vram0_ext`) -- this would be silently, routinely wrong on real hardware today.
+This number is independent of, and does not overlap with, the earlier "cache never
+installs" Bug 2 -- Bug 2 was about whether a miss ever resolves at all; Bug 3 is about
+whether the FIRST access after any miss (resolved or not) ever arrives in time.
+
+**No cheap fix exists -- tried the obvious one, it makes things worse.** The
+"obvious" fix (delay the check one more register stage so it aligns with the correct,
+new dot) does land the CHECK on time -- but `huc6270.vhd`'s `RAM_WE` only pulses on a
+dwell's LAST cycle, so a check running earlier in the dwell cannot yet distinguish a
+read dot from a write dot. Real GHDL measurement: this alone is a NET REGRESSION in 5
+of 6 realistic dwell/refresh configurations (e.g. dwell=4/wait=3: 53 wrong dots at
+HEAD vs 76 with the "fix"; read_reqs 30 vs 42) -- spurious refill launches on
+what turn out to be write dots contend with genuine misses for `refill_pending`'s
+single-entry queue (force-cleared every `dck_ce`, so more launches do not mean more
+completions, just more genuine misses silently dropped). `dbg_deadline_miss` roughly
+doubles. Even WITH the phase corrected, the real minimum round trip measured is ~13
+cycles (BRAM read, `refill_pending` set, `SEQ_IDLE`->`SEQ_REQ`, REQ on bus, WAIT rise,
+WAIT high, WAIT fall, `SEQ_DONE`+install, `way_q_a` updated, `q_a_i` loaded) against 8
+cycles even at the most generous real dot clock -- and worse with a refresh collision
+(`sdram.sv` checks refresh first, preempting port A). This is THE SAME hard
+architectural gap as the port-A throughput problem above, not a separate, smaller
+bug -- correcting the phase is a real prerequisite for a future prefetch redesign, but
+only as part of that redesign, never as a standalone fix. Not applied.
+
+**Real, separate, genuinely free bug found instead -- FIXED, `gw_sh`-confirmed on all
+3 boards**: `q_a_i`'s hold during a refill-install's one-cycle steal of port A was one
+cycle too short. `way_k`'s dpram has 1-cycle read latency: the install diverts
+`way_addr_a` to `seq_idx` during cycle N (`refill_can_install='1'`), but `way_q_a`
+doesn't actually reflect that diverted read until cycle N+1 -- by which point
+`refill_can_install` has already dropped back to '0' (a one-cycle pulse), so the OLD
+code's `elsif`/`else` branch at N+1 loaded `q_a_i` believing it was a fresh read of
+`req_addr_d`, when it was still the stolen cycle's `seq_idx` read -- **another cache
+line's data reaching the VDC**, confirmed via GHDL at the exact predicted +1 offset
+across multiple dwell/refresh-collision configurations. Fixed with one new
+register (`install_d`, a 1-cycle-delayed copy of `refill_can_install`) extending the
+hold to 2 cycles. Verified safe: doesn't touch any of the 3 documented invariants,
+doesn't suppress the write-forward branch (`refill_can_install` already implies `not
+wren_a`), identical behavior to HEAD in 4 of 6 dense-traffic configs and strictly
+better in the other 2 (dwell=6/wait=3: 33 vs 37 wrong dots; dwell=6/wait=4: 38 vs 48),
+zero cost in read_reqs or deadline_miss anywhere.
+
+**Real `gw_sh` PnR, all three boards, still 0 setup/hold violations, BSRAM unchanged
+everywhere:**
+
+| Board | Logic (before -> after) | clk_sdram (before -> after) | clk_pce (before -> after) |
+|---|---|---|---|
+| Primer 25K + CD | 10677 -> 10711 (+34) | 139.701 -> 128.653 MHz (+16.4% -> +7.2%) | 46.814 -> 48.927 MHz (+9.24% -> +14.2%) |
+| Primer 25K Phase 1 (no CD) | 12581 -> 12516 (-65) | 154.589 -> 179.918 MHz (+28.8% -> +49.9%) | 43.027 -> 43.166 MHz (+0.40% -> +0.72%) |
+| Nano 20K | 8032 -> 8079 (+47) | 161.321 -> 151.013 MHz (+19.5% -> +11.9%) | 43.880 -> 43.318 MHz (**+1.57% -> +0.27%**) |
+
+**Real, named trend, not glossed over**: Nano 20K's `clk_pce` margin has now eroded
+across three consecutive fixes this session -- +5.7% (post-width-fix) -> +1.57%
+(post-Bug-2-fix) -> **+0.27%** (post-Bug-3-Fix-B) -- each individually a real, correct,
+necessary fix, but the cumulative logic growth is pushing this board's tightest clock
+close to the same razor-thin territory Primer 25K Phase 1 has been flagged at since
+the width fix. Both are still 0-violation PASSES at this writing, not failures --
+but Nano 20K specifically has now crossed from "healthy margin" to "same risk class
+as Phase 1." Any further logic growth in this file's `clk_pce`-domain path should
+budget for this -- worth a real look (a timing-driven re-run, or accepting the risk
+explicitly) before adding anything else here.
+
+**Not implemented, not decided**: the underlying deadline-miss problem itself (the
+same one the port-A throughput section above already reached as an open branch
+point -- clk_sdram-domain relocation vs. VDC surgery vs. different memory). Bug 3's
+diagnosis reinforces that this IS the same problem, not a second one needing its own
+separate solution -- there is now one real, well-characterized architectural gap, not
+several unrelated small ones.

@@ -21,11 +21,35 @@
 -- Real budget per access is a WHOLE dot-clock period, not one CLK cycle: RAM_A is
 -- combinational from SLOT, which only changes on DCK_CE, so an address is held stable for
 -- the entire inter-DCK_CE window (4/6/8 CLK cycles = 92.6/139/185 ns at 43.2 MHz) before
--- huc6270.vhd consumes RAM_DI at the NEXT DCK_CE edge. A cache miss can therefore do a
--- real, correct refill within the dot in the common case instead of returning stale data.
--- Only the tightest case -- 10.7 MHz dot clock, sprite fetch (SG0..SG3, zero idle slots) --
--- may not always make it; that is instrumented (dbg_deadline_miss), not silently assumed
--- away. See docs/ARCHITECTURE.md's VRAM0 section for real measured numbers.
+-- huc6270.vhd consumes RAM_DI at the NEXT DCK_CE edge.
+--
+-- PCE PORT (2026-08-27), CORRECTED, real GHDL sim, not the claim this paragraph used to
+-- make: "a cache miss can therefore do a real, correct refill within the dot in the
+-- common case" is FALSE AS IMPLEMENTED, not just in the tightest sprite-fetch case. The
+-- miss-check itself lands one whole dot late structurally (dck_ce marks the END of a
+-- dwell, not the start -- address_a only becomes the NEW dot's target the cycle AFTER
+-- dck_ce, but req_valid_d, dck_ce delayed by exactly one register stage, still checks
+-- against req_addr_d holding the ENDING dot's address). Real measured severity: even a
+-- 12-line working set with ZERO cache conflicts (every miss is a first-touch compulsory
+-- miss, the single best case this cache can ever see) returns WRONG data on 17-34% of
+-- read dots over 16 passes, and `dbg_deadline_miss` fires at a similar rate -- neither is
+-- wired to anything observable on any board (`open` in pce_top.vhd's gen_vram0_ext). This
+-- is not fixable by re-timing the check alone: correcting the phase (add a second
+-- register stage) makes the check land on time, but huc6270.vhd's `RAM_WE` only pulses on
+-- a dwell's LAST cycle, so an earlier check cannot yet tell a write dot from a read dot --
+-- spurious refill launches on what turn out to be write dots contend with genuine misses
+-- for `refill_pending`'s single-entry queue (force-cleared every dck_ce), making REAL
+-- traffic measurably worse in 5 of 6 realistic dwell/refresh configurations, not better.
+-- Real total round-trip needed even with the phase corrected: ~13 cycles (BRAM read,
+-- refill_pending set, SEQ_IDLE->SEQ_REQ, REQ on bus, WAIT rise, WAIT high, WAIT fall,
+-- SEQ_DONE+install, way_q_a updated, q_a_i loaded) against 8 cycles even at the most
+-- generous real dot clock -- worse with a refresh collision (`sdram.sv`'s STATE_IDLE
+-- checks refresh first, preempting port A). No local edit to this file closes that gap;
+-- it needs the same real prefetch/redesign work as the port-A throughput problem in
+-- docs/ARCHITECTURE.md, not a re-timed comparator. See docs/ARCHITECTURE.md's VRAM0
+-- section for the real measured numbers and the one real, safe, shippable fix this
+-- investigation DID find (a separate, smaller bug -- q_a_i's install-diversion hold was
+-- one cycle short, see cache_ctrl's `install_d`).
 --
 -- Cache: direct-mapped, 512 lines, each line = 4 consecutive VRAM0 words (an 8-byte
 -- SDRAM-line-aligned group). Index = address(10:2), tag = address(14:11), word-within-
@@ -319,6 +343,11 @@ architecture rtl of vram0_cache is
 
    signal q_a_i : std_logic_vector(15 downto 0) := (others => '0');
 
+   -- PCE PORT (2026-08-27): 1-cycle-delayed copy of refill_can_install -- extends
+   -- q_a_i's install-diversion hold to 2 cycles (see cache_ctrl). Owned solely by
+   -- cache_ctrl, same as q_a_i itself.
+   signal install_d : std_logic := '0';
+
    -- True the cycle a completed refill is ready to install -- shared by the port-A write
    -- wiring so the guard is computed once, not duplicated.
    signal refill_can_install : std_logic;
@@ -413,12 +442,30 @@ begin
          req_valid_d <= dck_ce;
          req_wr_d    <= wren_a;
          req_wdata_d <= data_a;
+         -- PCE PORT (2026-08-27), Bug found+fixed via real GHDL sim (dispatched
+         -- diagnosis, not static reasoning -- see docs/ARCHITECTURE.md): the ORIGINAL
+         -- 1-cycle hold below was one cycle too short. way_k's dpram has 1-cycle read
+         -- latency: way_addr_a is diverted to seq_idx during the SAME cycle
+         -- refill_can_install='1' (call it cycle N), so way_q_a doesn't actually REFLECT
+         -- that diverted (seq_idx) read until cycle N+1 -- by which point
+         -- refill_can_install has ALREADY dropped back to '0' (it's a one-cycle pulse),
+         -- so the old code's `elsif`/`else` at N+1 loaded q_a_i from way_q_a believing it
+         -- was a fresh read of req_addr_d, when it was actually still the stolen cycle's
+         -- seq_idx read -- another cache line's data reaching the VDC. GHDL-confirmed:
+         -- measured wrong words landing in q_a at the exact +1 offset this predicts,
+         -- across multiple dwell/refresh-collision configurations. Fixed by extending
+         -- the hold to cover N+1 too, via install_d (a 1-cycle-delayed copy of
+         -- refill_can_install) -- safe for the same reason the original 1-cycle hold
+         -- was: address_a is stable for the whole inter-DCK_CE dwell, so the value held
+         -- across both N and N+1 is the same one a correct read would produce once
+         -- way_q_a finally reflects req_addr_d again, at N+2.
+         install_d <= refill_can_install;
 
          -- Hold q_a_i through any cycle in which the refill install has diverted port A's
          -- address away from the live access -- way_q_a reflects seq_idx that cycle, not
          -- req_addr_d. Safe to hold: address_a is stable for the whole inter-DCK_CE dwell,
          -- so the value held is the same one the next cycle would re-read.
-         if refill_can_install = '1' then
+         if refill_can_install = '1' or install_d = '1' then
             null;
          elsif req_wr_d = '1' then
             q_a_i <= req_wdata_d;
