@@ -1282,7 +1282,7 @@ the time, but this hasn't been measured — it's a real open question for "does 
 a normal speed," separate from "does it fit and does it boot," which is what this section
 and the one above answer.
 
-### Part 2 (scoped, not started): syscard boot needs a real SCSI target stub, not just a bigger ROM
+### Part 2 (done, see subsections below): syscard boot needed a real SCSI target stub, not just a bigger ROM
 
 Tracing what happens after the CPU can actually fetch the full syscard found a second,
 larger gap (at the time of writing, `CD_EN => '0'` and `CD_RAM_A/CD_RAM_DO/CD_RAM_RD/
@@ -1402,6 +1402,71 @@ green-field, same as the SCSI stub itself. Firmware work is explicitly out of sc
 this session (per the sequencing below); this section exists so the next session doesn't
 re-litigate the HPS-vs-BL616 question from scratch.
 
-**Status**: ROM path (done, §Part 1) → CD-RAM backing + `CD_EN` (done, above) → SCSI
-target stub (not started — the only remaining piece before "does syscard boot" is
-answerable).
+#### Minimal SCSI target stub: built, spec-verified, `gw_sh`-confirmed (2026-08-27)
+
+Wired a small responder to `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM`/`CD_COMM_SEND`/
+`CD_DATA`/`CD_DATA_WR`/`CD_DATA_END` (all previously stubbed constants) —
+`cd.vhd`/`SCSI.vhd`'s own bus phase timing is untouched, this only answers commands.
+`CD_COMM`'s lowest byte is the opcode (traced from `SCSI.vhd`'s own `COMM_POS`/
+concatenation logic). Any command other than REQUEST SENSE (`0x03`) gets CHECK
+CONDITION; REQUEST SENSE gets fixed-format sense data pushed one byte at a time through
+`CD_DATA`/`CD_DATA_WR` into `SCSI.vhd`'s own byte-wide DATA-IN FIFO (not `cd.vhd`'s
+separate 4-byte-packed `CDDA_FIFO`, which is audio-only and irrelevant here), followed
+by a GOOD status once `CD_DATA_END` confirms the drain.
+
+**Real, measured surprise this uncovered**: making `CD_STAT_GET` a genuine signal
+un-swept a large amount of previously dead-code-eliminated logic inside `cd.vhd`/
+`SCSI.vhd`. With `CD_STAT_GET` tied `'0'` (every build in this project until now,
+including Console 60K's CD build, confirmed identical), `STAT_PEND` was provably always
+0, so the whole STATUS/DATA-IN state machine and `SCSI_FIFO`'s real write/read enables
+were dead everywhere. The instant it became real, `SCSI_FIFO` (4096×8, matching the
+donor's `LPM_NUMWORDS`, 32768 bits) needed real backing with 0 free BSRAM blocks left —
+`13313/23040` clean → `24061/23040`, `RP0006`. The same BSRAM-exhaustion-cascades-into-
+LUT-fallback mechanism this project already found and fixed twice before (ROM buffer,
+then CD-RAM). Fixed by shrinking `cd_fifos.vhd`'s `SCSI_FIFO` from 4096 to 64 entries —
+real headroom for this stub's actual use (18 sense bytes at a time), small enough to
+synthesize as `RAM16` primitives instead of a scarce BSRAM block. Confirmed safe
+project-wide (Console 60K's CD build still sweeps this FIFO away entirely, so nothing
+depends on the old depth anywhere) and documented as a scope-driven shrink to revisit
+once real CD sector streaming (2048 bytes/sector) needs deeper buffering.
+
+**Checked against real PCE-CD/SCSI specs, per a direct request not to trust generic
+SCSI-2 assumptions**: fetched and read Mednafen's `pce_fast/pcecd_drive.cpp` (a real,
+hardware-accurate PCE-CD emulator). Two findings:
+- **Structure confirmed correct, not a simplification**: Mednafen's own `PCECommandDefs`
+  table flags every real PCE-CD command except REQUEST SENSE (TEST UNIT READY, READ(6),
+  and the PCE-specific `0xD8`/`0xD9`/`0xDA`/`0xDD`/`0xDE` audio/subcode commands) as
+  requiring a disc, and returns the identical NOT_READY response for all of them when
+  none is present. This stub's "any command but REQUEST SENSE gets the same response"
+  matches that real command set exactly, rather than approximating it.
+- **One real bug found and fixed**: every other sense-data byte already matched
+  Mednafen's `MakeSense()` exactly (`0x70` current error, sense key `0x02` NOT READY,
+  `0x0A` additional sense length, `0x00` ASCQ/FRU) — but the ASC byte was `0x3A`, the
+  generic SCSI-2 MEDIUM NOT PRESENT code. Real PCE-CD hardware/firmware uses NEC's own
+  `0x0B` ("no disc, tray closed", that source's `NSE_NO_DISC`) instead. Fixed.
+- **Named residual gap, not hidden**: a genuinely unrecognized opcode (outside that real
+  7-command table) gets `ILLEGAL_REQUEST`/`NSE_INVALID_COMMAND` (`0x20`) on real
+  hardware — this stub can't distinguish that case and would answer NOT_READY instead.
+  Not fixed, since real syscard boot isn't known to issue anything outside that table
+  (Mednafen itself doesn't implement more, including INQUIRY, and is a mature,
+  compatibility-tested emulator across many real games/BIOS).
+
+**Real `gw_sh` PnR, confirmed** (after the ASC fix): `Logic 14494/23040 (63%)`,
+`BSRAM 56/56 (100%)`, **0 Setup Violated Endpoints, 0 Hold Violated Endpoints** across
+30207 endpoints. `clk_pce` 42.857 MHz constraint / 43.388 MHz actual — thin but real
+margin. `clk_sdram` 120.000 MHz constraint / **120.364 MHz actual — very thin (0.3%)**,
+worth naming plainly: this margin has been trending down across iterations of this same
+build (130.6 → 124.4 → 120.4 MHz) as more logic loads the SDRAM arbiter's critical
+path, and PnR run-to-run variance alone could plausibly erase it. Timing closes today;
+treat it as fragile, not comfortable, and re-check after any further change that adds
+logic near the arbiter.
+
+**Status**: ROM path (done, §Part 1) → CD-RAM backing + `CD_EN` (done, above) → minimal
+SCSI target stub (done, spec-verified, `gw_sh`-confirmed, above). What remains unknown:
+whether this specific command coverage (TEST UNIT READY / REQUEST SENSE / CHECK
+CONDITION on everything else) is actually enough for a real syscard BIOS to reach a
+visible "insert a CD-ROM" boot screen, as opposed to some other real command sequence
+this project hasn't observed. No hardware test and no simulation testbench exist for
+this responder — the structural/byte-level correctness is now checked against a real,
+independent, hardware-accurate reference, which is the strongest verification available
+without hardware, but it is not the same as watching a real syscard actually boot.
