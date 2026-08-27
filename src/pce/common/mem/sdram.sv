@@ -210,10 +210,29 @@ always @(posedge clk) begin
 
 	if(~&rfsh_cnt) rfsh_cnt <= rfsh_cnt + 1'd1;
 
+	// PCE PORT (2026-08-27): the free/no-WAIT path on a port-A cache hit (the old
+	// `else RAM_A_DO <= last_data[0][...]` branch) is a real, hardware-independent
+	// deadlock, not a hypothetical -- confirmed by simulating the exact byte sequence
+	// vram0_cache.vhd issues against this file. A 16-bit VRAM0 refill's second byte is
+	// ALWAYS a hit on the tag last_a[0] just set by the first byte (same [20:2] address,
+	// differing only in bit 0), so the very first refill after reset takes this path
+	// (rfsh_cnt is not yet saturated post-init) and RAM_A_WAIT never rises for that
+	// access. vram0_cache.vhd's own refill sequencer (SEQ_WAIT_LO_HI/SEQ_WAIT_HI_HI)
+	// blocks unconditionally on ram_a_wait='1' while holding ram_a_req high, with no
+	// other way to advance -- a permanent hang, not a stall. Now asserts RAM_A_WAIT
+	// unconditionally on every REQ edge; the STATE_IDLE launch's existing `|| RAM_A_WAIT`
+	// term (below) then runs the real state machine even on a hit (with ram_req=0, so
+	// no real SDRAM command is issued -- just the handshake round trip vram0_cache.vhd
+	// already expects). Cost: a hit that was free is now a full ~75ns transaction, so a
+	// 16-bit refill goes from one real bus transaction to two -- this makes the
+	// already-real, already-flagged VRAM0 deadline-miss problem (see docs/
+	// ARCHITECTURE.md) numerically worse, not better. Deliberate: a hang is worse than
+	// a late/wrong pixel, and the deadline-miss problem needs a real redesign (prefetch)
+	// regardless of this fix -- see docs/ARCHITECTURE.md's VRAM0 section for the
+	// separate, not-yet-started follow-up.
 	old_a_req <= RAM_A_REQ;
 	if(~old_a_req & RAM_A_REQ) begin
-		if(rfsh_cnt[8] || fetch_req) RAM_A_WAIT <= 1;
-		else RAM_A_DO <= last_data[0][(RAM_A_ADDR[1:0]*8) +:8];
+		RAM_A_WAIT <= 1;
 	end
 
 	// PCE PORT: !RAM_B_WE added -- a write must never be served from the cache, it has to

@@ -1669,3 +1669,69 @@ scoped fixes this session moved both clocks from "thin" (0.3%/1.24%) to healthy.
 ever actually hit in practice on this design (three clients is new this session, from
 the ADPCM offload) -- this fix removes a documented bug class pre-emptively, the same
 way `last_valid[]` did, not in response to an observed failure on this specific board.
+
+### Follow-up: real port-A (VRAM0) deadlock found and fixed, `gw_sh`-confirmed -- and the VRAM0 deadline-miss problem this exposes is now known to be worse than previously stated
+
+Dispatched a deeper review of `sdram.sv`'s port A / `vram0_cache.vhd`'s refill
+interaction, prompted by a direct question about whether the refresh-first reorder
+above (which now lets refresh preempt port A too) made VRAM0's own real-time deadline
+worse. The refresh-collision question turned out to be minor -- the review found
+something much bigger, **confirmed by real Verilator simulation of `sdram.sv`, not
+just static analysis**:
+
+**A real deadlock, pre-existing (not introduced by anything this session did), on
+every board using `EXT_VRAM0=1` (Primer 25K, Nano 20K).** Port A's zero-wait
+cache-hit optimization -- `if(rfsh_cnt[8] || fetch_req) RAM_A_WAIT <= 1; else
+RAM_A_DO <= ...` -- means `RAM_A_WAIT` never rises on a genuine cache hit while
+`rfsh_cnt[8]` is clear (the common case, since `rfsh_cnt` resets during init and
+takes 256 `clk_sdram` cycles to reach that bit). A 16-bit VRAM0 refill's second byte
+is **always** a hit on the tag the first byte's fetch just set (same `[20:2]`
+address, differing only in bit 0) -- so the very first refill after reset hits this
+path. `vram0_cache.vhd`'s refill sequencer (`SEQ_WAIT_LO_HI`/`SEQ_WAIT_HI_HI`) blocks
+unconditionally on `ram_a_wait='1'` while holding `ram_a_req` high, with no other way
+to advance. **Permanent hang, no recovery path.** Verified in a real Verilator sim of
+the unmodified file driving the exact byte sequence `vram0_cache.vhd` issues: the low
+byte's WAIT rose correctly, the high byte's WAIT never rose. `vram0_cache.vhd:20-23`'s
+own header already admitted the tightest real-time case "may not always make it" --
+this is a different, worse problem than that: not a missed deadline, a total hang.
+Ports B and C are unaffected (their board-level bridges in `pcetang_primer25k_cd.vhd`
+use a settle-then-check-WAIT pattern that tolerates a no-WAIT hit; only
+`vram0_cache.vhd`'s bridge blocks unconditionally). `sdram32.sv` (Nano 20K) has the
+identical structure and is exposed to the same bug.
+
+**Fixed**: `sdram.sv` now asserts `RAM_A_WAIT` unconditionally on every port-A REQ
+edge, removing the free/no-WAIT hit path entirely. The existing `|| RAM_A_WAIT` term
+in the `STATE_IDLE` launch condition then runs the real state machine even on a hit
+(with `ram_req=0`, so no actual SDRAM command is issued -- just the handshake round
+trip `vram0_cache.vhd` already expects). Deliberately did NOT also strip the
+now-partially-redundant `rfsh_cnt[8]` term from the launch condition, despite it
+looking vestigial: it still does real work, launching the state machine with
+`ram_req=0` on a hit issues `CMD_AUTO_REFRESH` (see the command-generation
+`casex` -- `{2'b0X, MODE_NORMAL, STATE_START}`), which is the real "opportunistic
+refresh piggybacked on port-A hits" mechanism found separately this session as the
+reason the hard `&rfsh_cnt` refresh deadline is rarely actually reached in practice.
+Removing it would likely make the refresh-first reorder above fire its hard deadline
+branch more often, an unwanted interaction -- left alone, not "cleaned up."
+
+**Real, honest cost**: a hit that was free is now a full ~75ns transaction, so a
+16-bit VRAM0 refill goes from 1 real SDRAM transaction to 2. **This makes the
+already-real, already-admitted VRAM0 deadline-miss problem measurably worse, not
+better** -- deliberate, since a permanent hang is worse than a late or wrong pixel,
+and the deadline-miss problem needs a real redesign regardless of this fix (a
+separate investigation into that is in flight as of this writing, not yet complete).
+
+**Real `gw_sh` PnR, confirmed**: `clk_sdram` **130.155 MHz actual** (margin 9.0% →
+8.46%, logic level 7 → 4 -- the removed `else` branch and comparison simplified the
+critical path some). `clk_pce` **44.937 MHz actual** (margin 6.30% → 4.85%, a real
+but modest further dip). `BSRAM 29/56 (52%)` and `Logic 10777/23040 (47%)`
+unchanged, as expected -- a protocol/handshake fix, no new memory. **0 setup/hold
+violations.** Both clocks still close with real, comfortable headroom.
+
+**Not done**: the VRAM0 deadline-miss problem itself (refill latency measured at
+~300-375ns against a real 93.3-186.7ns per-dot-clock budget, i.e. 1.6x-3.8x over
+budget on every miss even before this fix, worse after it) -- this fix only removes
+the hang, it does not make VRAM0 correct under real-time load. No hardware or
+simulation test has ever run the full EXT_VRAM0 path end-to-end against real video
+timing; nothing here contradicts the possibility that VRAM0 is currently producing
+wrong pixels on real hardware whenever a miss occurs, on every board using
+`EXT_VRAM0=1`.
