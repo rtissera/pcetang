@@ -1275,7 +1275,14 @@ scoped to CD only, per the capacity/bandwidth ceiling already established for SG
   had its own. That's accurate (nand2mario's primer25k pin assignments are board-wide,
   not build-specific), just worth naming so it isn't mistaken for an oversight.
 
-## Real syscard boot (2026-08-27): ROM path fixed, real work; SCSI target stub scoped, not started
+## Real syscard boot (2026-08-27): ROM path + SCSI target stub both done, gw_sh-confirmed
+
+**Doc-rot fix (2026-08-28): this header and the "still not started" line below were
+stale.** The SCSI target stub named in this section's title was completed, spec-verified
+against Mednafen, and `gw_sh`-confirmed within this same section (see "Minimal SCSI
+target stub: built, spec-verified, `gw_sh`-confirmed" below) — the title above was never
+updated after that subsection was written. Corrected here rather than left to mislead
+the next reader, per this project's own doc-rot-fixing precedent (`429285c`).
 
 Follow-up to the section above, prompted directly by a user request: "make real syscard
 boot (for pcecd) on 25k." This split into two pieces of very different size once
@@ -1422,7 +1429,7 @@ closes today; it's a real result, not a comfortable one.
 
 As with the ROM path, this only proves the CPU can now correctly reach CD-RAM without
 corrupting it or stalling forever — it says nothing about whether syscard *boots*. That's
-entirely gated on the SCSI target stub below, still not started.
+entirely gated on the SCSI target stub below, done in the subsection that follows.
 
 #### On hosting SCSI: checked the MiSTer donor's actual split, chose differently, on purpose
 
