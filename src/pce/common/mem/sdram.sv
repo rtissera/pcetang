@@ -57,8 +57,13 @@
 // STATE_IDLE was never reached with every client quiet -- rows need refreshing every
 // 7.8us and none were issued. `rfsh_cnt` is 9 bits and saturates, so the deadline is
 // 511 cycles -- at this file's 120MHz `clk_sdram`, 4.26us, comfortably inside spec.
-// Preempting costs whichever client was about to launch one refresh cycle (a handful
-// of clk_sdram cycles, not a whole VRAM0/ROM/CD-RAM transaction).
+// PCE PORT (2026-08-27), corrected: this originally claimed preempting cost "a
+// handful of clk_sdram cycles, not a whole transaction" -- WRONG, real Verilator sim
+// (see docs/ARCHITECTURE.md's "Port-A throughput measurement" section) measured a
+// full STATE_START->STATE_LAST cycle count, same length as any other access (10
+// cycles/83.33ns at 120MHz) -- `state <= STATE_START` on the refresh branch runs the
+// exact same counter as everything else. Preempting costs whichever client was about
+// to launch one full transaction slot, not a discount.
 //
 // PCE PORT (2026-08-27): `last_valid[]` replaces the "stuff last_a with all-ones on a
 // miss/write" sentinel, for ports A and C (port B already used a separate real

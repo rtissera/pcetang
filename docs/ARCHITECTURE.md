@@ -1738,9 +1738,9 @@ wrong pixels on real hardware whenever a miss occurs, on every board using
 
 ## Port-A width fix (2026-08-27): `sdram.sv`/`sdram32.sv` widened 8->16 bits, `gw_sh`-confirmed on all three boards -- biggest lever the VRAM0 deadline investigation found
 
-Follow-up to the VRAM0 deadlock/deadline investigation above (see
-[[pcetang-vram0-investigation]] for the full prior-art research this grew out of,
-including the corrected finding that fpgapce's `TwoWayCache.v` doesn't apply here and
+Follow-up to the VRAM0 deadlock/deadline investigation above (the full prior-art
+research this grew out of, including the corrected finding that fpgapce's
+`TwoWayCache.v` doesn't apply here and
 the real one -- `sdram.sv` port A being only 8 bits wide -- does). A 16-bit VRAM0 word
 needed two full sequential REQ/WAIT handshakes (`vram0_cache.vhd`'s old 7-state
 `byte_seq`: `SEQ_REQ_LO/SEQ_WAIT_LO_HI/SEQ_WAIT_LO_LO/SEQ_REQ_HI/SEQ_WAIT_HI_HI/
@@ -1809,10 +1809,77 @@ non-CD/Phase-1 build specifically (100% BSRAM, the tightest of the three) -- the
 build (52% BSRAM) has real headroom. Flagged, not fixed here; worth a real look before
 relying on Phase 1 specifically.
 
-**Not yet done**: step 2 of the two-step validation plan from
-[[pcetang-vram0-investigation]] -- measuring whether 4 pipelined sprite fetches
-(SG0-3, zero idle slots) can now sustain ~93ns/word on an open SDRAM row with this
-faster protocol, which decides whether a SLOT-driven prefetcher can close the VRAM0
-deadline gap with `huc6270.vhd` left completely untouched, or whether real VDC surgery
-is needed instead. Also still open: Bug 2 (refill-never-installs correctness bug) and
-Bug 3 (miss-detection-one-dot-late), both documented, neither touched by this change.
+## Port-A throughput measurement (2026-08-27): step 2 of the validation plan, real Verilator sim -- widening alone does NOT close the deadline
+
+Step 2 of the two-step plan above: does port A, in its new 16-bit form, sustain the
+~93.33ns/word throughput a 4-word back-to-back sprite fetch (SG0-3, `SM="00"`, zero
+idle slots) needs? Answered by a real Verilator simulation of `sdram.sv` as it stands
+at HEAD, driven by a testbench reproducing `vram0_cache.vhd`'s actual new `byte_seq`
+REQ/WAIT protocol exactly (not an idealized/static model). No RTL was touched for
+this measurement.
+
+**Correction to this document's own earlier framing, found by the sim, not assumed**:
+port A's REQ/WAIT wires cross the `clk_pce`<->`clk_sdram` boundary with NO
+synchronizer at all -- `vram0_cache.vhd` is clocked from `clk_pce` (42.857MHz,
+23.33ns), `sdram.sv` from `clk_sdram` (120MHz, 8.33ns), directly wired. `byte_seq`
+therefore runs at `clk_pce`'s rate, not `clk_sdram`'s -- the launch-to-next-launch
+turnaround is dominated by `clk_pce` cycles, not `clk_sdram` ones.
+
+**Verdict: NO.** Real, realistic clean-burst measurement: **186.67ns/word — exactly
+2.0x the 93.33ns budget.** This is a **throughput deficit, not a latency deficit**:
+per-word REQ-to-data latency is a healthy, on-budget 93.33ns; the problem is ~93.33ns
+of dead turnaround between the end of one word's transaction and the launch of the
+next, because `byte_seq` cannot re-raise `RAM_A_REQ` until it has fully observed
+`RAM_A_WAIT` fall (`SEQ_WAIT_FALL -> SEQ_DONE -> SEQ_IDLE -> SEQ_REQ`, all serial,
+all in the `clk_pce` domain) -- **port A cannot be pipelined at all in its current
+form.** A directed probe (re-raising `RAM_A_REQ` at every possible cycle offset after
+the first transaction) confirms this as a hard protocol property, not a
+simulation artifact: re-raising REQ during cycles L+1 through L+9 after a launch
+silently LOSES the request (no `ACTIVE` command issued, `RAM_A_WAIT` never rises) --
+correct today only because the real `byte_seq` never attempts an early re-raise, but
+a hard ceiling on any future attempt to shave this window down further.
+
+**Refresh collision, swept across the whole 4-word burst window**: costs a full
+transaction slot at the point of collision (worst case measured: word 4's launch
+delayed from t=490.00ns to t=573.33ns, +83.33ns = 10 `clk_sdram` cycles) -- **this
+document's own header comment on `sdram.sv`'s refresh-first fix was wrong** ("costs...
+one refresh cycle, a handful of clk_sdram cycles, not a whole transaction" --
+corrected in `sdram.sv`'s header directly). The refresh branch's `state <=
+STATE_START` runs the identical `STATE_START..STATE_LAST` counter as any other
+access, full transaction length, no discount. Real rate in the simulated burst: ~1
+word in 47 pays this extra 83.33ns -- a real input for any future prefetch-queue
+depth sizing, not a rounding error.
+
+**What WOULD close the gap (identified, NOT implemented)**: an idealized port-A
+client living entirely inside the `clk_sdram` domain (eliminating the CDC-driven
+turnaround entirely) using a smarter handshake shape -- drop `REQ` the instant `WAIT`
+rises, re-raise the instant `WAIT`'s fall is observed (not `byte_seq`'s current
+fully-serial shape) -- measures **91.67ns/word clean, 93.17ns/word averaged with real
+refreshes over 400 words (0.16ns of margin)**. This requires relocating the port-A
+CLIENT logic (not just the controller, which is already in `clk_sdram`) across the
+domain boundary -- real, nontrivial surgery to how `vram0_cache.vhd`/`huc6270.vhd`'s
+interface to port A works, not a parameter tweak. **0.16ns of average margin over a
+theoretically zero-idle-slot burst is not real engineering margin** -- this closes
+the gap only on paper; a single-cycle PnR/routing variance would erase it. Max single
+observed stall in that 400-word run: 166.67ns against the 93.33ns budget (≈0.79 word
+of deficit), meaning even this best-case path needs a real prefetch buffer of depth
+2-3 words to survive its own worst case, not depth 0.
+
+**Honest branch-point reached, decision NOT made here**: the two-step plan's own
+stated fallback now applies -- "if NO: real VDC surgery (buffering, fpgapce-style) or
+different memory is genuinely required." Port-A width alone (this session's fix) does
+NOT close the VRAM0 deadline gap by itself; it was a necessary, real, gw_sh-confirmed
+improvement (see the table above) but not sufficient. A SLOT-driven prefetcher bolted
+onto the EXISTING `clk_pce`-domain `byte_seq` handshake, at ANY queue depth, cannot
+work -- depth only helps a throughput deficit that is already below the deadline
+rate, and 186.67ns/word never is. Closing this for real needs either (a) the
+clk_sdram-domain relocation above, accepted as razor-margin, plus a real depth-2/3
+buffer, or (b) VDC-side surgery (buffering the fetch path, `fpgapce`-style, as
+already ruled less-preferred earlier in this investigation since it costs the
+real-time-shifter accuracy this project's donor was chosen for), or (c) a different
+memory strategy entirely. Not decided; presented for a real choice, not resolved by
+default.
+
+Also still open, untouched by anything in this session: Bug 2 (refill-never-installs
+correctness bug) and Bug 3 (miss-detection-one-dot-late), both documented earlier in
+this section's history.
