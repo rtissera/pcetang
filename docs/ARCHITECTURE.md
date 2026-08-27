@@ -1285,10 +1285,11 @@ and the one above answer.
 ### Part 2 (scoped, not started): syscard boot needs a real SCSI target stub, not just a bigger ROM
 
 Tracing what happens after the CPU can actually fetch the full syscard found a second,
-larger gap: `CD_EN => '0'` and `CD_RAM_A/CD_RAM_DO/CD_RAM_RD/CD_RAM_WR` are all still
-`open`, `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM`/`CD_DOUT_*` are all still stubbed
-constants — the same gap this document's Item 3 already named ("CD_COMM/CD_STAT stubbed
-everywhere," scoped as BL616-firmware work, not started). Real syscard BIOS code issues
+larger gap (at the time of writing, `CD_EN => '0'` and `CD_RAM_A/CD_RAM_DO/CD_RAM_RD/
+CD_RAM_WR` were all still `open` — since resolved, see the subsection below):
+`CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM`/`CD_DOUT_*` are still stubbed constants — the
+same gap this document's Item 3 already named ("CD_COMM/CD_STAT stubbed everywhere,"
+scoped as BL616-firmware work, not started). Real syscard BIOS code issues
 SCSI commands (at minimum TEST UNIT READY, then REQUEST SENSE once that reports not-ready)
 essentially immediately during boot, per how every real PCE-CD/TurboGrafx-CD unit behaves
 with no disc inserted — it doesn't hang, it shows a "please insert a CD-ROM" screen. That
@@ -1337,4 +1338,70 @@ from the SCSI-3 spec; or (b) instrument `CD_COMM`'s first byte to somewhere obse
 the question into a measurement instead of an inference — this project's standing
 discipline elsewhere in this document. Ordering matters: `CD_EN => '1'` and CD-RAM real
 backing come before a SCSI stub is even reachable, so the sequence is ROM path (done) →
-CD-RAM backing + `CD_EN` → SCSI target stub, not all three at once.
+
+#### CD-RAM real backing + `CD_EN => '1'`: done, `gw_sh`-confirmed (2026-08-27)
+
+The blocking prerequisite named above is now real. `CD_EN => '1'`, and `CD_RAM_A/DO/DI/
+RD/WR` bridged through a genuine new third SDRAM client (`sdram.sv`'s port C) instead of
+the on-chip dpram the donor assumes — CD-RAM's decode window is 256KB (`cd.vhd`'s own
+`RAM_SEL`: `EXT_A(20:13)` in `[0x68,0x87]`, 32 × 8KB = 256KB, confirmed from source, not
+assumed from real-hardware CD-ROM² spec knowledge). Unlike ROM, this couldn't reuse a
+static mux: CD-RAM has no wait-state path in the donor (`CD_RAM_DI` muxes into the CPU
+read path combinationally) and genuinely overlaps VRAM0/ROM traffic in time (accessed
+live during gameplay, not once at load). Two real pieces of surgery this needed:
+
+- `pce_top.vhd`: a new `CD_RAM_RDY` input (default `'1'`, existing callers unaffected),
+  ANDed into `WAIT_N` alongside `ROM_RDY` — the same CPU-stall mechanism ROM already has.
+- `sdram.sv`: a real arbitrated third client (priority `A > B > C > refresh`), mirroring
+  port A's read+write/line-cache convention rather than port B's toggle/write-invalidates
+  one. **Flagged, not measured**: a third continuously-active client increases (doesn't
+  newly introduce) refresh-starvation risk — the same class of bug `sdram32.sv`'s own
+  history already documents being found and fixed once, with only two clients.
+
+**Real `gw_sh` PnR, confirmed**: `Logic 14183/23040 (62%)`, `BSRAM 56/56 (100%)`, **0
+Setup Violated Endpoints, 0 Hold Violated Endpoints** across 29259 endpoints / 49722
+paths. `clk_pce` 42.857 MHz constraint / 43.914 MHz actual — comfortable margin. `clk_sdram`
+120.000 MHz constraint / **120.964 MHz actual — real but thin (0.8%)**, worth naming
+plainly rather than glossing over: the arbiter's critical-path logic level jumped from 4
+to 11 with the third client added, and this margin has less room to absorb a future
+fourth client or a faster `clk_sdram` retune than the two-client design had. Timing
+closes today; it's a real result, not a comfortable one.
+
+As with the ROM path, this only proves the CPU can now correctly reach CD-RAM without
+corrupting it or stalling forever — it says nothing about whether syscard *boots*. That's
+entirely gated on the SCSI target stub below, still not started.
+
+#### On hosting SCSI: checked the MiSTer donor's actual split, chose differently, on purpose
+
+Investigated per a direct user request. The vendored `upstream/tg16-mister/` donor
+(`TurboGrafx16.sv`, `sys/hps_io.sv`, `rtl/hps_ext.v`) confirms MiSTer's real split: `cd.vhd`/
+`SCSI.vhd` (identical to this project's, unmodified) own only the bus phase timing; ALL
+SCSI command semantics (decode, sense codes, CHD/BIN-CUE file reads) run as C code on the
+HPS side (a full Linux ARM SoC), exchanged over a generic register bus (`hps_ext.v`'s
+`CD_GET`/`CD_SET`, 112 bits each way, polled continuously). That C-side handler lives in
+MiSTer's separate `Main_MiSTer` firmware repo, not vendored here — not available locally
+to copy sense-byte values or command-decode logic from.
+
+**Chose not to mirror that split.** BL616 is not HPS — no Linux, far less RAM, and this
+project's own prior research (`## CD via CHD` section above, written before this Part 2
+work) had already independently converged on a different, more BL616-appropriate
+architecture: keep SCSI command decode *in RTL* (the target-stub responder this section
+is about), and use BL616 only as a sector-data server over the interface that already
+exists and works — `iosys_bl616.v`'s `mgmt_*`/`fdd_request` LBA protocol, extended for
+2048-byte CD sectors — backed by `rtissera/libchdr`'s `contrib/tangcore-bl616/
+chd_fatfs.c`, which **already compiles and links against the real BL616 toolchain**
+(`LOWRAM_TARGET=1`, measured +142.5KB flash out of a 4MB budget — a checked fact, not a
+guess). This means BL616 needs file I/O + a CHD codec (bounded, already proven size), not
+a from-scratch SCSI interpreter — a smaller, more tractable ask than replicating MiSTer's
+HPS role would have been.
+
+Real, still open from that investigation: `chd_open()`/`chd_read()` have never actually
+run on real BL616 hardware (only link-probed against a nonexistent path), and no one has
+built the FPGA-side bridge from `mgmt_*`/`fdd_request` into `cd.vhd`'s DATA-IN FIFO —
+green-field, same as the SCSI stub itself. Firmware work is explicitly out of scope for
+this session (per the sequencing below); this section exists so the next session doesn't
+re-litigate the HPS-vs-BL616 question from scratch.
+
+**Status**: ROM path (done, §Part 1) → CD-RAM backing + `CD_EN` (done, above) → SCSI
+target stub (not started — the only remaining piece before "does syscard boot" is
+answerable).
