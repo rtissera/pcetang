@@ -48,7 +48,27 @@ entity cd is
 		
 		CD_SL			: out signed(15 downto 0);
 		CD_SR			: out signed(15 downto 0);
-		AD_S			: out signed(15 downto 0)
+		AD_S			: out signed(15 downto 0);
+
+		-- ADPCM RAM offload (2026-08-27): exposes the internal ADPCM_DRAM dpram(17,4)
+		-- interface as ports so a board-level bridge can back it with external SDRAM
+		-- instead of 32 BSRAM blocks (see docs/ARCHITECTURE.md). Naming follows the
+		-- CD_RAM_* convention already used for CD-RAM's own SDRAM offload: _DO is data
+		-- OUT of this entity (write data), _DI is data IN to this entity (read data) --
+		-- inverted relative to the signal's own direction of travel, kept for
+		-- consistency with the existing CD_RAM_DO/DI ports.
+		-- ADPCM_RAM_READY defaults to '1' so any board that leaves it unconnected
+		-- (Console 60K, Nano 20K, non-CD Primer 25K) gets the original never-stall
+		-- behavior automatically.
+		ADPCM_RAM_A		: out std_logic_vector(16 downto 0) := (others => '0');
+		ADPCM_RAM_DO	: out std_logic_vector(3 downto 0) := (others => '0');
+		ADPCM_RAM_WE	: out std_logic := '0';
+		ADPCM_RAM_REQ	: out std_logic := '0';
+		-- Edge basis for a board bridge (see ADPCM_RAM_SLOT_CNT's assignment below for
+		-- why ADPCM_RAM_REQ's own level can't be edge-detected directly for writes).
+		ADPCM_RAM_SLOT_CNT : out std_logic_vector(1 downto 0) := (others => '0');
+		ADPCM_RAM_DI	: in  std_logic_vector(3 downto 0) := (others => '0');
+		ADPCM_RAM_READY: in  std_logic := '1'
 	);
 end cd;
 
@@ -126,7 +146,6 @@ architecture rtl of cd is
 	signal ADRAM_A				: std_logic_vector(16 downto 0);
 	signal ADRAM_DI			: std_logic_vector(3 downto 0);
 	signal ADRAM_DO			: std_logic_vector(3 downto 0);
-	signal ADRAM_WE			: std_logic;
 	
 	type DRAMSlot_t is (
 		SLOT_REFRESH,
@@ -620,6 +639,27 @@ begin
 
 
 	--ADPCM DRAM
+	-- DRAM_CLK_CNT/DRAM_SLOT_CNT replicate the real original PCE hardware's DRAM
+	-- refresh/access timing (4 slots x 18 CLK cycles = 420ns/slot, 1680ns/full cycle:
+	-- REFRESH, WRITE, WRITE, READ) -- this is not about our FPGA's SDRAM, it's the
+	-- internal cadence the ADPCM control logic (M5205 feed, DMA) was built around.
+	--
+	-- ADPCM RAM offload wait-gate (2026-08-27): the original code pulsed DRAM_CLKEN
+	-- unconditionally every 18 cycles, assuming a same-cycle-synchronous memory (the
+	-- read/write logic below samples ADRAM_DO the SAME cycle DRAM_CLKEN pulses -- a
+	-- hard 1-cycle latency assumption, confirmed by grepping every ADRAM_DO read site,
+	-- all three inside the single `DRAM_CLKEN='1' and DRAM_SLOT=SLOT_READ` block, no
+	-- latched copy consumed elsewhere). Real external SDRAM needs far more than one
+	-- cycle round-trip, so the pulse now holds at DRAM_CLK_CNT=17 (does not wrap, does
+	-- not pulse DRAM_CLKEN) whenever this slot has a real pending access
+	-- (ADPCM_RAM_REQ='1') and the bridge hasn't confirmed it's done (ADPCM_RAM_READY=
+	-- '0'). This is not speculative: ADRAM_A/the pend flags are already computed
+	-- combinationally well before DRAM_CLK_CNT reaches 17 (the address only changes
+	-- when DRAM_SLOT changes, right after the previous DRAM_CLKEN pulse), so a bridge
+	-- can start the real SDRAM transaction on slot entry and have up to ~18 CLK
+	-- cycles (420ns) of lead time before this gate needs it -- comfortably more than
+	-- one SDRAM round trip (~83ns). ADPCM_RAM_READY defaults to '1', so any board
+	-- that doesn't drive it keeps the original never-stall behavior exactly.
 	process( RST_N, CLK )
 	begin
 		if RST_N = '0' then
@@ -629,19 +669,23 @@ begin
 		elsif rising_edge(CLK) then
 			if EN = '1' then
 				DRAM_CLKEN <= '0';
-				DRAM_CLK_CNT <= DRAM_CLK_CNT + 1;
 				if DRAM_CLK_CNT = 18-1 then
-					DRAM_CLK_CNT <= (others => '0');
-					DRAM_CLKEN <= '1';
+					if ADPCM_RAM_REQ = '0' or ADPCM_RAM_READY = '1' then
+						DRAM_CLK_CNT <= (others => '0');
+						DRAM_CLKEN <= '1';
+					end if;
+					-- else: hold at 17, waiting for the external ADPCM RAM bridge
+				else
+					DRAM_CLK_CNT <= DRAM_CLK_CNT + 1;
 				end if;
-				
+
 				if DRAM_CLKEN = '1' then
 					DRAM_SLOT_CNT <= DRAM_SLOT_CNT + 1;
 				end if;
 			end if;
 		end if;
 	end process;
-	
+
 	process( DRAM_SLOT_CNT )
 	begin
 		case DRAM_SLOT_CNT is
@@ -651,24 +695,42 @@ begin
 			when others => DRAM_SLOT <= SLOT_READ;
 		end case;
 	end process;
-	
-	-- Restored to real CD-ROM2 spec (17,4 = 128Kx4 = 64KB) 2026-08-26 after the
-	-- scandoubler-based video path (pce2hdmi_sd.sv, pcetang_console60k_hdmi_pll_480p.vhd)
-	-- freed enough BSRAM on Console 60K to no longer need the reduced-capacity 16KB
-	-- interim build. See docs/ARCHITECTURE.md's Phase 2 section for the full history
-	-- (why the reduction was needed, the bisection that found this memory as the real
-	-- cost driver, and the real gw_sh result the scandoubler swap produced).
-	ADPCM_DRAM : entity work.dpram generic map (17,4)
-	port map (
-		clock		=> CLK,
-		address_a=> ADRAM_A,
-		data_a	=> ADRAM_DI,
-		wren_a	=> ADRAM_WE,
-		q_a		=> ADRAM_DO
-	);
+
+	-- Offloaded to external SDRAM (2026-08-27, see docs/ARCHITECTURE.md) -- the
+	-- internal dpram(17,4) (32 of 56 BSRAM blocks on Primer 25K, 57% of the whole
+	-- budget) is replaced by the ADPCM_RAM_* port bridge above/below. Board-level
+	-- bridge is responsible for real read/write against SDRAM and for asserting
+	-- ADPCM_RAM_READY once the access for the current ADPCM_RAM_A/REQ completes.
 	ADRAM_A <= ADPCM_WRADDR when DRAM_SLOT = SLOT_WRITE else ADPCM_RDADDR;
 	ADRAM_DI <= ADPCM_WRDATA(3 downto 0) when ADPCM_WRITE_NIB = '1' else ADPCM_WRDATA(7 downto 4);
-	ADRAM_WE <= DRAM_CLKEN when DRAM_SLOT = SLOT_WRITE and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1') else '0';
+
+	-- ADPCM_RAM_WE/_REQ are deliberately UNGATED by DRAM_CLKEN (unlike the pre-offload
+	-- ADRAM_WE, which pulsed only on the DRAM_CLKEN edge to write a same-cycle-latency
+	-- dpram). A real SDRAM bridge needs to know direction and start the transaction as
+	-- soon as the slot begins -- ADPCM_RAM_A/_DO (write data) are already valid then --
+	-- not wait for the gated DRAM_CLKEN pulse the bridge itself is responsible for
+	-- releasing (gating on that here would deadlock: DRAM_CLKEN waits on
+	-- ADPCM_RAM_READY, which the bridge can't assert until it has started, which it
+	-- can't do without seeing WE/REQ first).
+	ADPCM_RAM_A  <= ADRAM_A;
+	ADPCM_RAM_DO <= ADRAM_DI;
+	ADPCM_RAM_WE <= '1' when DRAM_SLOT = SLOT_WRITE and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1') else '0';
+	ADRAM_DO <= ADPCM_RAM_DI;
+	ADPCM_RAM_REQ <= '1' when (DRAM_SLOT = SLOT_WRITE and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1'))
+	                       or (DRAM_SLOT = SLOT_READ  and (ADPCM_READ_PEND = '1' or PLAY_READ_PEND = '1'))
+	                 else '0';
+	-- ADPCM_RAM_SLOT_CNT (2026-08-27, advisor-caught bug fix): a byte write spans TWO
+	-- consecutive WRITE slots (DRAM_SLOT_CNT "01" then "10") at TWO DIFFERENT addresses
+	-- (ADPCM_WRADDR increments every WRITE-slot DRAM_CLKEN pulse, line ~489 above -- this
+	-- DRAM is natively 4-bit/nibble-addressed, one nibble per address, not one address
+	-- holding both nibbles of a byte). DRAM_SLOT (the decoded REFRESH/WRITE/READ type)
+	-- stays SLOT_WRITE across both, and the pend flag doesn't clear until the second
+	-- nibble, so ADPCM_RAM_REQ above never drops between them -- a bridge edge-detecting
+	-- REQ's rising edge only ever launches the FIRST nibble's write and silently drops
+	-- the second. DRAM_SLOT_CNT itself changes on every slot boundary regardless of
+	-- decoded type, so a bridge should edge-detect changes on THIS signal (qualified by
+	-- ADPCM_RAM_REQ='1' at that moment) instead of edge-detecting ADPCM_RAM_REQ directly.
+	ADPCM_RAM_SLOT_CNT <= std_logic_vector(DRAM_SLOT_CNT);
 
 	
 	process( RST_N, CLK )

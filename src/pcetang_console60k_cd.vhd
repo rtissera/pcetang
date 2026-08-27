@@ -207,6 +207,21 @@ architecture rtl of pcetang_console60k_cd is
    signal brm_do : std_logic_vector(7 downto 0);
    signal brm_we : std_logic;
 
+   -- ADPCM RAM shim (2026-08-27): cd.vhd's internal ADPCM_DRAM dpram(17,4) was removed
+   -- project-wide in favor of pce_top's new ADPCM_RAM_* bridge ports (see
+   -- docs/ARCHITECTURE.md and cd.vhd's own header) so Primer 25K's CD build could offload
+   -- it to external SDRAM and recover ~32 BSRAM blocks. This board still has real,
+   -- audio-wired ADPCM playback (see header comment above -- BSRAM 110/118, PSG/CDDA/
+   -- ADPCM_S all real) and no SDRAM bridge of its own, so it gets this direct
+   -- replacement instead: the exact same dpram(17,4) cd.vhd used to instantiate
+   -- internally, wired straight through the new ports. ADPCM_RAM_READY tied '1' (never
+   -- stall) reproduces the original same-cycle-synchronous-memory assumption exactly --
+   -- see cd.vhd's DRAM_CLKEN wait-gate comment for why that assumption is safe here.
+   signal adpcm_ram_a     : std_logic_vector(16 downto 0);
+   signal adpcm_ram_do    : std_logic_vector(3 downto 0);
+   signal adpcm_ram_we    : std_logic;
+   signal adpcm_ram_di    : std_logic_vector(3 downto 0);
+
 begin
 
    reset_n <= key_reset_n and pll_lock and hdmi_pll_lock;
@@ -291,6 +306,16 @@ begin
       clock => clk_pce, address => brm_a, data => brm_di, wren => brm_we, q => brm_do
    );
 
+   adpcm_ram_shim: entity work.dpram
+   generic map (17, 4)
+   port map (
+      clock     => clk_pce,
+      address_a => adpcm_ram_a,
+      data_a    => adpcm_ram_do,
+      wren_a    => adpcm_ram_we,
+      q_a       => adpcm_ram_di
+   );
+
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
@@ -320,6 +345,12 @@ begin
 
       CD_EN => '0', CD_RAM_A => open, CD_RAM_DO => open,
       CD_RAM_DI => (others => '0'), CD_RAM_RD => open, CD_RAM_WR => open,
+
+      ADPCM_RAM_A => adpcm_ram_a, ADPCM_RAM_DO => adpcm_ram_do,
+      ADPCM_RAM_WE => adpcm_ram_we, ADPCM_RAM_REQ => open,
+      ADPCM_RAM_SLOT_CNT => open,
+      ADPCM_RAM_DI => adpcm_ram_di, ADPCM_RAM_READY => '1',
+
       AC_EN => '0',
 
       CD_STAT => (others => '0'), CD_MSG => (others => '0'), CD_STAT_GET => '0',

@@ -1470,3 +1470,115 @@ this project hasn't observed. No hardware test and no simulation testbench exist
 this responder — the structural/byte-level correctness is now checked against a real,
 independent, hardware-accurate reference, which is the strongest verification available
 without hardware, but it is not the same as watching a real syscard actually boot.
+
+## ADPCM RAM offload to SDRAM (2026-08-27): 27 BSRAM blocks freed, both clock margins improved, `gw_sh`-confirmed
+
+Follow-up to the BSRAM-exhaustion discussion this project has hit three times now (ROM
+buffer, `CD_STAT_GET`/`SCSI_FIFO`, and the section above). `cd.vhd`'s internal
+`ADPCM_DRAM` (`dpram(17,4)`, 128Kx4 = 64KB) was the single largest BSRAM consumer on
+Primer 25K — 32 of 56 blocks, 57% of the entire budget — dispatched to a model agent
+for independent verification of which BSRAM-freeing lever would actually help given
+`clk_sdram`'s thin, trending-down margin (130.6 → 124.4 → 120.964 → 120.364 MHz across
+this session's builds). Recommended design, followed here: share SDRAM's existing
+port C (already used by CD-RAM's own offload, above) via a bridge-level arbiter in the
+`clk_pce`-domain board file, not inside `sdram.sv`'s own arbiter — keeps zero new logic
+on `clk_sdram`'s timing-critical `STATE_IDLE` priority chain.
+
+**Real interface, confirmed by reading `cd.vhd` directly before changing anything**:
+`ADRAM_A` (single time-multiplexed address bus, muxed WRADDR/RDADDR by `DRAM_SLOT`),
+4-bit data in/out, one write enable, timed by `DRAM_CLKEN` (pulses once per 18 CLK
+cycles = 420ns) and a 4-slot round-robin (`DRAM_SLOT_CNT`: REFRESH, WRITE, WRITE,
+READ) that replicates the real original PCE hardware's DRAM refresh timing, not
+anything about this FPGA's SDRAM. Critical fact: `cd.vhd` samples `ADRAM_DO` the SAME
+cycle `DRAM_CLKEN` pulses — a hard 1-cycle synchronous-memory latency baked into the
+state machine, confirmed by checking every `ADRAM_DO` read site (all three inside one
+`DRAM_CLKEN='1' and DRAM_SLOT=SLOT_READ` block, no latched copy read elsewhere).
+
+**Design chosen over speculative prefetch**: `ADPCM_RDADDR` is not purely sequential
+(seeks/resets happen on control writes), so a predictive prefetch risks serving stale
+data on an address jump — silent audio corruption, hard to catch without hardware.
+Instead, extended `cd.vhd`'s own `DRAM_CLKEN` generator with a real wait-gate: holds
+`DRAM_CLK_CNT` at 17 (does not pulse `DRAM_CLKEN`) whenever the current slot has a real
+pending access (new `ADPCM_RAM_REQ` output) and a new `ADPCM_RAM_READY` input hasn't
+confirmed it's done. Not speculative — the address/pend flags are already computed
+combinationally well before the gate is checked, so a bridge has up to ~420ns of lead
+time before this gate needs it, comfortably more than one SDRAM round trip (~83ns).
+`ADPCM_RAM_READY` defaults to `'1'`, so any board that doesn't connect it keeps the
+original never-stall behavior exactly.
+
+New pass-through ports added on `cd.vhd` and `pce_top.vhd` (same pattern as `CD_RAM_*`
+above): `ADPCM_RAM_A`(17)/`ADPCM_RAM_DO`(4, write data)/`ADPCM_RAM_WE`/`ADPCM_RAM_REQ`/
+`ADPCM_RAM_SLOT_CNT`(2, see bug below)/`ADPCM_RAM_DI`(4, read data, in)/
+`ADPCM_RAM_READY`(in). `pcetang_primer25k_cd.vhd`'s existing CD-RAM bridge FSM
+(`cdr_state`) was extended into a real two-owner arbiter (`cdr_owner`: NONE/CDRAM/
+ADPCM) sharing port C — CD-RAM wins ties (it stalls the CPU directly; ADPCM tolerates
+real slack), a request arriving while the other owner is mid-transaction latches into
+a `cd_pend`/`adpcm_pend` flag and is served once the FSM returns to idle, with the
+matching `..._rdy_i`/`..._ready_i` output dropping in the same state-independent cycle
+the request is first seen, not only once the FSM gets around to launching it. One
+nibble packed per SDRAM byte at a new `ADPCM_SDRAM_BASE = 0x090000` (128KB region,
+avoids read-modify-write, which would double port C's transaction count).
+
+**Real bug found by a second model review before committing, not caught by either
+`GowinSynthesis` or `gw_sh`** (both check timing/resources, neither checks protocol
+correctness): a byte write to ADPCM RAM spans two consecutive WRITE slots
+(`DRAM_SLOT_CNT` "01" then "10") at **two different addresses** — this DRAM is
+natively nibble-addressed (`ADPCM_WRADDR` increments on every WRITE-slot `DRAM_CLKEN`
+pulse), not one address holding both nibbles of a byte. The decoded slot *type*
+(`DRAM_SLOT`) stays `SLOT_WRITE` across both, and the pend flag doesn't clear until
+the second nibble, so `ADPCM_RAM_REQ` (a level) never drops between them. The original
+bridge edge-detected `ADPCM_RAM_REQ`'s rising edge directly — this fires once, launches
+the first nibble's write, and silently drops the second on **every single ADPCM byte
+written**. Fixed by exposing `ADPCM_RAM_SLOT_CNT` (the raw 2-bit slot counter, which
+changes on every slot boundary regardless of decoded type) and re-basing the bridge's
+edge detection on slot-count changes qualified by `ADPCM_RAM_REQ`, instead of on
+`ADPCM_RAM_REQ`'s own edge. Read path confirmed unaffected by the same trace: the READ
+slot occurs once per 4-slot rotation, so `ADPCM_RAM_REQ`'s rising edge already worked
+correctly there, and `ADPCM_RDADDR` only increments after the second read nibble (same
+address reused for both, matching the original dpram's behavior exactly).
+
+**Console 60K regression caught and fixed before committing**: `cd.vhd`'s internal
+`ADPCM_DRAM` was removed entirely (not made conditional), but Console 60K's CD build
+has *real*, audio-wired ADPCM playback (`pcetang_console60k_cd.vhd`'s own header:
+`BSRAM 110/118`, `PSG_SL/SR`/`CDDA_SL/SR`/`ADPCM_S` all wired real) — unlike Primer
+25K's, which is fully inert (`CD_EN='0'` there too, but the whole SCSI/status path is
+stubbed and unverified). Confirmed via the resource-report hierarchy that
+`ADPCM_CLK_GEN` is still live logic on Console 60K (not dead code), so the removal
+would have silently zeroed out real ADPCM audio there. Fixed with a direct
+`dpram(17,4)` shim in `pcetang_console60k_cd.vhd` itself — the exact same memory
+`cd.vhd` used to instantiate internally, wired straight through the new ports,
+`ADPCM_RAM_READY` tied `'1'` (safe: it's a real on-chip dpram again, reproducing the
+original same-cycle-latency assumption exactly). Confirmed via the resource report:
+the shim shows 32 BSRAM blocks, restoring Console 60K's original cost/behavior
+unchanged. **Lesson generalized**: `cd.vhd` is shared across every CD-capable board —
+a change to its internal *behavior* (not just its port list) must be checked against
+every board's real configuration, not just the one being actively worked on.
+
+**Real `gw_sh` PnR, confirmed** (Primer 25K CD, with the slot-count bug fix in):
+`Logic 10705/23040 (47%)`, down from `14494/23040 (63%)`. **`BSRAM 29/56 (52%)`, down
+from `56/56 (100%)`** — 27 blocks freed, close to the full 32-block `ADPCM_DRAM` cost
+(the remaining ~5 likely already-freed by other changes this session). `clk_pce`
+42.857 MHz constraint / **43.341 MHz actual** (margin 1.24% → 1.13%, a small dip from
+the extra edge-detect logic, still clean). `clk_sdram` 120.000 MHz constraint /
+**121.904 MHz actual** (margin 0.3% → 1.6%, improved). **0 Setup Violated Endpoints,
+0 Hold Violated Endpoints.** Both margins ended up *better* than the pre-offload
+baseline, not just neutral as designed for — plausible reading, not confirmed by
+further measurement: removing `ADPCM_DRAM`'s 32-block/64KB footprint relieved real
+placement congestion at ~93% CLS utilization, the same congestion independently
+identified as ~50% of the critical path's routing delay. This also makes the
+previously-identified `sdram.sv` `last_valid[]` fix (predicted ~+4% `clk_sdram`
+margin, not yet applied) considerably less urgent now that real headroom exists.
+
+Console 60K's CD build re-confirmed `GowinSynthesis`-clean after both the offload and
+the shim; full `gw_sh` PnR not re-run there this session (the shim is a bit-identical
+replacement of the prior design, so regression risk is low, but end-to-end numbers
+are not re-measured). Primer 25K Phase 1 (non-CD) re-confirmed `GowinSynthesis`-clean.
+Console 60K Phase 1 and Nano 20K are unaffected (`NO_CD=>1`, `cd.vhd` never
+elaborated) and were not re-run.
+
+**Not done**: `vram0_cache.vhd`'s `tag_mem` forced into a now-available BSRAM block
+(the model agent's next-biggest predicted win, downstream of this freeing BSRAM —
+unstarted). `sdram.sv`'s `last_valid[]`/refresh-ordering fixes (unstarted, now lower
+priority). No real hardware or simulation test of ADPCM playback exists on any board —
+this result is `gw_sh`-confirmed for resource/timing closure and protocol-traced
+against `cd.vhd`'s own source for correctness, not verified against real audio output.

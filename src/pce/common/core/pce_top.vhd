@@ -92,6 +92,19 @@ entity pce_top is
 		-- needing a VRAM0-style zero-wait cache. Defaults to '1' (no board-level effect)
 		-- so existing callers that don't connect it are unaffected.
 		CD_RAM_RDY	: in  std_logic := '1';
+
+		-- ADPCM RAM offload (2026-08-27): pass-through to cd.vhd's own ADPCM_RAM_*
+		-- ports (see cd.vhd's header for the full design rationale -- wait-gated
+		-- DRAM_CLKEN, not speculative prefetch). Defaults preserve the original
+		-- never-stall behavior for any board that doesn't connect these.
+		ADPCM_RAM_A		: out std_logic_vector(16 downto 0);
+		ADPCM_RAM_DO	: out std_logic_vector(3 downto 0);
+		ADPCM_RAM_WE	: out std_logic;
+		ADPCM_RAM_REQ	: out std_logic;
+		ADPCM_RAM_SLOT_CNT : out std_logic_vector(1 downto 0);
+		ADPCM_RAM_DI	: in  std_logic_vector(3 downto 0) := (others => '0');
+		ADPCM_RAM_READY: in  std_logic := '1';
+
 		AC_EN			: in  std_logic;
 
 		CD_STAT		: in  std_logic_vector(7 downto 0);
@@ -767,7 +780,15 @@ begin
 
 		CD_SL			=> CDDA_SL,
 		CD_SR			=> CDDA_SR,
-		AD_S			=> ADPCM_S
+		AD_S			=> ADPCM_S,
+
+		ADPCM_RAM_A		=> ADPCM_RAM_A,
+		ADPCM_RAM_DO	=> ADPCM_RAM_DO,
+		ADPCM_RAM_WE	=> ADPCM_RAM_WE,
+		ADPCM_RAM_REQ	=> ADPCM_RAM_REQ,
+		ADPCM_RAM_SLOT_CNT => ADPCM_RAM_SLOT_CNT,
+		ADPCM_RAM_DI	=> ADPCM_RAM_DI,
+		ADPCM_RAM_READY=> ADPCM_RAM_READY
 	);
 end generate;
 
@@ -792,6 +813,11 @@ begin
 	CDDA_SL     <= (others => '0');
 	CDDA_SR     <= (others => '0');
 	ADPCM_S     <= (others => '0');
+	ADPCM_RAM_A   <= (others => '0');
+	ADPCM_RAM_DO  <= (others => '0');
+	ADPCM_RAM_WE  <= '0';
+	ADPCM_RAM_REQ <= '0';
+	ADPCM_RAM_SLOT_CNT <= (others => '0');
 end generate;
 
 CD_RAM_A  <= '0' & AC_RAM_A when AC_RAM_CS_N = '0' else "1000" & CPU_A(17 downto 0);

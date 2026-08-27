@@ -65,7 +65,13 @@ architecture rtl of SCSI_FIFO is
 	-- 0 free BSRAM blocks left -- Gowin fell back to LUT/DFF storage for the whole thing,
 	-- +~11000 LUTs (measured: 13313/23040 clean -> 24061/23040, RP0006). 64 entries is
 	-- real headroom for this stub's actual use (18 sense bytes at a time) at a LUT cost
-	-- small enough not to need a real BSRAM block at all. Confirmed safe project-wide:
+	-- small enough not to need a real BSRAM block at all. NOTE (corrected 2026-08-27):
+	-- this does NOT synthesize as a RAM16 primitive as originally assumed/written here --
+	-- the real synthesis report shows SSRAM(RAM16)=0 for this instance; it becomes ~260
+	-- registers + ~204 LUTs, i.e. real CLS fabric (already ~93% utilized project-wide),
+	-- not a free/neutral resource. Still the right fix for the immediate BSRAM-exhaustion
+	-- problem (LUTs were available, BSRAM wasn't), just not for the reason first stated.
+	-- Confirmed safe project-wide:
 	-- Console 60K's CD build stubs this exact same interface identically (CD_STAT_GET
 	-- tied '0'), so this FIFO is still dead there too -- nothing currently depends on the
 	-- old 4096 depth anywhere. Revisit (widen back, and find real BSRAM for it) once a

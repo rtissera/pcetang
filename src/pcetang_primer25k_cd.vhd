@@ -289,6 +289,12 @@ architecture rtl of pcetang_primer25k_cd is
    constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);
    constant ROM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#050000#, 21);
    constant ROM_SDRAM_ABITS : integer := 18;  -- 256KB, exact real syscard size
+   -- ADPCM RAM offload (2026-08-27): one nibble per SDRAM byte (avoids read-modify-write,
+   -- which would double port-C's transaction count and interleave badly with CD-RAM
+   -- sharing the same port -- see cd.vhd's ADPCM_RAM_* header). 128KB region, doubling
+   -- the real 64KB (128Kx4) ADPCM_DRAM capacity. Provisional base, like the others --
+   -- superseded if/when this project widens SDRAM's data bus.
+   constant ADPCM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#090000#, 21);
 
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
@@ -347,6 +353,34 @@ architecture rtl of pcetang_primer25k_cd is
    signal cdr_state      : cdr_state_t := CDR_IDLE;
    signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
+
+   -- ADPCM RAM bridge: shares this same port-C hardware/FSM with CD-RAM above (Opus-
+   -- agent-recommended design -- see docs/ARCHITECTURE.md -- arbitrating here in the
+   -- clk_pce-domain bridge, NOT inside sdram.sv's own arbiter, keeps clk_sdram's
+   -- timing-critical STATE_IDLE chain untouched). CD-RAM wins ties: it directly stalls
+   -- the CPU via CD_RAM_RDY/WAIT_N, while ADPCM's own DRAM_CLKEN wait-gate (cd.vhd)
+   -- tolerates real slack (~420ns/slot budget vs ~83ns SDRAM round trip). Both share
+   -- port C's single cache line (last_a[2] in sdram.sv) -- a bandwidth question only
+   -- (a miss just refetches), not a correctness one; no prefetch/anti-thrash buffer
+   -- added yet -- measure real contention before adding one.
+   signal adpcm_ram_a_i     : std_logic_vector(16 downto 0);
+   signal adpcm_ram_do_i    : std_logic_vector(3 downto 0);
+   signal adpcm_ram_we_i    : std_logic;
+   signal adpcm_ram_req_i   : std_logic;
+   signal adpcm_ram_slot_cnt_i : std_logic_vector(1 downto 0);
+   signal adpcm_ram_di_i    : std_logic_vector(3 downto 0) := (others => '0');
+   signal adpcm_ram_ready_i : std_logic := '1';
+   -- Edge basis is ADPCM_RAM_SLOT_CNT changing, NOT ADPCM_RAM_REQ's own level -- a byte
+   -- write spans two consecutive WRITE slots at two different addresses, and REQ (a
+   -- level, "does the current slot need real work") never drops between them, so
+   -- edge-detecting REQ itself would launch the first nibble's write and silently drop
+   -- the second. DRAM_SLOT_CNT changes on every slot boundary regardless of decoded
+   -- slot type -- see cd.vhd's ADPCM_RAM_SLOT_CNT comment for the full trace.
+   signal adpcm_slot_cnt_r  : std_logic_vector(1 downto 0) := (others => '0');
+
+   type cdr_owner_t is (OWNER_NONE, OWNER_CDRAM, OWNER_ADPCM);
+   signal cdr_owner : cdr_owner_t := OWNER_NONE;
+   signal cd_pend, adpcm_pend : std_logic := '0';
 
    -- Minimal SCSI target stub. cd.vhd/SCSI.vhd (unmodified from the donor) own the real
    -- SCSI bus phase timing; this just answers CD_COMM_SEND with a response, same clk_pce
@@ -620,33 +654,66 @@ begin
       end if;
    end process;
 
-   -- CD-RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw bus-decode signals, level-held for
-   -- the duration of a real CPU access, not a dedicated request pulse) become one real
-   -- SDRAM access via port C. Edge-detected (cdram_rd_r/cdram_wr_r) rather than
-   -- level-checked like the ROM bridge above, specifically to avoid re-triggering a second
-   -- transaction on the same byte while CD_RAM_RD/WR is still held high through the wait
-   -- this bridge itself introduces -- CD_RAM_RD/WR only drop once the CPU's own bus cycle
-   -- advances, which (via CD_RAM_RDY -> WAIT_N) can't happen until this FSM returns to
-   -- CDR_IDLE and raises cd_ram_rdy_i. RAM_C is level-held/assert-and-hold (port A's
-   -- convention), not port B's toggle-per-request one -- see sdram.sv's header.
+   -- CD-RAM + ADPCM RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw bus-decode signals,
+   -- level-held for the duration of a real CPU access) and ADPCM_RAM_REQ (level-held for
+   -- one DRAM_CLKEN slot, ~420ns, see cd.vhd) both become SDRAM accesses via the same
+   -- shared port C, one at a time, CD-RAM winning ties. Edge-detected (cdram_rd_r/
+   -- cdram_wr_r/adpcm_req_r) rather than level-checked, to avoid re-triggering a second
+   -- transaction while the request signal is still held through the wait this bridge
+   -- itself introduces. A request that arrives while the other owner is mid-transaction
+   -- latches into cd_pend/adpcm_pend (state-independent, set the same cycle as the edge
+   -- regardless of what cdr_state/cdr_owner currently is) and is served as soon as
+   -- cdr_owner returns to OWNER_NONE. cd_ram_rdy_i/adpcm_ram_ready_i drop to '0' in that
+   -- same state-independent block -- not only when the FSM actually launches the
+   -- transaction -- so a request queued behind the other owner correctly stalls its
+   -- caller for the full wait, not just from the moment it happens to reach the front.
+   -- RAM_C is level-held/assert-and-hold (port A's convention), not port B's
+   -- toggle-per-request one -- see sdram.sv's header.
    process (clk_pce)
+      variable cd_new, adpcm_new : std_logic;
    begin
       if rising_edge(clk_pce) then
-         cdram_rd_r <= cd_ram_rd;
-         cdram_wr_r <= cd_ram_wr;
+         cdram_rd_r      <= cd_ram_rd;
+         cdram_wr_r      <= cd_ram_wr;
+         adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
+
+         cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
+            adpcm_new := adpcm_ram_req_i;
+         else
+            adpcm_new := '0';
+         end if;
+
+         if cd_new = '1' then
+            cd_pend      <= '1';
+            cd_ram_rdy_i <= '0';
+         end if;
+         if adpcm_new = '1' then
+            adpcm_pend        <= '1';
+            adpcm_ram_ready_i <= '0';
+         end if;
 
          case cdr_state is
             when CDR_IDLE =>
-               cd_ram_rdy_i <= '1';
                cdr_req <= '0';
-               if (cd_ram_rd = '1' and cdram_rd_r = '0') or
-                  (cd_ram_wr = '1' and cdram_wr_r = '0') then
+               if cd_pend = '1' or cd_new = '1' then
                   cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
                               resize(unsigned(cd_ram_a(17 downto 0)), 21));
                   cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write -- matches RAM_x_RD_n
                   cdr_di   <= cd_ram_do;       -- pce_top's CD_RAM_DO: the byte it's writing
-                  cd_ram_rdy_i <= '0';
-                  cdr_req <= '1';
+                  cdr_req  <= '1';
+                  cdr_owner <= OWNER_CDRAM;
+                  cd_pend  <= '0';
+                  cdr_settle_cnt <= (others => '0');
+                  cdr_state <= CDR_SETTLE;
+               elsif adpcm_pend = '1' or adpcm_new = '1' then
+                  cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
+                              resize(unsigned(adpcm_ram_a_i), 21));
+                  cdr_rd_n <= not adpcm_ram_we_i;
+                  cdr_di   <= "0000" & adpcm_ram_do_i;  -- one nibble packed per SDRAM byte
+                  cdr_req  <= '1';
+                  cdr_owner <= OWNER_ADPCM;
+                  adpcm_pend <= '0';
                   cdr_settle_cnt <= (others => '0');
                   cdr_state <= CDR_SETTLE;
                end if;
@@ -657,9 +724,15 @@ begin
                   if cdr_wait = '1' then
                      cdr_state <= CDR_HOLD;
                   else
-                     cd_ram_di_i <= cdr_do;
-                     cd_ram_rdy_i <= '1';
+                     if cdr_owner = OWNER_CDRAM then
+                        cd_ram_di_i  <= cdr_do;
+                        cd_ram_rdy_i <= '1';
+                     else
+                        adpcm_ram_di_i    <= cdr_do(3 downto 0);
+                        adpcm_ram_ready_i <= '1';
+                     end if;
                      cdr_req <= '0';
+                     cdr_owner <= OWNER_NONE;
                      cdr_state <= CDR_IDLE;
                   end if;
                else
@@ -669,9 +742,15 @@ begin
             when CDR_HOLD =>
                cdr_req <= '1';
                if cdr_wait = '0' then
-                  cd_ram_di_i <= cdr_do;
-                  cd_ram_rdy_i <= '1';
+                  if cdr_owner = OWNER_CDRAM then
+                     cd_ram_di_i  <= cdr_do;
+                     cd_ram_rdy_i <= '1';
+                  else
+                     adpcm_ram_di_i    <= cdr_do(3 downto 0);
+                     adpcm_ram_ready_i <= '1';
+                  end if;
                   cdr_req <= '0';
+                  cdr_owner <= OWNER_NONE;
                   cdr_state <= CDR_IDLE;
                end if;
          end case;
@@ -766,6 +845,11 @@ begin
       CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
       CD_RAM_RDY => cd_ram_rdy_i,
+
+      ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
+      ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,
+      ADPCM_RAM_SLOT_CNT => adpcm_ram_slot_cnt_i,
+      ADPCM_RAM_DI => adpcm_ram_di_i, ADPCM_RAM_READY => adpcm_ram_ready_i,
       AC_EN => '0',
 
       CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,
