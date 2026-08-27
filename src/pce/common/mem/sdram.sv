@@ -114,8 +114,10 @@ module sdram
 	input      [20:0] RAM_A_ADDR,
 	input             RAM_A_REQ,
 	input             RAM_A_RD_n,
-	input       [7:0] RAM_A_DI,
-	output reg  [7:0] RAM_A_DO,
+	// PCE PORT (2026-08-27): widened 8->16 bits -- see header's "port A width" note.
+	// Address stays byte-granular (bit 0 always 0 from vram0_cache.vhd, word-aligned).
+	input      [15:0] RAM_A_DI,
+	output reg [15:0] RAM_A_DO,
 	output reg        RAM_A_WAIT,
 
 	input      [20:0] RAM_B_ADDR,
@@ -184,6 +186,11 @@ reg [21:2] last_a[3];
 // cleared valid bit).
 reg  [2:0] last_valid = 3'b000;
 reg  [8:0] rfsh_cnt;
+// PCE PORT (2026-08-27): set on port A's launch, clear on B's/C's -- see header's "port A
+// width" note. Overrides STATE_CONT's byte-select DQM masking so a port-A write enables
+// BOTH SDRAM_DQ byte lanes instead of masking one (port A is now a real 16-bit-wide
+// access, not two sequential 8-bit ones).
+reg        wide_acc = 1'b0;
 
 wire       fetch_req = (RAM_A_RD_n || !last_valid[0] || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
 // PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
@@ -275,7 +282,8 @@ always @(posedge clk) begin
 		else if((~old_a_req && RAM_A_REQ && (fetch_req || rfsh_cnt[8])) || RAM_A_WAIT) begin
 			we <= RAM_A_RD_n;
 			{bank,a} <= RAM_A_ADDR;
-			data <= {RAM_A_DI,RAM_A_DI};
+			data <= RAM_A_DI;                  // PCE PORT: real 16-bit word, no replication
+			wide_acc <= 1'b1;                  // PCE PORT: see wide_acc declaration
 			ram_req <= fetch_req;
 			last_a[0] <= RAM_A_ADDR[20:2];
 			last_valid[0] <= ~RAM_A_RD_n;
@@ -287,6 +295,7 @@ always @(posedge clk) begin
 			we <= RAM_B_WE;                    // PCE PORT: was implicitly 0 (B was read-only)
 			{bank,a} <= RAM_B_ADDR;
 			data <= {RAM_B_DI,RAM_B_DI};        // PCE PORT: write data, only used when RAM_B_WE
+			wide_acc <= 1'b0;                  // PCE PORT: port B stays byte-granular
 			ram_req <= 1;
 			last_a[1] <= RAM_B_ADDR[20:2];
 			last_valid[1] <= 1'b1;
@@ -301,6 +310,7 @@ always @(posedge clk) begin
 			we <= RAM_C_RD_n;
 			{bank,a} <= RAM_C_ADDR;
 			data <= {RAM_C_DI,RAM_C_DI};
+			wide_acc <= 1'b0;                  // PCE PORT: port C stays byte-granular
 			ram_req <= fetch_req_c;
 			last_a[2] <= RAM_C_ADDR[20:2];
 			last_valid[2] <= ~RAM_C_RD_n;
@@ -320,14 +330,16 @@ always @(posedge clk) begin
 			ch0_busy <= 0;
 			RAM_A_WAIT <= 0;
 			if(ram_req) begin
-				if(we) RAM_A_DO <= data[7:0];
+				// PCE PORT (2026-08-27): port A is a real 16-bit word access now (see
+				// wide_acc) -- no a[0] byte-select on either the write echo or the read.
+				if(we) RAM_A_DO <= data;
 				else begin
-					RAM_A_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
+					RAM_A_DO <= data_reg;
 					last_data[0][(a[1] ? 16 : 0) +:16] <= data_reg;
 					store <= {1'b1,2'b00,~a[1]};
 				end
 			end
-			else RAM_A_DO <= last_data[0][(a[1:0]*8) +:8];
+			else RAM_A_DO <= last_data[0][(a[1] ? 16 : 0) +:16];
 		end
 		if(ch1_busy) begin
 			ch1_busy <= 0;
@@ -427,7 +439,10 @@ always @(posedge clk) begin
 
 	casex({ram_req,mode,state})
 		{1'b1,  MODE_NORMAL, STATE_START}: SDRAM_A <= a[22:10];
-		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {we & ~a[0], we & a[0], 2'b10, a[9:1]};
+		// PCE PORT (2026-08-27): wide_acc (port A only) forces both DQM lanes low on a
+		// write -- a real 16-bit word write, not a byte-masked one. Ports B/C keep the
+		// original a[0] byte-select unchanged.
+		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {(we & ~a[0]) & ~wide_acc, (we & a[0]) & ~wide_acc, 2'b10, a[9:1]};
 
 		// init
 		{1'bX,     MODE_LDM, STATE_START}: SDRAM_A <= MODE;

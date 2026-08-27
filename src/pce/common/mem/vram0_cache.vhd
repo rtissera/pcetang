@@ -1,11 +1,16 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 
--- VRAM0 external-memory cache/refill controller, for the Tang Nano 20K only.
+-- VRAM0 external-memory cache/refill controller.
+--
+-- PCE PORT (2026-08-27): despite the name below, this file is shared -- Primer 25K uses it
+-- too (EXT_VRAM0=>1 there is required, not optional, same as Nano 20K -- see
+-- pcetang_primer25k.vhd's header). Talks to sdram.sv's port A on Primer 25K, sdram32.sv's
+-- on Nano 20K; both were widened to 16 bits alongside this file, see "port A width" below.
 --
 -- Why this exists: GW2AR-18C's on-chip BSRAM cannot hold VRAM0 alongside the rest of the
--- engine (docs/PORTING.md, "Nano 20K's ceiling"). VRAM0 moves to the on-package SDRAM via
--- sdram32.sv's port A instead. The VDC (huc6270.vhd) has no wait-state input anywhere and
--- real hardware's video timing cannot stall -- confirmed by reading huc6260.vhd: H_CNT/
+-- engine (docs/PORTING.md, "Nano 20K's ceiling"). VRAM0 moves to external SDRAM via port
+-- A of whichever controller the board has instead. The VDC (huc6270.vhd) has no
+-- wait-state input anywhere and real hardware's video timing cannot stall -- confirmed by reading huc6260.vhd: H_CNT/
 -- V_CNT run unconditionally off raw CLK, not gated by DCK_CE, so stalling the VDC's
 -- internal counters to wait for a slow access would corrupt the raster rather than pause
 -- it. So this module presents VRAM0's EXISTING plain synchronous single-port interface
@@ -17,10 +22,10 @@
 -- combinational from SLOT, which only changes on DCK_CE, so an address is held stable for
 -- the entire inter-DCK_CE window (4/6/8 CLK cycles = 92.6/139/185 ns at 43.2 MHz) before
 -- huc6270.vhd consumes RAM_DI at the NEXT DCK_CE edge. A cache miss can therefore do a
--- real, correct refill within the dot in the common case (sdram32 round trip ~104 ns per
--- byte fits inside the 139/185 ns budgets outright) instead of returning stale data. Only
--- the tightest case -- 10.7 MHz dot clock, sprite fetch (SG0..SG3, zero idle slots) -- may
--- not always make it; that is instrumented (dbg_deadline_miss), not silently assumed away.
+-- real, correct refill within the dot in the common case instead of returning stale data.
+-- Only the tightest case -- 10.7 MHz dot clock, sprite fetch (SG0..SG3, zero idle slots) --
+-- may not always make it; that is instrumented (dbg_deadline_miss), not silently assumed
+-- away. See docs/ARCHITECTURE.md's VRAM0 section for real measured numbers.
 --
 -- Cache: direct-mapped, 512 lines, each line = 4 consecutive VRAM0 words (an 8-byte
 -- SDRAM-line-aligned group). Index = address(10:2), tag = address(14:11), word-within-
@@ -29,11 +34,14 @@
 -- per scanline, so consecutive scanlines address consecutive words in the SAME line --
 -- one line serves 4 scanlines' worth of BAT/CG/sprite-plane fetches.
 --
--- sdram32's port A is 8 bits wide; a 16-bit VRAM0 word needs two byte transactions. They
--- always land in the SAME 4-byte-aligned sdram32 internal line (two consecutive bytes
--- starting at an even address never straddle a 4-byte boundary), so the second byte is a
--- free hit on sdram32's own 1-line cache -- a full-word refill costs one real SDRAM round
--- trip, not two.
+-- PCE PORT (2026-08-27), port A width: both controllers' port A were 8 bits wide -- a
+-- 16-bit VRAM0 word needed two full sequential REQ/WAIT handshakes (byte_seq's old 7-state
+-- SEQ_REQ_LO/.../SEQ_WAIT_HI_LO shape), ~163 ns of pure protocol overhead per word on top
+-- of the real SDRAM access time. Both controllers' RAM_A_DI/RAM_A_DO are now 16 bits
+-- (sdram.sv via a new wide_acc flag gating its shared DQM byte-mask logic; sdram32.sv
+-- directly, since port A there has no write-sharing with port B to disturb) -- see their
+-- headers. byte_seq below now does ONE handshake per word (SEQ_REQ/SEQ_WAIT_RISE/
+-- SEQ_WAIT_FALL/SEQ_DONE).
 --
 -- STORAGE: 4 separate dpram(9,18) instances, one per word-within-line position -- 16 data
 -- bits plus the valid bit at bit 16 (bit 17 padding, see below), so a write to one word
@@ -162,8 +170,11 @@ entity vram0_cache is
       ram_a_addr : out std_logic_vector(20 downto 0);
       ram_a_req  : out std_logic;
       ram_a_rd_n : out std_logic;
-      ram_a_di   : out std_logic_vector(7 downto 0);
-      ram_a_do   : in  std_logic_vector(7 downto 0);
+      -- PCE PORT (2026-08-27): widened 8->16 bits, matching sdram.sv/sdram32.sv's port A
+      -- width fix -- see byte_seq below and both controllers' headers. One handshake now
+      -- moves a whole VRAM0 word instead of two.
+      ram_a_di   : out std_logic_vector(15 downto 0);
+      ram_a_do   : in  std_logic_vector(15 downto 0);
       ram_a_wait : in  std_logic;
 
       -- Instrumentation, not function: both pulse for one `clock` cycle on the event they
@@ -267,8 +278,9 @@ architecture rtl of vram0_cache is
    -- do not overlap in practice (DMA/CPU-heavy writes run during BURST/vblank, when the
    -- BAT/CG/sprite fetch slots are not active). Owned solely by byte_seq (drain_ptr
    -- included).
-   type seq_state_t is (SEQ_IDLE, SEQ_REQ_LO, SEQ_WAIT_LO_HI, SEQ_WAIT_LO_LO,
-                         SEQ_REQ_HI, SEQ_WAIT_HI_HI, SEQ_WAIT_HI_LO, SEQ_DONE);
+   -- PCE PORT (2026-08-27): collapsed from 7 states (two full 8-bit handshakes per 16-bit
+   -- word) to 5 -- one handshake, now that ram_a_di/do are 16 bits wide. See byte_seq.
+   type seq_state_t is (SEQ_IDLE, SEQ_REQ, SEQ_WAIT_RISE, SEQ_WAIT_FALL, SEQ_DONE);
    signal seq_state : seq_state_t := SEQ_IDLE;
    signal seq_is_write  : std_logic := '0';
    signal seq_addr      : std_logic_vector(14 downto 0) := (others => '0');
@@ -384,7 +396,7 @@ begin
             refill_addr    <= req_addr_d;
             refill_started <= '0';
          end if;
-         if seq_state = SEQ_REQ_LO and seq_is_write = '0' and seq_addr = refill_addr then
+         if seq_state = SEQ_REQ and seq_is_write = '0' and seq_addr = refill_addr then
             refill_started <= '1';
          end if;
          if seq_state = SEQ_DONE and seq_is_write = '0' and seq_addr = refill_addr then
@@ -468,52 +480,37 @@ begin
                      seq_wdata     <= fifo_data(pick);
                      seq_is_write  <= '1';
                      drain_ptr     <= (pick + 1) mod FIFO_DEPTH;
-                     seq_state     <= SEQ_REQ_LO;
+                     seq_state     <= SEQ_REQ;
                   end if;
                end loop;
                if not found_pick and refill_pending = '1' and refill_started = '0' then
                   seq_addr     <= refill_addr;
                   seq_is_write <= '0';
-                  seq_state    <= SEQ_REQ_LO;
+                  seq_state    <= SEQ_REQ;
                end if;
 
-            when SEQ_REQ_LO =>
+            -- PCE PORT (2026-08-27): one REQ/WAIT round trip moves the whole 16-bit word
+            -- now (ram_a_di/do widened -- see both controllers' headers), replacing the
+            -- old two-full-handshake low-byte/high-byte sequence. seq_addr's own bit 0 is
+            -- always 0 (word-aligned), so the address is unchanged from the old low-byte
+            -- launch.
+            when SEQ_REQ =>
                seq_idx    <= idx_of(seq_addr);
                seq_tag    <= tag_of(seq_addr);
                seq_way    <= way_of(seq_addr);
                ram_a_addr <= "00000" & seq_addr & '0';
                ram_a_rd_n <= seq_is_write;
-               ram_a_di   <= seq_wdata(7 downto 0);
+               ram_a_di   <= seq_wdata;
                ram_a_req  <= '1';
-               seq_state  <= SEQ_WAIT_LO_HI;
-            when SEQ_WAIT_LO_HI =>              -- wait for the controller to observe REQ
+               seq_state  <= SEQ_WAIT_RISE;
+            when SEQ_WAIT_RISE =>               -- wait for the controller to observe REQ
                ram_a_req <= '1';
                if ram_a_wait = '1' then
-                  seq_state <= SEQ_WAIT_LO_LO;
+                  seq_state <= SEQ_WAIT_FALL;
                end if;
-            when SEQ_WAIT_LO_LO =>              -- then wait for it to complete
+            when SEQ_WAIT_FALL =>               -- then wait for it to complete
                if ram_a_wait = '0' then
-                  seq_rdata(7 downto 0) <= ram_a_do;
-                  seq_state <= SEQ_REQ_HI;
-               end if;
-
-            -- High byte -- same 4-byte sdram32 line as the low byte (see header), so this
-            -- is a fast hit there even though it is still a full REQ/WAIT round trip on
-            -- this side of the interface.
-            when SEQ_REQ_HI =>
-               ram_a_addr <= "00000" & seq_addr & '1';
-               ram_a_rd_n <= seq_is_write;
-               ram_a_di   <= seq_wdata(15 downto 8);
-               ram_a_req  <= '1';
-               seq_state  <= SEQ_WAIT_HI_HI;
-            when SEQ_WAIT_HI_HI =>
-               ram_a_req <= '1';
-               if ram_a_wait = '1' then
-                  seq_state <= SEQ_WAIT_HI_LO;
-               end if;
-            when SEQ_WAIT_HI_LO =>
-               if ram_a_wait = '0' then
-                  seq_rdata(15 downto 8) <= ram_a_do;
+                  seq_rdata <= ram_a_do;
                   seq_state <= SEQ_DONE;
                end if;
 
@@ -526,8 +523,8 @@ begin
 
    -- Sequencer's own dedicated read port (B) on both memories -- never contends with the
    -- live access on port A, and never writes (invariant 2's refill install goes through
-   -- port A, see above). Driven from SEQ_REQ_LO onward (seq_idx captured there), giving
-   -- the whole low+high-byte round trip -- far more than the 1 cycle either read needs to
+   -- port A, see above). Driven from SEQ_REQ onward (seq_idx captured there), giving
+   -- the whole REQ/WAIT round trip -- far more than the 1 cycle either read needs to
    -- settle -- before SEQ_DONE needs the result.
    tag_addr_b <= std_logic_vector(seq_idx);
    gen_way_b_wiring: for k in 0 to 3 generate

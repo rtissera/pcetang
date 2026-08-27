@@ -52,8 +52,8 @@ entity pce_top is
 		VRAM0_RAM_A_ADDR : out std_logic_vector(20 downto 0);
 		VRAM0_RAM_A_REQ  : out std_logic;
 		VRAM0_RAM_A_RD_N : out std_logic;
-		VRAM0_RAM_A_DI   : out std_logic_vector(7 downto 0);
-		VRAM0_RAM_A_DO   : in  std_logic_vector(7 downto 0) := (others => '0');
+		VRAM0_RAM_A_DI   : out std_logic_vector(15 downto 0);
+		VRAM0_RAM_A_DO   : in  std_logic_vector(15 downto 0) := (others => '0');
 		VRAM0_RAM_A_WAIT : in  std_logic := '0';
 
 		ROM_RD		: out std_logic;

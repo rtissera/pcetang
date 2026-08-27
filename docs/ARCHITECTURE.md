@@ -1735,3 +1735,84 @@ simulation test has ever run the full EXT_VRAM0 path end-to-end against real vid
 timing; nothing here contradicts the possibility that VRAM0 is currently producing
 wrong pixels on real hardware whenever a miss occurs, on every board using
 `EXT_VRAM0=1`.
+
+## Port-A width fix (2026-08-27): `sdram.sv`/`sdram32.sv` widened 8->16 bits, `gw_sh`-confirmed on all three boards -- biggest lever the VRAM0 deadline investigation found
+
+Follow-up to the VRAM0 deadlock/deadline investigation above (see
+[[pcetang-vram0-investigation]] for the full prior-art research this grew out of,
+including the corrected finding that fpgapce's `TwoWayCache.v` doesn't apply here and
+the real one -- `sdram.sv` port A being only 8 bits wide -- does). A 16-bit VRAM0 word
+needed two full sequential REQ/WAIT handshakes (`vram0_cache.vhd`'s old 7-state
+`byte_seq`: `SEQ_REQ_LO/SEQ_WAIT_LO_HI/SEQ_WAIT_LO_LO/SEQ_REQ_HI/SEQ_WAIT_HI_HI/
+SEQ_WAIT_HI_LO/SEQ_DONE`), ~163 ns of pure protocol overhead per word before any real
+SDRAM timing even starts -- independent of, and bigger than, any cache-shape decision.
+
+**Changed**: `RAM_A_DI`/`RAM_A_DO` on both `sdram.sv` (Primer 25K) and `sdram32.sv`
+(Nano 20K) widened from 8 to 16 bits. `vram0_cache.vhd` is genuinely shared between
+both boards (`EXT_VRAM0=>1` is required on both, not just Nano 20K -- the file's own
+header said "Nano 20K only," which was already stale; corrected), so both controllers
+had to move in lockstep or Nano 20K's build would stop compiling.
+
+- **`sdram.sv`**: added a `wide_acc` register, set on port A's launch, cleared on B's
+  and C's. It overrides the shared `STATE_CONT` DQM-mask expression
+  (`SDRAM_A <= {(we & ~a[0]) & ~wide_acc, (we & a[0]) & ~wide_acc, 2'b10, a[9:1]}`) so
+  a port-A write enables both SDRAM_DQ byte lanes instead of masking one -- ports B/C
+  keep their original byte-select behavior untouched. `data <= RAM_A_DI` (no more
+  8-bit replication into both halves); reads drop the `a[0]` byte mux entirely
+  (`RAM_A_DO <= data_reg`).
+- **`sdram32.sv`**: simpler -- port A there has no write-sharing with port B (port B
+  is read-only), so no flag needed. `dqm_w <= a_addr_d[1] ? 4'b0011 : 4'b1100`
+  selects which half of the 4-byte SDRAM line to enable; `data <= {2{a_di_d}}`
+  replicates the 16-bit value across both halves, DQM picks the right one, mirroring
+  the existing single-byte trick. **Also ported this session's `sdram.sv` deadlock
+  fix here** (`RAM_A_WAIT` now asserts unconditionally on every port-A REQ edge,
+  removing the free-hit path) -- required, not optional: re-derivation showed this
+  controller's own cache-line granularity (4-byte-aligned) means two consecutive
+  16-bit words alias to the same internal line just as often as two consecutive bytes
+  did before, so leaving the old free-hit path in would have made Nano 20K hang on
+  every refill's second word, not just the first-after-reset case `sdram.sv` had.
+- **`vram0_cache.vhd`**: `byte_seq` collapsed from 7 states to 5
+  (`SEQ_IDLE/SEQ_REQ/SEQ_WAIT_RISE/SEQ_WAIT_FALL/SEQ_DONE`) -- one REQ/WAIT round trip
+  moves the whole word now. All 3 documented correctness invariants (write-clears-
+  other-3-words-on-tag-change, refill-checked-via-dedicated-port-B-read, write-FIFO-
+  priority-over-refills) are untouched -- this edit only touches the handshake width,
+  not the cache storage/install logic (Bug 2, the tag-never-written-on-refill
+  correctness bug, is a separate, still-unfixed issue -- see the investigation memo).
+- Port-width plumbing updated at every declaration site: `pce_top.vhd`'s
+  `VRAM0_RAM_A_DI`/`_DO`, both `component sdram`/`component sdram32` declarations and
+  `vram0_ram_a_di`/`_do` signals in `pcetang_primer25k.vhd`, `pcetang_primer25k_cd.vhd`,
+  `pcetang_nano20k.vhd`. Console 60K's `pcetang_console60k*.vhd` needed no change --
+  its `VRAM0_RAM_A_DI => open, VRAM0_RAM_A_DO => (others => '0')` wiring is
+  width-agnostic (`EXT_VRAM0=>0` there, on-chip path, unaffected either way).
+
+**Real `gw_sh` PnR, all three affected boards, all clean, 0 setup/hold violations
+(`Total Negative Slack` = 0 on every clock, every board):**
+
+| Board | Logic | BSRAM | clk_sdram (constraint -> actual) | clk_pce (constraint -> actual) |
+|---|---|---|---|---|
+| Primer 25K + CD | 10641/23040 (47%) | 29/56 (52%) | 120.000 -> 134.312 MHz (+11.9%) | 42.857 -> 47.870 MHz (+11.7%) |
+| Primer 25K Phase 1 (no CD) | 12402/23040 (54%) | 56/56 (100%) | 120.000 -> 152.167 MHz (+26.8%) | 42.857 -> 42.893 MHz (**+0.08%**) |
+| Nano 20K | 8008/20736 (39%) | 37/46 (81%) | 135.000 -> 171.922 MHz (+27.4%) | 43.200 -> 45.680 MHz (+5.7%) |
+
+BSRAM/Logic unchanged from before this fix on all three, as expected (a protocol
+width change moves no memory). The CD build's clock margins *improved* versus the
+pre-widening numbers above (`clk_sdram` 8.46%->11.9%, `clk_pce` 4.85%->11.7%) --
+removing the double-handshake state machine shortened the real critical path, a real
+bonus on top of the throughput win, not just a neutral protocol change.
+
+**Real, named risk, not glossed over**: Primer 25K Phase 1 (non-CD) closes `clk_pce`
+at only **+0.08% margin** (42.893 MHz actual against a 42.857 MHz requirement, 0.036
+MHz of slack) -- passes this specific build with 0 violating endpoints, but is close
+enough to zero that a different PnR seed, a small unrelated future change, or a
+different toolchain version could tip it into a real violation. This is the
+non-CD/Phase-1 build specifically (100% BSRAM, the tightest of the three) -- the CD
+build (52% BSRAM) has real headroom. Flagged, not fixed here; worth a real look before
+relying on Phase 1 specifically.
+
+**Not yet done**: step 2 of the two-step validation plan from
+[[pcetang-vram0-investigation]] -- measuring whether 4 pipelined sprite fetches
+(SG0-3, zero idle slots) can now sustain ~93ns/word on an open SDRAM row with this
+faster protocol, which decides whether a SLOT-driven prefetcher can close the VRAM0
+deadline gap with `huc6270.vhd` left completely untouched, or whether real VDC surgery
+is needed instead. Also still open: Bug 2 (refill-never-installs correctness bug) and
+Bug 3 (miss-detection-one-dot-late), both documented, neither touched by this change.

@@ -78,8 +78,12 @@ module sdram32
 	input      [20:0] RAM_A_ADDR,
 	input             RAM_A_REQ,
 	input             RAM_A_RD_n,
-	input       [7:0] RAM_A_DI,
-	output reg  [7:0] RAM_A_DO,
+	// PCE PORT (2026-08-27): widened 8->16 bits, mirroring sdram.sv's port A width fix --
+	// see that file's header. Port A here is read-only-shared with no port B write path,
+	// so unlike sdram.sv this needs no wide_acc flag: dqm_w/data below are only ever set
+	// by port A's own launch branch.
+	input      [15:0] RAM_A_DI,
+	output reg [15:0] RAM_A_DO,
 	output reg        RAM_A_WAIT,
 
 	input      [20:0] RAM_B_ADDR,
@@ -205,7 +209,7 @@ end
 // CPU cycle.
 reg [20:0] a_addr_d, b_addr_d;
 reg        a_req_d, a_rd_n_d, b_req_d;
-reg  [7:0] a_di_d;
+reg [15:0] a_di_d;
 reg hit_a, hit_b;
 always @(posedge clk) begin
 	a_addr_d <= RAM_A_ADDR;
@@ -235,10 +239,20 @@ always @(posedge clk) begin
 
 	if(~&rfsh_cnt) rfsh_cnt <= rfsh_cnt + 1'd1;
 
+	// PCE PORT (2026-08-27): same real deadlock as sdram.sv had (see that file's
+	// STATE_IDLE header note) -- the free/no-WAIT cache-hit path here means a hit never
+	// raises RAM_A_WAIT, and vram0_cache.vhd's refill sequencer blocks unconditionally on
+	// ram_a_wait='1'. At this controller's 4-byte-aligned cache-line granularity, two
+	// consecutive 16-bit-word fetches within the same 4-byte span alias to the same
+	// last_a[0] -- i.e. every refill's second word, not just an occasional one -- so this
+	// was live on every access, worse than sdram.sv's "first refill after reset" case.
+	// Fixed the same way: RAM_A_WAIT now asserts unconditionally on every port-A REQ
+	// edge; the STATE_IDLE launch's existing `|| RAM_A_WAIT` term runs the real state
+	// machine even on a hit (ram_req=0, no real SDRAM command, just the handshake round
+	// trip vram0_cache.vhd already expects).
 	old_a_req <= a_req_d;
 	if(~old_a_req & a_req_d) begin
-		if(rfsh_cnt[8] || fetch_req) RAM_A_WAIT <= 1;
-		else RAM_A_DO <= last_data[0][(a_addr_d[1:0]*8) +:8];
+		RAM_A_WAIT <= 1;
 	end
 
 	if((old_b_req ^ b_req_d) && hit_b) begin
@@ -286,8 +300,12 @@ always @(posedge clk) begin
 			we        <= a_rd_n_d;
 			word_a    <= a_addr_d[20:2];
 			byte_a    <= a_addr_d[1:0];
-			data      <= {4{a_di_d}};
-			dqm_w     <= ~(4'd1 << a_addr_d[1:0]);     // only the addressed byte is written
+			// PCE PORT (2026-08-27): port A is a real 16-bit word now (see RAM_A_DI/DO
+			// width note) -- writes both bytes of the addressed half, not one byte of
+			// four. a_addr_d[0] is always 0 (word-aligned from vram0_cache.vhd); [1]
+			// selects which half of the 4-byte SDRAM line.
+			data      <= {2{a_di_d}};
+			dqm_w     <= a_addr_d[1] ? 4'b0011 : 4'b1100;
 			ram_req   <= fetch_req;
 			// A write invalidates the line rather than trying to patch it: the byte went
 			// to the chip, and the cached copy would otherwise go stale.
@@ -314,13 +332,15 @@ always @(posedge clk) begin
 			ch0_busy   <= 0;
 			RAM_A_WAIT <= 0;
 			if(ram_req) begin
-				if(we) RAM_A_DO <= data[7:0];
+				// PCE PORT (2026-08-27): 16-bit word select via byte_a[1] (which half of
+				// the 4-byte line), not the old byte_a[1:0]*8 byte select.
+				if(we) RAM_A_DO <= a_di_d;
 				else begin
-					RAM_A_DO       <= data_reg[(byte_a*8) +:8];
+					RAM_A_DO       <= byte_a[1] ? data_reg[31:16] : data_reg[15:0];
 					last_data[0]   <= data_reg;      // one access fills the whole line
 				end
 			end
-			else RAM_A_DO <= last_data[0][(byte_a*8) +:8];
+			else RAM_A_DO <= byte_a[1] ? last_data[0][31:16] : last_data[0][15:0];
 		end
 		if(ch1_busy) begin
 			ch1_busy     <= 0;
