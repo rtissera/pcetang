@@ -41,20 +41,24 @@
 // backing pce_top.vhd's CD_RAM_A window), so it needed real arbitration, not a mux.
 // Mirrors port A's convention (real read+write, small line cache, level-held REQ with
 // rising-edge launch) rather than B's toggle/write-invalidates one -- see fetch_req_c
-// and the ch2_busy completion block. Priority is A > B > C > refresh (lowest of the
-// three clients, ahead only of the forced `&rfsh_cnt` refresh). `store` widened from
-// 3 bits to 4 (was a 1-bit channel select packed into its top 2 bits alongside the
-// pending flag; now a real 2-bit channel select, `store[2:1]`, for 3 channels).
+// and the ch2_busy completion block. Priority is refresh > A > B > C -- see the
+// refresh-first note below for why refresh leads. `store` widened from 3 bits to 4
+// (was a 1-bit channel select packed into its top 2 bits alongside the pending flag;
+// now a real 2-bit channel select, `store[2:1]`, for 3 channels).
 //
-// Real, flagged, NOT yet measured: adding a third continuously-active client increases
-// (does not newly introduce) refresh-starvation risk -- the same class of bug
-// sdram32.sv's own header documents already being found and fixed once in this project's
-// history, on a design with only two clients. This design still lets refresh be
-// starved indefinitely in principle if B and C keep re-triggering back-to-back with zero
-// idle gap (refresh is checked only when nothing else in STATE_IDLE wants the bus).
-// Real ROM/CD-RAM traffic is expected to be bursty, not literally saturating, but this
-// is an assumption, not a measurement -- revisit if hardware testing ever shows visible
-// corruption or lockups under heavy CD access.
+// PCE PORT (2026-08-27): refresh moved to the FRONT of the STATE_IDLE priority chain,
+// ahead of all three clients -- it used to be the last `else if`, so a client only had
+// to stay busy to starve it indefinitely, and this design's own header had flagged
+// exactly that risk as real but unmeasured once a third continuously-active client
+// (C) was added. sdram32.sv's own header documents the identical bug already found
+// and fixed on the Nano 20K variant of this donor, with a real field symptom: every
+// ROM loaded and verified, then the machine dropped to a grey screen with random bars
+// once real traffic (not just the boot loader) kept the controller busy enough that
+// STATE_IDLE was never reached with every client quiet -- rows need refreshing every
+// 7.8us and none were issued. `rfsh_cnt` is 9 bits and saturates, so the deadline is
+// 511 cycles -- at this file's 120MHz `clk_sdram`, 4.26us, comfortably inside spec.
+// Preempting costs whichever client was about to launch one refresh cycle (a handful
+// of clk_sdram cycles, not a whole VRAM0/ROM/CD-RAM transaction).
 //
 // PCE PORT (2026-08-27): `last_valid[]` replaces the "stuff last_a with all-ones on a
 // miss/write" sentinel, for ports A and C (port B already used a separate real
@@ -240,10 +244,16 @@ always @(posedge clk) begin
 		ch1_busy <= 0;
 		ch2_busy <= 0;
 
+		// PCE PORT (2026-08-27): refresh checked FIRST, ahead of all three clients --
+		// see header's refresh-first note for the real starvation bug this avoids.
+		if(&rfsh_cnt) begin
+			rfsh_cnt <= 0;
+			state <= STATE_START;
+		end
 		// PCE PORT: A (VRAM0, zero wait-tolerance) now goes before B (ROM, tolerant via
 		// pce_top.vhd's ROM_RDY -> WAIT_N) -- see header. Same launch logic as before,
 		// just reordered.
-		if((~old_a_req && RAM_A_REQ && (fetch_req || rfsh_cnt[8])) || RAM_A_WAIT) begin
+		else if((~old_a_req && RAM_A_REQ && (fetch_req || rfsh_cnt[8])) || RAM_A_WAIT) begin
 			we <= RAM_A_RD_n;
 			{bank,a} <= RAM_A_ADDR;
 			data <= {RAM_A_DI,RAM_A_DI};
@@ -264,10 +274,10 @@ always @(posedge clk) begin
 			ch1_busy <= 1;
 			state <= STATE_START;
 		end
-		// PCE PORT: third client, lowest priority ahead of refresh only -- CD-RAM traffic
-		// is real-time (CPU-stalling via CD_RAM_RDY -> WAIT_N) but less latency-sensitive
-		// than VRAM0 (A) and expected to be less frequent than ROM fetch (B). See header's
-		// arbitration/refresh-starvation note -- a real, flagged, not-yet-measured risk.
+		// PCE PORT: third client, lowest priority among the three (after refresh, A, and
+		// B) -- CD-RAM traffic is real-time (CPU-stalling via CD_RAM_RDY -> WAIT_N) but
+		// less latency-sensitive than VRAM0 (A) and expected to be less frequent than ROM
+		// fetch (B). Refresh now preempts all three -- see header's refresh-first note.
 		else if((~old_c_req && RAM_C_REQ && fetch_req_c) || RAM_C_WAIT) begin
 			we <= RAM_C_RD_n;
 			{bank,a} <= RAM_C_ADDR;
@@ -276,10 +286,6 @@ always @(posedge clk) begin
 			last_a[2] <= RAM_C_ADDR[20:2];
 			last_valid[2] <= ~RAM_C_RD_n;
 			ch2_busy <= 1;
-			state <= STATE_START;
-		end
-		else if(&rfsh_cnt) begin
-			rfsh_cnt <= 0;
 			state <= STATE_START;
 		end
 	end

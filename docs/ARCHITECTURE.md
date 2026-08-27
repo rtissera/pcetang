@@ -1640,5 +1640,32 @@ not just improved by placement noise.
 delaying `addr`/`req`/`rd_n`/`di` by one cycle) -- a bigger, riskier change with a
 documented hardware-measured partial-fix failure mode ("252 of 256 bytes wrong" on
 real Nano 20K when only one side was delayed), not requested and not applied here.
-Refresh-first arbitration reordering in `sdram.sv` (the other real, previously-fixed-
-elsewhere bug class, starvation under sustained B/C traffic) -- still unstarted.
+
+### Follow-up: refresh-first arbitration reordering in `sdram.sv`, `gw_sh`-confirmed
+
+The other real, previously-fixed-elsewhere bug class this design was still exposed
+to: refresh was the LAST `else if` in the `STATE_IDLE` priority chain, so any client
+only had to stay busy to starve it indefinitely -- with three continuously-active
+clients now (A/B/C), this design's own header had already flagged the risk as real
+but unmeasured. `sdram32.sv`'s header documents the identical bug already found and
+fixed on the Nano 20K variant of this donor, with a real field symptom (every ROM
+loaded and verified, then a grey screen with random bars once real traffic kept the
+controller busy enough that `STATE_IDLE` was never reached with every client quiet).
+Fixed the same way: moved the `if(&rfsh_cnt)` refresh check to the FRONT of the
+`STATE_IDLE` chain, ahead of A/B/C, converting the old trailing `else if` into a dead
+branch removed. No change to any client's own launch condition.
+
+**Real `gw_sh` PnR, confirmed**: `clk_sdram` **130.772 MHz actual** (margin 6.6% →
+9.0%, logic level 8 → 7). `clk_pce` **45.556 MHz actual** (margin 9.06% → 6.30%, a
+real but modest dip -- moving one comparison earlier in a priority chain shifted
+placement, as expected; still comfortably passing). `BSRAM 29/56 (52%)` and
+`Logic 10770/23040 (47%)` unchanged. **0 setup/hold violations.** Net: a correctness
+fix for a real (if unmeasured) starvation bug, not purely a timing-margin play --
+worth keeping even though it cost a little of `clk_pce`'s margin, since both clocks
+still close with real headroom (6.3%+ on the tighter one) after three consecutive
+scoped fixes this session moved both clocks from "thin" (0.3%/1.24%) to healthy.
+
+**Not done**: no hardware or simulation test exists to confirm the starvation bug was
+ever actually hit in practice on this design (three clients is new this session, from
+the ADPCM offload) -- this fix removes a documented bug class pre-emptively, the same
+way `last_valid[]` did, not in response to an observed failure on this specific board.
