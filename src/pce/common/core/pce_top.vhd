@@ -14,6 +14,13 @@
 -- they use before relying on its content, same as real hardware. A deliberate, documented
 -- scope decision, not an oversight -- revisit if it ever turns out to matter.
 --
+-- SECOND CHANGE (2026-08-27): a new `CD_RAM_RDY` input (default '1', so existing callers
+-- are unaffected), ANDed into `WAIT_N` alongside `ROM_RDY`. CD-RAM's own `CD_RAM_DI` has
+-- no wait path in the donor -- it muxes into the CPU read path combinationally, same
+-- cycle -- because the donor assumes CD-RAM is backed by fast local memory. A board
+-- backing it with external SDRAM instead needs to stall the CPU the same way the ROM
+-- path already does; see docs/ARCHITECTURE.md's "Real syscard boot" section.
+--
 -- NOT VERIFIED ON HARDWARE.
 
 library IEEE;
@@ -79,6 +86,12 @@ entity pce_top is
 		CD_RAM_DI 	: in  std_logic_vector(7 downto 0);
 		CD_RAM_RD	: out std_logic;
 		CD_RAM_WR	: out std_logic;
+		-- CD-RAM has no wait path of its own (CD_RAM_DI muxes straight into the CPU read
+		-- path combinationally, see below) -- added so a board backing CD_RAM with
+		-- external memory can stall the CPU the same way ROM_RDY already does, instead of
+		-- needing a VRAM0-style zero-wait cache. Defaults to '1' (no board-level effect)
+		-- so existing callers that don't connect it are unaffected.
+		CD_RAM_RDY	: in  std_logic := '1';
 		AC_EN			: in  std_logic;
 
 		CD_STAT		: in  std_logic_vector(7 downto 0);
@@ -310,7 +323,7 @@ CPU : entity work.HUC6280
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,
-	WAIT_N	=> ROM_RDY and not CPU_PAUSE_EN,
+	WAIT_N	=> ROM_RDY and CD_RAM_RDY and not CPU_PAUSE_EN,
 
 	IRQ1_N	=> VDC0_IRQ_N and VDC1_IRQ_N,
 	IRQ2_N	=> CD_IRQ_N,

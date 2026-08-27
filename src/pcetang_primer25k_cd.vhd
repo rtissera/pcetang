@@ -27,24 +27,35 @@
 -- violations across 28953 endpoints, every clock's Fmax beats its constraint. See
 -- docs/ARCHITECTURE.md's "Goal revised" section for the full result.
 --
--- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): `ROM_SZ` changed from `x"008"`
--- (32K HuCard decode) to `x"040"` (256K, the real syscard3.pce size) so the CPU actually
--- addresses the full syscard rather than a 32KB mirror of it. `ROM_SDRAM_BASE`/
--- `ROM_SDRAM_ABITS` moved to a real 3-way split of bank 0's 2MB window (VRAM0 at
--- 0x000000, a reserved-but-not-yet-wired CD-RAM slice at 0x010000, ROM at 0x050000 --
--- see the constants' own comments) instead of the earlier provisional 1MB-ROM layout,
--- since a 256KB ROM doesn't need anywhere near 1MB and CD-RAM (pce_top's `CD_RAM_A`
--- window, 256KB) needs its own real space before it can be wired up.
+-- REAL gw_sh-VERIFIED (2026-08-27): `ROM_SZ` changed from `x"008"` (32K HuCard decode) to
+-- `x"040"` (256K, the real syscard3.pce size) so the CPU actually addresses the full
+-- syscard rather than a 32KB mirror of it. Address map re-split 3 ways (VRAM0 at
+-- 0x000000, CD-RAM at 0x010000, ROM at 0x050000 -- see the constants' own comments).
+-- `Logic 14002/23040 (61%), BSRAM 56/56 (100%)`, 0 setup/hold violations across 28935
+-- endpoints. See docs/ARCHITECTURE.md's "Real syscard boot" Part 1 section.
 --
--- This is a ROM-path-only fix. `CD_EN` is still `'0'` and `CD_RAM_*`/`CD_STAT`/`CD_COMM`
--- are still open/stubbed -- with `CD_EN` low, `pce_top.vhd`'s CD subsystem is inert, and
--- syscard code that issues any SCSI command (which real syscard boot code does almost
--- immediately, per its own BIOS behavior) will get no response, since nothing drives
--- `CD_STAT_GET`. Whether that hangs the CPU or falls through depends on the syscard's own
--- polling code, not this RTL -- not yet determined. A real SCSI target stub (minimum:
--- TEST UNIT READY + REQUEST SENSE, including the DATA-IN FIFO path for sense bytes) is
--- separately scoped, not started -- see docs/ARCHITECTURE.md's "Real syscard boot"
--- section for the investigation and why it isn't a small add-on.
+-- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): CD-RAM given real backing. `CD_EN`
+-- was still `'0'` and `CD_RAM_*` still open/stubbed after the ROM fix above -- with
+-- `CD_EN` low, `pce_top.vhd`'s CD subsystem was inert, and syscard code that issues any
+-- SCSI command (real syscard BIOS does almost immediately) would get no response. This
+-- change: `CD_EN => '1'`, and `CD_RAM_A/DO/DI/RD/WR` bridged through a new third SDRAM
+-- port (`sdram.sv`'s port C, added for this -- see that file's header) instead of the
+-- on-chip dpram the donor assumes -- CD-RAM's decode window is 256KB (`cd.vhd`'s own
+-- `RAM_SEL`, `0x68`-`0x87` in 8KB units, confirmed from source), too big for any
+-- remaining BSRAM (0 free blocks). Unlike ROM, CD-RAM has no wait-state path of its own
+-- in the donor (`CD_RAM_DI` muxes into the CPU read path combinationally) and genuinely
+-- overlaps VRAM0/ROM traffic in time (accessed live during gameplay, not just once at
+-- load) -- so this needed a real new `CD_RAM_RDY` port on `pce_top.vhd` (ANDed into
+-- `WAIT_N` alongside `ROM_RDY`) and a real arbitrated third SDRAM client, not another
+-- static mux like the ROM bridge. See `sdram.sv`'s header for the arbitration priority
+-- (A > B > C > refresh) and a flagged, not-yet-measured refresh-starvation risk.
+--
+-- Still not done after this: `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM` remain stubbed
+-- constants below -- nothing yet answers a SCSI command, so whether the CPU actually
+-- reaches a boot screen or hangs polling for a response is still unmeasured. A real SCSI
+-- target stub (minimum: any command -> CHECK CONDITION; REQUEST SENSE -> real sense bytes
+-- through `cd.vhd`'s DATA-IN FIFO) is the next real step -- see docs/ARCHITECTURE.md's
+-- "Real syscard boot" Part 2 section.
 --
 -- HDMI/UART pins reused directly from nand2mario's own nestang primer25k.cst (this
 -- board, his own working config) rather than adapted from a different board/protocol
@@ -130,7 +141,13 @@ architecture rtl of pcetang_primer25k_cd is
          RAM_B_WE   : in    std_logic;
          RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
-         RAM_B_WAIT : out   std_logic
+         RAM_B_WAIT : out   std_logic;
+         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_REQ  : in    std_logic;
+         RAM_C_RD_n : in    std_logic;
+         RAM_C_DI   : in    std_logic_vector(7 downto 0);
+         RAM_C_DO   : out   std_logic_vector(7 downto 0);
+         RAM_C_WAIT : out   std_logic
       );
    end component;
 
@@ -254,15 +271,14 @@ architecture rtl of pcetang_primer25k_cd is
    --                              15+1=16 address bits = 64KB), matching real PCE VRAM0
    --                              (32K x 16-bit).
    --   0x010000-0x04FFFF (256KB): CD-RAM (pce_top's CD_RAM_A window, "1000"&CPU_A(17:0)).
-   --                              Reserved here, not yet wired -- CD_RAM_* is still open/
-   --                              stubbed (CD_EN => '0'). Real backing is a separate,
-   --                              larger task (see ARCHITECTURE.md); this constant exists
-   --                              so ROM's own placement below doesn't collide with it
-   --                              later.
+   --                              Now wired via sdram.sv's third port (C), see the cd_ram_*/
+   --                              cdr_* signals below. 256KB confirmed against cd.vhd's own
+   --                              RAM_SEL decode (0x68-0x87 in 8KB units = 256KB), not just
+   --                              pce_top's own window width.
    --   0x050000-0x08FFFF (256KB): cart/syscard ROM (this constant, used below). A real
    --                              syscard (syscard3.pce) is exactly 256KB -- ROM_SZ=>x"040"
    --                              below decodes exactly this size, no slack needed.
-   constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);  -- reserved, not yet wired
+   constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);
    constant ROM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#050000#, 21);
    constant ROM_SDRAM_ABITS : integer := 18;  -- 256KB, exact real syscard size
 
@@ -297,6 +313,32 @@ architecture rtl of pcetang_primer25k_cd is
    signal wr_req         : std_logic := '0';
    signal wr_addr        : std_logic_vector(20 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
+
+   -- CD-RAM bridge: pce_top's CD_RAM_A/CD_RAM_DO/CD_RAM_DI/CD_RAM_RD/CD_RAM_WR through
+   -- sdram.sv's new third port (C). Unlike the ROM bridge (port B, toggle-per-request),
+   -- port C is level-held like port A -- assert and hold RAM_C_REQ through the whole
+   -- transaction, drop it once done -- see sdram.sv's header for why. CD_RAM has no wait
+   -- path of its own in the donor (pce_top.vhd's CD_RAM_DI muxes in combinationally), so
+   -- this bridge's "ready" signal (cd_ram_rdy) is wired to pce_top's new CD_RAM_RDY input,
+   -- which now contributes to WAIT_N the same way ROM_RDY already does.
+   signal cd_ram_a     : std_logic_vector(21 downto 0);
+   signal cd_ram_do    : std_logic_vector(7 downto 0);  -- pce_top's CD_RAM_DO (out of pce_top): write data
+   signal cd_ram_di_i  : std_logic_vector(7 downto 0) := (others => '0');  -- into pce_top's CD_RAM_DI: read data
+   signal cd_ram_rd    : std_logic;
+   signal cd_ram_wr    : std_logic;
+   signal cd_ram_rdy_i : std_logic := '1';
+
+   signal cdr_addr : std_logic_vector(20 downto 0);
+   signal cdr_req  : std_logic := '0';
+   signal cdr_rd_n : std_logic := '0';
+   signal cdr_di   : std_logic_vector(7 downto 0);
+   signal cdr_do   : std_logic_vector(7 downto 0);
+   signal cdr_wait : std_logic;
+
+   type cdr_state_t is (CDR_IDLE, CDR_SETTLE, CDR_HOLD);
+   signal cdr_state      : cdr_state_t := CDR_IDLE;
+   signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
+   signal cdram_rd_r, cdram_wr_r : std_logic := '0';
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -365,7 +407,13 @@ begin
       RAM_B_WE   => romb_we,
       RAM_B_DI   => romb_di,
       RAM_B_DO   => romb_do,
-      RAM_B_WAIT => romb_wait
+      RAM_B_WAIT => romb_wait,
+      RAM_C_ADDR => cdr_addr,
+      RAM_C_REQ  => cdr_req,
+      RAM_C_RD_n => cdr_rd_n,
+      RAM_C_DI   => cdr_di,
+      RAM_C_DO   => cdr_do,
+      RAM_C_WAIT => cdr_wait
    );
 
    -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read bridge
@@ -501,6 +549,64 @@ begin
       end if;
    end process;
 
+   -- CD-RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw bus-decode signals, level-held for
+   -- the duration of a real CPU access, not a dedicated request pulse) become one real
+   -- SDRAM access via port C. Edge-detected (cdram_rd_r/cdram_wr_r) rather than
+   -- level-checked like the ROM bridge above, specifically to avoid re-triggering a second
+   -- transaction on the same byte while CD_RAM_RD/WR is still held high through the wait
+   -- this bridge itself introduces -- CD_RAM_RD/WR only drop once the CPU's own bus cycle
+   -- advances, which (via CD_RAM_RDY -> WAIT_N) can't happen until this FSM returns to
+   -- CDR_IDLE and raises cd_ram_rdy_i. RAM_C is level-held/assert-and-hold (port A's
+   -- convention), not port B's toggle-per-request one -- see sdram.sv's header.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         cdram_rd_r <= cd_ram_rd;
+         cdram_wr_r <= cd_ram_wr;
+
+         case cdr_state is
+            when CDR_IDLE =>
+               cd_ram_rdy_i <= '1';
+               cdr_req <= '0';
+               if (cd_ram_rd = '1' and cdram_rd_r = '0') or
+                  (cd_ram_wr = '1' and cdram_wr_r = '0') then
+                  cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
+                              resize(unsigned(cd_ram_a(17 downto 0)), 21));
+                  cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write -- matches RAM_x_RD_n
+                  cdr_di   <= cd_ram_do;       -- pce_top's CD_RAM_DO: the byte it's writing
+                  cd_ram_rdy_i <= '0';
+                  cdr_req <= '1';
+                  cdr_settle_cnt <= (others => '0');
+                  cdr_state <= CDR_SETTLE;
+               end if;
+
+            when CDR_SETTLE =>
+               cdr_req <= '1';
+               if cdr_settle_cnt = "100" then
+                  if cdr_wait = '1' then
+                     cdr_state <= CDR_HOLD;
+                  else
+                     cd_ram_di_i <= cdr_do;
+                     cd_ram_rdy_i <= '1';
+                     cdr_req <= '0';
+                     cdr_state <= CDR_IDLE;
+                  end if;
+               else
+                  cdr_settle_cnt <= cdr_settle_cnt + 1;
+               end if;
+
+            when CDR_HOLD =>
+               cdr_req <= '1';
+               if cdr_wait = '0' then
+                  cd_ram_di_i <= cdr_do;
+                  cd_ram_rdy_i <= '1';
+                  cdr_req <= '0';
+                  cdr_state <= CDR_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
    backup_ram: entity work.spram
    generic map (addr_width => 11, data_width => 8)
    port map (
@@ -537,8 +643,9 @@ begin
 
       JOY_OUT => joy_out, JOY_IN => joy_in,
 
-      CD_EN => '0', CD_RAM_A => open, CD_RAM_DO => open,
-      CD_RAM_DI => (others => '0'), CD_RAM_RD => open, CD_RAM_WR => open,
+      CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
+      CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
+      CD_RAM_RDY => cd_ram_rdy_i,
       AC_EN => '0',
 
       CD_STAT => (others => '0'), CD_MSG => (others => '0'), CD_STAT_GET => '0',

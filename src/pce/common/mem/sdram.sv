@@ -34,6 +34,27 @@
 // cache -- see fetch_req_b below) and invalidates the cached line afterward, since the
 // cache's shadow copy (last_data) is not updated by a write. RAM_B_WE defaults to 0 so
 // existing callers that don't connect it are unaffected.
+//
+// PCE PORT (2026-08-27): a real third client, port C, added for CD-RAM offload -- see
+// docs/ARCHITECTURE.md's "Real syscard boot" section. Unlike B, this one genuinely
+// overlaps in time with A and B during real gameplay (CD-RAM is CPU-random-access,
+// backing pce_top.vhd's CD_RAM_A window), so it needed real arbitration, not a mux.
+// Mirrors port A's convention (real read+write, small line cache, level-held REQ with
+// rising-edge launch) rather than B's toggle/write-invalidates one -- see fetch_req_c
+// and the ch2_busy completion block. Priority is A > B > C > refresh (lowest of the
+// three clients, ahead only of the forced `&rfsh_cnt` refresh). `store` widened from
+// 3 bits to 4 (was a 1-bit channel select packed into its top 2 bits alongside the
+// pending flag; now a real 2-bit channel select, `store[2:1]`, for 3 channels).
+//
+// Real, flagged, NOT yet measured: adding a third continuously-active client increases
+// (does not newly introduce) refresh-starvation risk -- the same class of bug
+// sdram32.sv's own header documents already being found and fixed once in this project's
+// history, on a design with only two clients. This design still lets refresh be
+// starved indefinitely in principle if B and C keep re-triggering back-to-back with zero
+// idle gap (refresh is checked only when nothing else in STATE_IDLE wants the bus).
+// Real ROM/CD-RAM traffic is expected to be bursty, not literally saturating, but this
+// is an assumption, not a measurement -- revisit if hardware testing ever shows visible
+// corruption or lockups under heavy CD access.
 
 //============================================================================
 //
@@ -85,7 +106,19 @@ module sdram
 	input             RAM_B_WE  = 1'b0,  // PCE PORT: write side, added for ROM offload, see header
 	input       [7:0] RAM_B_DI  = 8'h0,  // PCE PORT: write data, added for ROM offload, see header
 	output reg  [7:0] RAM_B_DO,
-	output reg        RAM_B_WAIT      // PCE PORT: absent in the ZX Next original, see header
+	output reg        RAM_B_WAIT,     // PCE PORT: absent in the ZX Next original, see header
+
+	// PCE PORT: third client, added for CD-RAM offload, see header. Level-held REQ like
+	// port A (rising-edge launch, held through the wait, same convention as RAM_A_REQ) --
+	// unlike port B, this needed real read+write from day one, so it matches A's shape
+	// more closely than B's toggle-per-request one. Lowest arbitration priority (below
+	// both A and B) -- see header's arbitration note.
+	input      [20:0] RAM_C_ADDR = 21'h0,
+	input             RAM_C_REQ  = 1'b0,
+	input             RAM_C_RD_n = 1'b1,
+	input       [7:0] RAM_C_DI   = 8'h0,
+	output reg  [7:0] RAM_C_DO,
+	output reg        RAM_C_WAIT
 );
 
 assign SDRAM_nCS = 0;
@@ -126,23 +159,29 @@ reg  [1:0] bank;
 reg [15:0] data;
 reg        we;
 reg        ram_req=0;
-reg [21:2] last_a[2] = '{'1,'1};
+reg [21:2] last_a[3] = '{'1,'1,'1};
 reg  [8:0] rfsh_cnt;
 
 wire       fetch_req = (RAM_A_RD_n || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
 // PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
 wire       fetch_req_b = RAM_B_WE || (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});
+// PCE PORT: third client (CD-RAM). Same shape as fetch_req (port A) -- real read+write,
+// small line cache, no forced-miss-on-write -- see header for why this mirrors A rather
+// than B's convention.
+wire       fetch_req_c = (RAM_C_RD_n || last_a[2] != {1'b0,RAM_C_ADDR[20:2]});
 
 // access manager
 always @(posedge clk) begin
 	reg old_ref;
 	reg        old_b_req;
 	reg        old_a_req;
-	reg [31:0] last_data[2];
+	reg        old_c_req;
+	reg [31:0] last_data[3];
 	reg [15:0] data_reg;
 	reg        ch0_busy;
 	reg        ch1_busy;
-	reg  [2:0] store;
+	reg        ch2_busy;
+	reg  [3:0] store;
 
 	data_reg <= SDRAM_DQ;
 
@@ -168,11 +207,19 @@ always @(posedge clk) begin
 		RAM_B_WAIT <= 1;
 	end
 
+	// PCE PORT: third client (CD-RAM), mirrors RAM_A_WAIT's edge-detect exactly.
+	old_c_req <= RAM_C_REQ;
+	if(~old_c_req & RAM_C_REQ) begin
+		if(fetch_req_c) RAM_C_WAIT <= 1;
+		else RAM_C_DO <= last_data[2][(RAM_C_ADDR[1:0]*8) +:8];
+	end
+
 	if(state == STATE_IDLE && mode == MODE_NORMAL) begin
 		ram_req <= 0;
 		we <= 0;
 		ch0_busy <= 0;
 		ch1_busy <= 0;
+		ch2_busy <= 0;
 
 		// PCE PORT: A (VRAM0, zero wait-tolerance) now goes before B (ROM, tolerant via
 		// pce_top.vhd's ROM_RDY -> WAIT_N) -- see header. Same launch logic as before,
@@ -196,6 +243,19 @@ always @(posedge clk) begin
 			ch1_busy <= 1;
 			state <= STATE_START;
 		end
+		// PCE PORT: third client, lowest priority ahead of refresh only -- CD-RAM traffic
+		// is real-time (CPU-stalling via CD_RAM_RDY -> WAIT_N) but less latency-sensitive
+		// than VRAM0 (A) and expected to be less frequent than ROM fetch (B). See header's
+		// arbitration/refresh-starvation note -- a real, flagged, not-yet-measured risk.
+		else if((~old_c_req && RAM_C_REQ && fetch_req_c) || RAM_C_WAIT) begin
+			we <= RAM_C_RD_n;
+			{bank,a} <= RAM_C_ADDR;
+			data <= {RAM_C_DI,RAM_C_DI};
+			ram_req <= fetch_req_c;
+			last_a[2] <= RAM_C_RD_n ? '1 : RAM_C_ADDR[20:2];
+			ch2_busy <= 1;
+			state <= STATE_START;
+		end
 		else if(&rfsh_cnt) begin
 			rfsh_cnt <= 0;
 			state <= STATE_START;
@@ -203,7 +263,7 @@ always @(posedge clk) begin
 	end
 
 	if(store) begin
-		last_data[store[1]][(store[0] ? 16 : 0) +:16] <= data_reg;
+		last_data[store[2:1]][(store[0] ? 16 : 0) +:16] <= data_reg;
 		store <= 0;
 	end
 
@@ -217,7 +277,7 @@ always @(posedge clk) begin
 				else begin
 					RAM_A_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
 					last_data[0][(a[1] ? 16 : 0) +:16] <= data_reg;
-					store <= {2'b10,~a[1]};
+					store <= {1'b1,2'b00,~a[1]};
 				end
 			end
 			else RAM_A_DO <= last_data[0][(a[1:0]*8) +:8];
@@ -232,8 +292,24 @@ always @(posedge clk) begin
 			else begin
 				RAM_B_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
 				last_data[1][(a[1] ? 16 : 0) +:16] <= data_reg;
-				store <= {2'b11,~a[1]};
+				store <= {1'b1,2'b01,~a[1]};
 			end
+		end
+		// PCE PORT: third client (CD-RAM), mirrors ch0_busy exactly -- real read+write
+		// with a small line cache, same as port A (see header for why this doesn't use
+		// port B's write-invalidates convention).
+		if(ch2_busy) begin
+			ch2_busy <= 0;
+			RAM_C_WAIT <= 0;
+			if(ram_req) begin
+				if(we) RAM_C_DO <= data[7:0];
+				else begin
+					RAM_C_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
+					last_data[2][(a[1] ? 16 : 0) +:16] <= data_reg;
+					store <= {1'b1,2'b10,~a[1]};
+				end
+			end
+			else RAM_C_DO <= last_data[2][(a[1:0]*8) +:8];
 		end
 	end
 
