@@ -50,12 +50,17 @@
 -- static mux like the ROM bridge. See `sdram.sv`'s header for the arbitration priority
 -- (A > B > C > refresh) and a flagged, not-yet-measured refresh-starvation risk.
 --
--- Still not done after this: `CD_STAT`/`CD_MSG`/`CD_STAT_GET`/`CD_COMM` remain stubbed
--- constants below -- nothing yet answers a SCSI command, so whether the CPU actually
--- reaches a boot screen or hangs polling for a response is still unmeasured. A real SCSI
--- target stub (minimum: any command -> CHECK CONDITION; REQUEST SENSE -> real sense bytes
--- through `cd.vhd`'s DATA-IN FIFO) is the next real step -- see docs/ARCHITECTURE.md's
--- "Real syscard boot" Part 2 section.
+-- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): a minimal SCSI target stub now
+-- answers `CD_COMM_SEND` -- any command other than REQUEST SENSE gets CHECK CONDITION; REQUEST
+-- SENSE gets real SCSI-2 fixed-format sense data (NOT READY / MEDIUM NOT PRESENT) pushed
+-- through `CD_DATA`/`CD_DATA_WR` into SCSI.vhd's own DATA-IN FIFO. See the `cd_stat_i`/
+-- `cd_comm_i` signal block below for the full protocol trace and docs/ARCHITECTURE.md's
+-- "Real syscard boot" Part 2 section for why this specific pair of commands is the real
+-- minimum (a syscard with no disc polls TEST UNIT READY, gets CHECK CONDITION, then asks
+-- REQUEST SENSE why). Whether this is enough for a real syscard to actually reach a boot
+-- screen, versus needing more of the command set, is not yet known -- no hardware test,
+-- no simulation testbench for this responder exists. What IS real: `gw_sh` will confirm
+-- whether this closes timing and fits, which is the first checkable fact about it.
 --
 -- HDMI/UART pins reused directly from nand2mario's own nestang primer25k.cst (this
 -- board, his own working config) rather than adapted from a different board/protocol
@@ -340,6 +345,47 @@ architecture rtl of pcetang_primer25k_cd is
    signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
 
+   -- Minimal SCSI target stub. cd.vhd/SCSI.vhd (unmodified from the donor) own the real
+   -- SCSI bus phase timing; this just answers CD_COMM_SEND with a response, same clk_pce
+   -- domain, no CDC needed (SCSI.vhd lives inside pce_top, same CLK). Traced directly from
+   -- SCSI.vhd's source, not inferred from the SCSI spec: CD_COMM's LOWEST byte
+   -- (CD_COMM(7 downto 0)) is the opcode -- COMM_POS starts at 0 and the first byte
+   -- received (the opcode) lands in COMM(0), which is the LSB of the concatenation that
+   -- becomes CD_COMM. Any command other than REQUEST SENSE (0x03) gets CHECK CONDITION;
+   -- REQUEST SENSE gets real SCSI-2 fixed-format sense data (NOT READY / MEDIUM NOT
+   -- PRESENT -- the honest answer for "no disc") pushed one byte at a time through
+   -- CD_DATA/CD_DATA_WR into SCSI.vhd's own DATA-IN FIFO (a plain byte FIFO, 4096 deep,
+   -- edge-detected per byte -- not cd.vhd's separate 4-byte-packed CDDA_FIFO, which is
+   -- audio-only via CD_AUDIO_WR and irrelevant here), followed by a GOOD status once
+   -- CD_DATA_END confirms the transfer drained. See docs/ARCHITECTURE.md's "Real syscard
+   -- boot" Part 2 section for the full protocol trace and what this deliberately doesn't
+   -- implement (TEST UNIT READY gets the same CHECK CONDITION as everything else -- there
+   -- is no special-case, REQUEST SENSE is what tells the caller why).
+   signal cd_stat_i     : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_msg_i      : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_stat_get_i : std_logic := '0';
+   signal cd_comm_i      : std_logic_vector(95 downto 0);
+   signal cd_comm_send_i : std_logic;
+   signal cd_comm_send_r : std_logic := '0';
+   signal cd_data_i     : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_data_wr_i  : std_logic := '0';
+   signal cd_data_end_i : std_logic;
+
+   constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
+
+   -- Fixed-format sense data, SCSI-2 standard constants (not project-specific): Error
+   -- Code 0x70 (current error), Sense Key 0x02 (NOT READY), Additional Sense Length 0x0A
+   -- (10 bytes follow), ASC 0x3A / ASCQ 0x00 (MEDIUM NOT PRESENT). 18 bytes total.
+   type sense_data_t is array (0 to 17) of std_logic_vector(7 downto 0);
+   constant SENSE_NOT_READY : sense_data_t := (
+      x"70", x"00", x"02", x"00", x"00", x"00", x"00", x"0A",
+      x"00", x"00", x"00", x"00", x"3A", x"00", x"00", x"00", x"00", x"00"
+   );
+
+   type scsi_state_t is (SCSI_IDLE, SCSI_SENSE_PULSE, SCSI_SENSE_GAP, SCSI_SENSE_WAIT_END);
+   signal scsi_state : scsi_state_t := SCSI_IDLE;
+   signal sense_idx  : integer range 0 to 17 := 0;
+
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
 
@@ -607,6 +653,55 @@ begin
       end if;
    end process;
 
+   -- Minimal SCSI target stub -- see the cd_stat_i/cd_comm_i signal block's header
+   -- comment for the real protocol trace this implements.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         cd_comm_send_r <= cd_comm_send_i;
+         cd_stat_get_i  <= '0';
+         cd_data_wr_i   <= '0';
+
+         case scsi_state is
+            when SCSI_IDLE =>
+               if cd_comm_send_i = '1' and cd_comm_send_r = '0' then
+                  if cd_comm_i(7 downto 0) = SCSI_OP_REQUEST_SENSE then
+                     sense_idx  <= 0;
+                     scsi_state <= SCSI_SENSE_PULSE;
+                  else
+                     cd_stat_i     <= x"02";  -- CHECK CONDITION
+                     cd_msg_i      <= x"00";  -- COMMAND COMPLETE
+                     cd_stat_get_i <= '1';
+                  end if;
+               end if;
+
+            when SCSI_SENSE_PULSE =>
+               cd_data_i    <= SENSE_NOT_READY(sense_idx);
+               cd_data_wr_i <= '1';
+               scsi_state   <= SCSI_SENSE_GAP;
+
+            -- One idle cycle between bytes: SCSI.vhd's own push logic edge-detects
+            -- CD_DATA_WR (CD_WR_OLD/CD_WR), so a byte held high back-to-back into the
+            -- next byte would only register once.
+            when SCSI_SENSE_GAP =>
+               if sense_idx = 17 then
+                  scsi_state <= SCSI_SENSE_WAIT_END;
+               else
+                  sense_idx  <= sense_idx + 1;
+                  scsi_state <= SCSI_SENSE_PULSE;
+               end if;
+
+            when SCSI_SENSE_WAIT_END =>
+               if cd_data_end_i = '1' then
+                  cd_stat_i     <= x"00";  -- GOOD -- REQUEST SENSE itself succeeded
+                  cd_msg_i      <= x"00";
+                  cd_stat_get_i <= '1';
+                  scsi_state    <= SCSI_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
    backup_ram: entity work.spram
    generic map (addr_width => 11, data_width => 8)
    port map (
@@ -648,12 +743,12 @@ begin
       CD_RAM_RDY => cd_ram_rdy_i,
       AC_EN => '0',
 
-      CD_STAT => (others => '0'), CD_MSG => (others => '0'), CD_STAT_GET => '0',
-      CD_COMM => open, CD_COMM_SEND => open,
+      CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,
+      CD_COMM => cd_comm_i, CD_COMM_SEND => cd_comm_send_i,
       CD_DOUT_REQ => '0', CD_DOUT => open, CD_DOUT_SEND => open,
       CD_REGION => '0', CD_RESET => open,
-      CD_DATA => (others => '0'), CD_DATA_WR => '0', CD_AUDIO_WR => '0',
-      CD_SUBCD_WR => '0', CD_DATA_END => open, CD_DM => '0',
+      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => '0',
+      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => '0',
 
       CDDA_SL => open, CDDA_SR => open, ADPCM_S => open, PSG_SL => open, PSG_SR => open,
 

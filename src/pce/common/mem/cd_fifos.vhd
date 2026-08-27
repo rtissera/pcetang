@@ -54,7 +54,24 @@ entity SCSI_FIFO is
 end entity;
 
 architecture rtl of SCSI_FIFO is
-	constant ADDR_W : integer := 12;   -- 4096 entries, matches donor LPM_NUMWORDS
+	-- PCE PORT (2026-08-27): shrunk from 12 (4096, matching the donor's LPM_NUMWORDS) to
+	-- 6 (64 entries). Real measured reason, not a guess: this FIFO was dead code in every
+	-- build in this project until Primer 25K's CD build first drove CD_STAT_GET/
+	-- CD_COMM_SEND/CD_DATA_WR for real (a minimal SCSI target stub, see
+	-- pcetang_primer25k_cd.vhd) -- before that, CD_STAT_GET tied to a constant '0' made
+	-- STAT_PEND provably always 0, so the whole SP_STAT_*/SP_DATAIN_* state machine (and
+	-- this FIFO's real write/read enables) were dead and swept away. The instant they
+	-- became real, this 4096x8 FIFO (32768 bits) needed real backing and Primer 25K had
+	-- 0 free BSRAM blocks left -- Gowin fell back to LUT/DFF storage for the whole thing,
+	-- +~11000 LUTs (measured: 13313/23040 clean -> 24061/23040, RP0006). 64 entries is
+	-- real headroom for this stub's actual use (18 sense bytes at a time) at a LUT cost
+	-- small enough not to need a real BSRAM block at all. Confirmed safe project-wide:
+	-- Console 60K's CD build stubs this exact same interface identically (CD_STAT_GET
+	-- tied '0'), so this FIFO is still dead there too -- nothing currently depends on the
+	-- old 4096 depth anywhere. Revisit (widen back, and find real BSRAM for it) once a
+	-- real CD sector-streaming design (2048 bytes/sector) is built -- this is a real
+	-- scope-driven shrink, not a permanent design decision.
+	constant ADDR_W : integer := 6;   -- 64 entries -- see comment above, was 12/4096
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	signal mem_q : std_logic_vector(7 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;
