@@ -1883,3 +1883,99 @@ default.
 Also still open, untouched by anything in this session: Bug 2 (refill-never-installs
 correctness bug) and Bug 3 (miss-detection-one-dot-late), both documented earlier in
 this section's history.
+
+## Bug 2 fixed (2026-08-27): refills now actually install on a genuine eviction, real GHDL-verified
+
+Root cause (see the earlier "Bug 2" section above for the original discovery): `tag_mem`
+was written only by live CPU writes; `refill_can_install` additionally required the
+tag to ALREADY match before allowing an install. A genuine conflict miss -- the ONLY
+case a refill exists for in the first place -- by definition never has a matching tag,
+so no real eviction could ever install. GHDL-confirmed at the time: a never-CPU-written
+word read back wrong 40/40 times, the refill re-issuing forever without ever
+succeeding. This was silent data corruption on real hardware, not a timing problem --
+the whole point of this cache (BAT/CG/sprite line reuse across consecutive scanlines)
+never actually worked for anything except CPU-write-then-immediate-read.
+
+**Fixed**: `refill_can_install`'s tag term changed from an AND to an OR --
+`refill_tag_changed` (a genuine eviction) is now always allowed to install; a same-tag
+compulsory miss still requires the target word not already valid (unchanged, protects
+a live write racing in mid-refill from being clobbered by stale fetched data -- the
+original, still-real reason for that term). `tag_addr_a`/`tag_data_a`/`tag_wren_a` now
+mux between the live-write path and a new refill-install path (mirroring the existing
+`way_addr_a`/`way_data_a` mux exactly) -- tag_mem gets a real writer for refills for the
+first time. On a genuine eviction, `way_wren_a` also now touches all 4 ways at that
+index, not just the target one: the target way gets the fetched word + valid=1, the
+other 3 get invalidated -- mirroring invariant 1's existing "clear other 3 on tag
+change" behavior for live writes, now applied to refills too. Without this second
+half of the fix, a later read of one of those other words would falsely HIT against
+the PREVIOUS line's stale data -- a new, different, and arguably worse bug than the
+one being fixed (silent wrong data instead of an infinite miss).
+
+**Real GHDL verification** (dispatched agent, fresh testbench -- this file's own header
+had referenced `sim/tb_vram0_cache.vhd` as prior art; confirmed via `git log --all`
+that file never existed in this repo, corrected as stale): 4 positive tests (genuine
+conflict eviction installs and stays installed over 24+ re-reads; the other 3 ways at
+that index correctly invalidate, not stale-hit; the same-tag compulsory-miss path
+(pre-fix's one working case) regresses clean, siblings untouched; a live write racing
+in mid-refill still wins, confirmed by 0 installs committing that dot) plus 3 negative
+controls, each reverting one piece of the fix and reproducing the corresponding
+failure signature exactly (full revert reproduces the original 40/40-wrong signature
+verbatim; removing the other-3-ways invalidation alone reproduces stale hits on the
+siblings; removing the valid-bit guard alone reproduces the race-clobber). Swept
+across 6 dwell lengths (24-96 cycles), all pass, `dbg_fifo_overflow`/`dbg_deadline_miss`
+clear throughout.
+
+**Real, disclosed, PRE-EXISTING race found by the same verification, NOT introduced by
+this fix, NOT fixed here**: sweeping the live-write-vs-refill race's timing offset
+found exactly one bad cycle (out of the whole refill window) where an install commits
+one cycle before the write's effect would have blocked it, clobbering the live write
+with stale fetched data. Confirmed present in the PRE-FIX baseline too, at the
+identical offset -- not a regression this fix introduced, just newly *reachable* on
+the eviction path specifically (pre-fix, that path never installed at all, so nothing
+there could clobber anything -- non-functionality accidentally looked like protection).
+Real mechanism: `not wren_a` covers only the exact SEQ_DONE cycle, `not
+way_q_b(seq_way)(16)` only covers offsets port B has already observed by then -- one
+cycle in between is covered by neither. Verification agent's own assessment: the
+window is plausibly 2 cycles on real Gowin BSRAM, not the 1 GHDL's `bram_gowin.vhd`
+behavioral model shows (port-order in a shared-variable model happens to resolve one
+way in simulation; Gowin's real WRITE_MODE guarantee is documented as covering the
+writing port's own read-back, not a same-cycle read from the opposite port -- the same
+caveat `bram_gowin.vhd`'s own header already flags elsewhere, e.g. `SPR_LINE_BUF`).
+Reachability needs a CPU-write dot landing adjacent to a read-miss dot with the SDRAM
+round trip's completion landing on that exact boundary -- plausible under real SDRAM
+latency variance (refresh collision, bank state) but not a wide window. Flagged for a
+future fix, not blocking; tracked here so it isn't rediscovered from scratch.
+
+**Not exercised by this verification**: the header's "case 5" scenario (a write to an
+UNRELATED address contending for port A on the same cycle as an install) -- the
+existing `not wren_a` deferral is architecturally unconditional (any `wren_a`, not just
+a same-address one) so this should already be covered by construction, but wasn't
+independently re-confirmed this session.
+
+**Real `gw_sh` PnR, all three affected boards, all still 0 setup/hold violations:**
+
+| Board | Logic (before -> after) | BSRAM | clk_sdram (before -> after) | clk_pce (before -> after) |
+|---|---|---|---|---|
+| Primer 25K + CD | 10641 -> 10677 (+36) | 29/56 (52%, unchanged) | 134.312 -> 139.701 MHz (+11.9% -> +16.4%) | 47.870 -> 46.814 MHz (+11.7% -> +9.24%) |
+| Primer 25K Phase 1 (no CD) | 12402 -> 12581 (+179) | 56/56 (100%, unchanged) | 152.167 -> 154.589 MHz (+26.8% -> +28.8%) | 42.893 -> 43.027 MHz (**+0.08% -> +0.40%**) |
+| Nano 20K | 8008 -> 8032 (+24) | 37/46 (81%, unchanged) | 171.922 -> 161.321 MHz (+27.4% -> +19.5%) | 45.680 -> 43.880 MHz (+5.7% -> +1.57%) |
+
+BSRAM unchanged everywhere, as expected (the fix adds a handful of LUTs for the
+tag/way mux extension, no new memory). Primer 25K Phase 1's previously-flagged
+razor-thin `clk_pce` margin actually improved slightly (+0.08% -> +0.40%, real PnR
+seed variance, still razor-thin -- the earlier flagged risk stands, not resolved).
+Nano 20K's `clk_pce` margin dropped from +5.7% to +1.57% -- still passes with 0
+violations but is now noticeably tighter than before this fix; worth a real look
+before relying on more margin there in the future, same spirit as Phase 1's flag.
+
+**Net effect on the deadline-miss problem**: this fix does NOT change the throughput
+numbers measured in the section above (186.67ns/word, 2x over budget) -- that
+measurement was against `sdram.sv`'s protocol directly, independent of whether
+`vram0_cache.vhd`'s cache actually caches correctly. What it DOES change is how OFTEN
+that expensive path needs to fire at all: with reuse now actually working, most
+scanlines within a 4-scanline BAT/CG group (or however many a sprite's pattern spans)
+should hit for free instead of re-missing every single scanline. This does not close
+the worst-case burst (all-cold sprites on one scanline still needs the real fix
+discussed above), but it should substantially reduce how often real gameplay even
+approaches that worst case -- not measured/quantified this session, a real next step
+if a game-content-driven measurement is ever wanted.

@@ -92,21 +92,32 @@
 --      invalidated writes don't-care data with valid='0' via the same unconditional
 --      expression as a real write.
 --   2. A refill captures (index, tag, way) at launch and installs its result via port A
---      (stealing it for one cycle, see above) only if the line's tag (checked through
---      tag_mem's own dedicated port B) still matches, that word's valid bit is currently
---      0 (checked through the SAME dedicated port B read, seq_idx-addressed -- NOT port
---      A's own output, which reflects the LIVE access's address, not seq_idx; reading
---      port A's output here was a real bug present from the first working version of this
---      invariant through the storage rewrite above, caught only once port B was freed up
---      as a read port by the dual-write-port fix), and no write is committing THIS CYCLE
---      AT ALL (not just to the same index/way -- port A can only serve one writer per
---      cycle, so any live write defers any install, unconditionally; see the
---      refill_can_install wiring for why deferring is always safe/self-correcting).
---      This closes several races at once: a tag change mid-refill, a write landing on
---      the same word its own miss triggered a refill for, a same-cycle write/install
---      collision on the same address, and -- found only once port A became the shared
---      single write port for BOTH paths -- a write to an unrelated address contending
---      for that same one port the same cycle.
+--      (stealing it for one cycle, see above). Two cases, both checked through tag_mem's
+--      own dedicated port B (seq_idx-addressed -- NOT port A's own output, which reflects
+--      the LIVE access's address, not seq_idx; reading port A's output here was a real bug
+--      present from the first working version of this invariant through the storage
+--      rewrite above, caught only once port B was freed up as a read port by the
+--      dual-write-port fix): if the line's tag ALREADY matches (a same-tag compulsory
+--      miss), install only if that word's valid bit is currently 0 -- protects a fresher
+--      live write that raced in between miss-trigger and refill-complete from being
+--      clobbered by stale fetched data. If the tag does NOT match (a genuine conflict
+--      eviction), install unconditionally -- see the PCE PORT (2026-08-27) Bug 2 note at
+--      refill_can_install's own definition for why the ORIGINAL version of this invariant
+--      required an already-matching tag as a blanket precondition, which made every real
+--      eviction impossible, not just slow (real silent data corruption, GHDL-confirmed,
+--      fixed this session). Either way, no write is committing THIS CYCLE AT ALL (not
+--      just to the same index/way -- port A can only serve one writer per cycle, so any
+--      live write defers any install, unconditionally; see the refill_can_install wiring
+--      for why deferring is always safe/self-correcting). This closes several races at
+--      once: a tag change mid-refill, a write landing on the same word its own miss
+--      triggered a refill for, a same-cycle write/install collision on the same address,
+--      and -- found only once port A became the shared single write port for BOTH paths
+--      -- a write to an unrelated address contending for that same one port the same
+--      cycle. On a genuine eviction, the install also writes the NEW tag into tag_mem and
+--      invalidates the OTHER 3 ways at that index (mirroring invariant 1's own "clear on
+--      tag change" behavior, now applied to refills too, not just live writes) -- without
+--      this, a later read of one of those other words would falsely HIT against the
+--      PREVIOUS line's stale data.
 --   3. Writes are write-through, queued through a depth-4 FIFO (not a single register)
 --      with address coalescing -- measured from the SLOT tables that sustained CPU tile
 --      upload (VM="00" BG fetch: CPU slots every 2 dots = 185 ns at 10.7 MHz) can arrive
@@ -119,9 +130,11 @@
 --     see cache_ctrl -- safe because address_a doesn't change mid-dwell).
 --   way_k port B: read-only, dedicated to the sequencer's own valid-bit check for
 --     invariant 2 (seq_idx-addressed, wren_b tied low).
---   tag_mem port A: the only writer (live access, write-through only -- refills never
---     change tag, see invariant 2). tag_mem port B: read-only, the sequencer's
---     tag-still-matches check (seq_idx-addressed).
+--   tag_mem port A: the only writer -- live access (write-through) normally; diverted to
+--     seq_idx on a genuine eviction install, same steal pattern as way_k port A above (see
+--     invariant 2; this refill-writes-tag path did NOT exist before the 2026-08-27 Bug 2
+--     fix). tag_mem port B: read-only, the sequencer's tag-still-matches check
+--     (seq_idx-addressed).
 --
 -- CDC: this module lives entirely in the core clock domain (same CLK as huc6270.vhd) and
 -- drives sdram32's RAM_A_* ports directly, exactly like src/boards/tang_nano20k/bringup/
@@ -264,6 +277,12 @@ architecture rtl of vram0_cache is
    signal way_sel : std_logic_vector(0 to 3);   -- one-hot decode of address_a's word bits
    signal hit : std_logic;
 
+   -- PCE PORT (2026-08-27), Bug 2 fix: true when the line CURRENTLY at seq_idx (read live
+   -- via tag_q_b) does not carry seq_tag -- a genuine conflict eviction, not a compulsory
+   -- miss within an already-resident line. Drives both the tag write and the
+   -- invalidate-other-3-ways step below, mirroring invariant 1's live-write behavior.
+   signal refill_tag_changed : std_logic;
+
    -- Write FIFO: depth 4, address-coalescing. Owned solely by write_fifo.
    constant FIFO_DEPTH : integer := 4;
    type fifo_addr_t is array (0 to FIFO_DEPTH-1) of std_logic_vector(14 downto 0);
@@ -344,19 +363,36 @@ begin
    -- SINGLE write port (see header, storage failure 3). The refill install steals port A
    -- for the one cycle it needs; harmless because q_a is only consumed at the next
    -- DCK_CE, 4-8 cycles away, and address_a is stable across the whole dwell.
+   -- PCE PORT (2026-08-27), Bug 2 fix: on a tag-changing install (real eviction), every
+   -- way other than seq_way must be invalidated at seq_idx -- otherwise it keeps the
+   -- PREVIOUS tag's valid bit, and a later read of that word would falsely HIT with the
+   -- wrong line's stale data (worse than the old bug: silent wrong data instead of an
+   -- infinite miss). Mirrors invariant 1's "clear the other 3 words' valid bits on tag
+   -- change" for live writes, applied here to refill installs. way_data_a's non-target-way
+   -- value during an install is a don't-care unless way_wren_a(k) actually picks it (only
+   -- when refill_tag_changed='1' -- see below), so a fixed invalidate pattern is safe even
+   -- for the same-tag compulsory-miss case where that way's wren stays 0.
    gen_way_a_wiring: for k in 0 to 3 generate
       way_addr_a(k) <= std_logic_vector(seq_idx) when refill_can_install = '1'
                        else address_a(10 downto 2);
-      way_data_a(k) <= '0' & '1' & seq_rdata when refill_can_install = '1'
+      way_data_a(k) <= '0' & '1' & seq_rdata when (refill_can_install = '1' and seq_way = k)
+                       else "00" & x"0000" when refill_can_install = '1'
                        else '0' & way_sel(k) & data_a;
-      way_wren_a(k) <= (refill_can_install and to_sl(seq_way = k))
+      way_wren_a(k) <= (refill_can_install and (to_sl(seq_way = k) or refill_tag_changed))
                        or ((not refill_can_install) and wren_a
                            and (way_sel(k) or tag_changed_live));
    end generate;
 
-   tag_addr_a <= address_a(10 downto 2);
-   tag_data_a <= std_logic_vector(tag_of(address_a));
-   tag_wren_a <= wren_a and tag_changed_live;
+   -- PCE PORT (2026-08-27), Bug 2 fix: tag_mem now has a real refill-driven write path --
+   -- previously "tag_mem port A: the only writer (live access, write-through only --
+   -- refills never change tag)" was the bug itself, not a real invariant (see the header's
+   -- corrected write-up). Mirrors way_addr_a/way_data_a's own mux exactly.
+   tag_addr_a <= std_logic_vector(seq_idx) when refill_can_install = '1'
+                else address_a(10 downto 2);
+   tag_data_a <= std_logic_vector(seq_tag) when refill_can_install = '1'
+                else std_logic_vector(tag_of(address_a));
+   tag_wren_a <= (refill_can_install and refill_tag_changed)
+                or ((not refill_can_install) and wren_a and tag_changed_live);
    tag_changed_live <= to_sl(unsigned(tag_q_a) /= tag_of(address_a));
 
    -- hit still compares against req_addr_d (address_a delayed one cycle by cache_ctrl
@@ -547,9 +583,28 @@ begin
    -- refill_pending's clear both happen unconditionally regardless of whether the install
    -- actually landed, so a deferred install just means that address misses again (and
    -- re-refills) the next time it's read, not a stuck or lost state.
+   -- PCE PORT (2026-08-27), Bug 2 FOUND AND FIXED: `and to_sl(unsigned(tag_q_b) = seq_tag)`
+   -- used to be an unconditional precondition here -- requiring the tag to ALREADY match
+   -- before an install was allowed. But a genuine conflict miss (a DIFFERENT tag currently
+   -- occupying seq_idx -- the ONLY case a refill exists for in the first place, since a
+   -- same-tag compulsory miss is the sole case that ever satisfied this) can, BY
+   -- DEFINITION, never have a matching tag. So no conflict-miss refill could ever install
+   -- -- confirmed via real GHDL simulation: a never-CPU-written word read back wrong 40/40
+   -- times, the refill re-issuing forever without ever succeeding. Only address ranges a
+   -- game happens to never evict (working set fits within one 4KB-cacheable window without
+   -- two tags ever sharing an index) avoided the bug in practice; real games' VRAM
+   -- footprint routinely exceeds that. This was silent data corruption, not a timing
+   -- problem -- more serious than the deadlock this file's Bug 1 was.
+   --
+   -- Fixed: the tag precondition is now an OR, not an AND -- a genuine eviction
+   -- (`refill_tag_changed`) is ALWAYS allowed to install (the old tag's data there is
+   -- being deliberately overwritten, its previous valid state irrelevant); a same-tag
+   -- compulsory miss still requires the target word not already valid (protects a fresher
+   -- live write that raced in between miss-trigger and refill-complete from being clobbered
+   -- by the stale fetched data -- the ORIGINAL, still-real reason for this term).
+   refill_tag_changed <= to_sl(unsigned(tag_q_b) /= seq_tag);
    refill_can_install <= to_sl(seq_state = SEQ_DONE and seq_is_write = '0')
-      and to_sl(unsigned(tag_q_b) = seq_tag)
-      and not way_q_b(seq_way)(16)
+      and (refill_tag_changed or not way_q_b(seq_way)(16))
       and not wren_a;
 
 end architecture;
