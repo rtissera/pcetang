@@ -189,7 +189,6 @@ architecture rtl of pcetang_primer25k is
    signal vram0_ram_a_di   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_do   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_wait : std_logic;
-   signal ram_b_wait_nc    : std_logic;
 
    signal overlay       : std_logic;
    signal overlay_x     : std_logic_vector(7 downto 0);
@@ -203,13 +202,62 @@ architecture rtl of pcetang_primer25k is
    signal rom_do       : std_logic_vector(7 downto 0);
    signal rom_do_valid : std_logic;
 
-   -- 32K, same proven-safe depth as Console 60K's Phase 1 -- see that file's header for
-   -- why (real gw_sh measurement, not guessed).
-   constant ROM_ABITS : integer := 15;
+   -- ROM moved off on-chip BRAM onto SDRAM port B (2026-08-27): the old 32K on-chip
+   -- dpram couldn't hold any real commercial HuCard (smallest is 128K). 1MB region --
+   -- covers every standard HuCard size pce_top.vhd:672-680 can mirror (128K/256K/
+   -- 384K/512K/768K/1MB); SF2's 2560K bank-switched mapper is NOT supported (would
+   -- need a separate rombank register pce_top has no port for). Placed right after
+   -- VRAM0's 64K region (0x000000-0x00FFFF) -- nothing else uses SDRAM on this board.
+   -- Same read/write port-B bridge pattern as pcetang_primer25k_cd.vhd's ROM bridge
+   -- (that file's the proven reference this was copied from).
+   constant ROM_SDRAM_BASE  : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);
+   constant ROM_SDRAM_ABITS : integer := 20;
    signal rom_a       : std_logic_vector(21 downto 0);
-   signal rom_do_core : std_logic_vector(7 downto 0);
-   signal rom_wr_addr : unsigned(ROM_ABITS-1 downto 0) := (others => '0');
+   signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
+   signal rom_rdy_i   : std_logic := '1';
+   signal rom_rd_i    : std_logic;
+   signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
+
+   -- Dynamic ROM_SZ (2026-08-27): latched from rom_wr_addr's final byte count at
+   -- rom_loading's falling edge, rounded up to the nearest pce_top mirroring bucket.
+   -- Was hardcoded x"008" (hits pce_top's straight-1MB-mapping else branch always,
+   -- wrong for any smaller real HuCard that needs address mirroring). Reset default
+   -- x"040" is arbitrary -- never used, core stays held in reset (see core_resetn)
+   -- until the first load completes and overwrites it.
+   signal rom_sz_r : std_logic_vector(11 downto 0) := x"040";
+
+   -- Core reset gated on rom_loading (2026-08-27): previously RESET/COLD_RESET only
+   -- depended on board-level reset_n (button+PLL), so the CPU ran during the whole
+   -- ROM load -- issuing real ROM_RD fetches against a partially-written SDRAM region
+   -- while port B was mux'd to the write side (see romb_addr mux below), reading back
+   -- stale/torn data. Same missing-gate bug as nano20k/console60k/console60k_cd
+   -- (not fixed there yet -- flagged, not touched, out of this change's scope).
+   -- Reference pattern: NECTang's sibling nestang_top.sv's reset_nes -- held in reset
+   -- through the whole load, released exactly on loading's falling edge. Consequence:
+   -- a board that never loads anything never releases core reset (matches nestang,
+   -- more correct than the old behavior of running against uninitialized SDRAM).
+   signal core_resetn : std_logic := '0';
+
+   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_req  : std_logic := '0';
+   signal romb_we   : std_logic := '0';
+   signal romb_di   : std_logic_vector(7 downto 0);
+   signal romb_do   : std_logic_vector(7 downto 0);
+   signal romb_wait : std_logic;
+
+   type romb_state_t is (RB_IDLE, RB_SETTLE, RB_WAIT);
+
+   signal rd_state       : romb_state_t := RB_IDLE;
+   signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal rd_req         : std_logic := '0';
+   signal rd_addr        : std_logic_vector(20 downto 0);
+
+   signal wr_state       : romb_state_t := RB_IDLE;
+   signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal wr_req         : std_logic := '0';
+   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_data        : std_logic_vector(7 downto 0);
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -273,12 +321,12 @@ begin
       RAM_A_DI   => vram0_ram_a_di,
       RAM_A_DO   => vram0_ram_a_do,
       RAM_A_WAIT => vram0_ram_a_wait,
-      RAM_B_ADDR => (others => '0'),
-      RAM_B_REQ  => '0',
-      RAM_B_WE   => '0',
-      RAM_B_DI   => (others => '0'),
-      RAM_B_DO   => open,
-      RAM_B_WAIT => ram_b_wait_nc,
+      RAM_B_ADDR => romb_addr,
+      RAM_B_REQ  => romb_req,
+      RAM_B_WE   => romb_we,
+      RAM_B_DI   => romb_di,
+      RAM_B_DO   => romb_do,
+      RAM_B_WAIT => romb_wait,
       RAM_C_ADDR => (others => '0'),
       RAM_C_REQ  => '0',
       RAM_C_RD_n => '1',
@@ -286,6 +334,15 @@ begin
       RAM_C_DO   => open,
       RAM_C_WAIT => open
    );
+
+   -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read
+   -- bridge (gameplay fetch) owns it otherwise. Now genuinely mutually exclusive --
+   -- the core is held in core_resetn's reset for the whole load, so ROM_RD cannot
+   -- fire during it (see core_resetn's header for why this wasn't true before).
+   romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
+   romb_req  <= wr_req  when rom_loading_r = '1' else rd_req;
+   romb_we   <= '1'     when rom_loading_r = '1' else '0';
+   romb_di   <= wr_data;
 
    joy1_ds2 <= (others => '0');
    joy1     <= joy1_ds2 or hid1(11 downto 0);
@@ -320,27 +377,118 @@ begin
    begin
       if rising_edge(clk_pce) then
          rom_loading_r <= rom_loading(0);
+
+         if reset_n = '0' then
+            core_resetn <= '0';
+         elsif rom_loading(0) = '1' and rom_loading_r = '0' then
+            core_resetn <= '0';
+         elsif rom_loading(0) = '0' and rom_loading_r = '1' then
+            core_resetn <= '1';
+         end if;
+
          if rom_loading(0) = '1' and rom_loading_r = '0' then
             rom_wr_addr <= (others => '0');
          elsif rom_do_valid = '1' then
             rom_wr_addr <= rom_wr_addr + 1;
          end if;
+
+         if rom_loading(0) = '0' and rom_loading_r = '1' then
+            -- Round up to the smallest pce_top bucket covering the real byte count.
+            -- Real HuCard dumps are exact standard sizes, so this lands exactly for
+            -- all of them except SF2 (unsupported, see ROM_SDRAM_ABITS's header).
+            if rom_wr_addr <= 131072 then
+               rom_sz_r <= x"020"; -- 128K
+            elsif rom_wr_addr <= 262144 then
+               rom_sz_r <= x"040"; -- 256K
+            elsif rom_wr_addr <= 393216 then
+               rom_sz_r <= x"060"; -- 384K
+            elsif rom_wr_addr <= 524288 then
+               rom_sz_r <= x"080"; -- 512K
+            elsif rom_wr_addr <= 786432 then
+               rom_sz_r <= x"0C0"; -- 768K
+            else
+               rom_sz_r <= x"000"; -- >768K, straight 1MB mapping
+            end if;
+         end if;
       end if;
    end process;
 
-   rom_mem: entity work.dpram
-   generic map (addr_width => ROM_ABITS, data_width => 8)
-   port map (
-      clock    => clk_pce,
-      address_a => rom_a(ROM_ABITS-1 downto 0),
-      data_a    => (others => '0'),
-      wren_a    => '0',
-      q_a       => rom_do_core,
+   -- ROM write bridge: one iosys_bl616 byte (rom_do/rom_do_valid) becomes one real
+   -- SDRAM write via port B. Same pattern as pcetang_primer25k_cd.vhd's ROM write
+   -- bridge (copied from there) -- see that file's header for the settle-window
+   -- rationale (clk_sdram is ~2.8x clk_pce, 4 cycles is >10x margin).
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case wr_state is
+            when RB_IDLE =>
+               if rom_do_valid = '1' then
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_data <= rom_do;
+                  wr_req  <= not wr_req;
+                  wr_settle_cnt <= (others => '0');
+                  wr_state <= RB_SETTLE;
+               end if;
 
-      address_b => std_logic_vector(rom_wr_addr),
-      data_b    => rom_do,
-      wren_b    => rom_do_valid
-   );
+            when RB_SETTLE =>
+               if wr_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     wr_state <= RB_WAIT;
+                  else
+                     wr_state <= RB_IDLE;
+                  end if;
+               else
+                  wr_settle_cnt <= wr_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  wr_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   -- ROM read bridge: one pce_top ROM_RD per CPU cart-ROM byte access becomes one
+   -- real SDRAM read via port B. Same pattern as pcetang_primer25k_cd.vhd's ROM read
+   -- bridge (copied from there).
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case rd_state is
+            when RB_IDLE =>
+               rom_rdy_i <= '1';
+               if rom_rd_i = '1' then
+                  rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                  rom_rdy_i <= '0';
+                  rd_req <= not rd_req;
+                  rd_settle_cnt <= (others => '0');
+                  rd_state <= RB_SETTLE;
+               end if;
+
+            when RB_SETTLE =>
+               if rd_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     rd_state <= RB_WAIT;
+                  else
+                     rom_do_i <= romb_do;
+                     rom_rdy_i <= '1';
+                     rd_state <= RB_IDLE;
+                  end if;
+               else
+                  rd_settle_cnt <= rd_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  rom_do_i <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
 
    backup_ram: entity work.spram
    generic map (addr_width => 11, data_width => 8)
@@ -351,8 +499,8 @@ begin
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1)
    port map (
-      RESET      => not reset_n,
-      COLD_RESET => not reset_n,
+      RESET      => not core_resetn,
+      COLD_RESET => not core_resetn,
       CLK        => clk_pce,
 
       VRAM0_RAM_A_ADDR => vram0_ram_a_addr,
@@ -362,11 +510,11 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
 
-      ROM_RD    => open,
-      ROM_RDY   => '1',
+      ROM_RD    => rom_rd_i,
+      ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
-      ROM_DO    => rom_do_core,
-      ROM_SZ    => x"008",
+      ROM_DO    => rom_do_i,
+      ROM_SZ    => rom_sz_r,
       ROM_POP   => '0',
       ROM_CLKEN => open,
 

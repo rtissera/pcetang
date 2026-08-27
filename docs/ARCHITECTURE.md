@@ -292,6 +292,59 @@ adding the same audio ports to the shared `pce2hdmi.sv` file all three Phase 1 t
 depend on — a wider blast radius than the CD-only variant this fix was made in, and a
 deliberate follow-up, not a quick one. Not attempted this session.
 
+**Update (2026-08-27): the zero-headroom claim above is now obsolete.** Per an
+independent Fable-model audit's finding that no board could load a real commercial
+HuCard (`ROM_ABITS:=15`, 32K on-chip, smallest real HuCard is 128K; `ROM_SZ=>x"008"`
+hardcoded, always hit `pce_top`'s straight-1MB-mapping else branch regardless of real
+size), Primer 25K's Phase 1 ROM moved off the on-chip `dpram` onto SDRAM port B (same
+read/write bridge pattern as `pcetang_primer25k_cd.vhd`'s proven syscard ROM bridge,
+copied verbatim). New 1MB region covers every standard HuCard size `pce_top.vhd:672-680`
+can mirror (128K/256K/384K/512K/768K/1MB) -- SF2's 2560K bank-switched mapper is not
+supported (would need a separate `rombank` register `pce_top` has no port for).
+`ROM_SZ` is now latched dynamically from the real loaded byte count (`rom_wr_addr` at
+`rom_loading`'s falling edge), replacing the hardcoded value that was always wrong for
+anything but the "1MB and others" fallback bucket.
+
+While there, fixed a real, separate bug surfaced during this work: `RESET`/`COLD_RESET`
+only ever depended on board-level `reset_n` (button+PLL), never on `rom_loading` -- the
+CPU ran the *entire* ROM load, issuing real `ROM_RD` fetches into a partially-written
+SDRAM region while port B was mux'd to the write side, reading back stale/torn data.
+New `core_resetn` holds the core in reset through the whole load, releasing exactly on
+`rom_loading`'s falling edge -- the same shape as NECTang's own `nestang_top.sv`
+reference (`reset_nes`). Same missing gate confirmed still present, unfixed, on
+nano20k/console60k/console60k_cd (not touched this pass).
+
+Real `gw_sh` result, `impl/pnr/pcetang_primer25k.fs` (GW5A-25A):
+
+```
+Logic     9038/23040   (40%)
+Register  4000/23280   (18%)
+CLS       6247/11520   (55%)
+BSRAM     45/56        (81%)  -- SDPB 22, DPB 7, DPX9B 7, pROMX9 9
+DSP       1/28         (4%)
+clk_pce:    42.857 MHz constraint, 43.398 MHz actual Fmax (+1.26%)
+clk_sdram:  120.000 MHz constraint, 120.300 MHz actual Fmax (+0.25%)
+clk_pixel:  75.000 MHz constraint, 76.237 MHz actual Fmax (+1.65%)
+Setup/Hold TNS: 0 ns on every clock (0 violations)
+```
+
+**BSRAM dropped from `56/56 (100%)` to `45/56 (81%)` -- 11 blocks freed**, moving the ROM
+off-chip cost far less BSRAM than the 32K on-chip store it replaced (SDPB 34->22, the
+rest of the bridge is pure logic/registers). **This directly resolves the zero-headroom
+finding above**: PSG's measured 6-block cost (see the Phase 2 audio-observability result
+this section already cites) now fits inside the new 11-block margin with room to spare.
+Wiring audio into this build is a follow-up, not attempted in this pass.
+
+Toolchain note: this `gw_sh` run needed `gowin-edu`, not `gowin-pro` -- `gowin-pro`'s
+`gw_sh` segfaults inside its own `libgwsyn.so` during the inference stage on this
+machine, reproduced on a completely unmodified board file (not caused by this change),
+independent of display/GL setup (tried both a real X session and headless Xvfb+software
+GL, identical crash both ways). `gowin-edu` completes the same builds cleanly. Also
+needed `LD_PRELOAD=<system libfreetype.so.6>` (system `fontconfig` needs newer symbols
+than Gowin's bundled `libfreetype`) and `LD_LIBRARY_PATH=<gowin IDE>/lib` (so a bundled
+lib's own transitive dependency resolves to the matching bundled Qt rather than the
+system copy).
+
 **Phase 1 (Nano 20K): real bitstream, clean on the first real attempt after one SDC
 fix, 2026-08-26.** Caught before building, not after: PCE is NTSC-native 60 Hz, and
 `nano20k_pll.vhd`'s existing HDMI clock pair (`clk_135`/`clk_27`, unused until now) was
@@ -444,7 +497,7 @@ memory failed to map to any BSRAM primitive at all and fell back to registers �
 294912 DFF needed against the 23280 limit. Root cause understood, not just observed:
 Primer 25K's Phase 1 alone is already `56/56 (100%)` BSRAM (zero headroom), and CD's
 own real cost is nontrivial (NECTang's own CD-alone-no-infra Primer 25K build needs
-54/56 blocks by itself, `docs/PORTING.md`). With no BSRAM primitives left to allocate,
+54/56 blocks by itself, per NECTang's `docs/PORTING.md`). With no BSRAM primitives left to allocate,
 Gowin's inferencer falls back to registers for whichever memory loses the race, and
 that DFF count alone blows the budget ~13x over. Same underlying finding as Console 60K
 (CD's real memory demand exceeds what's left after Phase 1's TangCore/HDMI/OSD layer),
@@ -915,7 +968,7 @@ Primer 25K build so far, Phase 1 included).
 **Why no `gw_sh` result ever caught this**: this is a logical/functional bug, not a
 resource or timing one — `gw_sh` proves synthesis, timing, and resource closure, never
 correctness, and this project has repeated that caveat since Phase 1. **Why simulation
-didn't catch it either**: `sim/tb_vram0_cache.vhd`'s mock SDRAM responder (line 118,
+didn't catch it either**: NECTang's `sim/tb_vram0_cache.vhd`'s mock SDRAM responder (line 118,
 `if ram_a_rd_n = '0' then <write> else <read>`) encodes the *same inverted* polarity as
 the bug, so the testbench agreed with the buggy RTL while both disagreed with the real
 controllers. GHDL passed for the wrong reason. **Why no runtime signal exists either**:
@@ -1034,8 +1087,8 @@ returned findings that reframe the whole problem, verified independently against
 real source before being trusted:
 
 **NECTang's own SGX-alone and CD-alone builds already fit Primer 25K, without
-TangCore** (`docs/PORTING.md:996-1030`, real committed numbers, not this session's
-work): SGX alone (`LITE=>0, SGX=>'1', EXT_VRAM0=>1, NO_CD=>1`) closes at
+TangCore** (NECTang's own `docs/PORTING.md:996-1030` — that sibling project's doc, not
+a path in this repo — real committed numbers, not this session's work): SGX alone (`LITE=>0, SGX=>'1', EXT_VRAM0=>1, NO_CD=>1`) closes at
 `Logic 18859/23040 (82%), CLS 11137/11520 (97%), BSRAM 56/56 (100%)` — though with
 `psg` (and `backup_ram`/`test_rom`) swept dead in that build too, so real PSG's +6
 BSRAM/+2700 LUT (measured on Console 60K, this document's own Phase 2 section) is not
@@ -1373,8 +1426,13 @@ entirely gated on the SCSI target stub below, still not started.
 
 #### On hosting SCSI: checked the MiSTer donor's actual split, chose differently, on purpose
 
-Investigated per a direct user request. The vendored `upstream/tg16-mister/` donor
-(`TurboGrafx16.sv`, `sys/hps_io.sv`, `rtl/hps_ext.v`) confirms MiSTer's real split: `cd.vhd`/
+Investigated per a direct user request. Checked against the real MiSTer donor source
+(`TurboGrafx16.sv`, `sys/hps_io.sv`, `rtl/hps_ext.v`) -- NOT vendored into this repo at
+`upstream/tg16-mister/` as an earlier version of this note implied; `TurboGrafx16.sv`
+and `hps_io.sv` exist only in NECTang's own `upstream/tg16-mister/` checkout (read
+there for this investigation, not copied here), and `hps_ext.v` IS vendored here, but
+at `src/pce/tg16-mister-rtl/hps_ext.v`, not the `upstream/tg16-mister/rtl/` path named
+above. This confirms MiSTer's real split: `cd.vhd`/
 `SCSI.vhd` (identical to this project's, unmodified) own only the bus phase timing; ALL
 SCSI command semantics (decode, sense codes, CHD/BIN-CUE file reads) run as C code on the
 HPS side (a full Linux ARM SoC), exchanged over a generic register bus (`hps_ext.v`'s
