@@ -42,7 +42,9 @@ entity pcetang_primer25k is
       tmds_d_p    : out   std_logic_vector(2 downto 0);
 
       uart_rxd    : in    std_logic;
-      uart_txd    : out   std_logic
+      uart_txd    : out   std_logic;
+
+      leds_n      : out   std_logic_vector(1 downto 0)
    );
 end entity;
 
@@ -189,6 +191,14 @@ architecture rtl of pcetang_primer25k is
    signal vram0_ram_a_di   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_do   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_wait : std_logic;
+
+   -- Sticky latches (2026-08-27, per an independent Fable-model audit's P3) -- see
+   -- pcetang_nano20k.vhd's identical comment for why (raw pce_top pulses are invisible
+   -- on a real LED at clk_pce rate).
+   signal dbg_deadline_miss   : std_logic;
+   signal dbg_fifo_overflow   : std_logic;
+   signal dbg_deadline_miss_r : std_logic := '0';
+   signal dbg_fifo_overflow_r : std_logic := '0';
 
    signal overlay       : std_logic;
    signal overlay_x     : std_logic_vector(7 downto 0);
@@ -509,6 +519,7 @@ begin
       VRAM0_RAM_A_DI   => vram0_ram_a_di,
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
+      DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -566,5 +577,16 @@ begin
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );
+
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         dbg_deadline_miss_r <= dbg_deadline_miss_r or dbg_deadline_miss;
+         dbg_fifo_overflow_r <= dbg_fifo_overflow_r or dbg_fifo_overflow;
+      end if;
+   end process;
+
+   leds_n(0) <= not dbg_deadline_miss_r;
+   leds_n(1) <= not dbg_fifo_overflow_r;
 
 end architecture;

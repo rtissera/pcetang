@@ -326,6 +326,7 @@ begin
       VRAM0_RAM_A_ADDR => open, VRAM0_RAM_A_REQ => open, VRAM0_RAM_A_RD_N => open,
       VRAM0_RAM_A_DI => open, VRAM0_RAM_A_DO => (others => '0'),
       VRAM0_RAM_A_WAIT => '0',
+      DBG_DEADLINE_MISS => open, DBG_FIFO_OVERFLOW => open,
 
       ROM_RD    => open,
       ROM_RDY   => '1',            -- no wait-state support in this first cut

@@ -56,6 +56,13 @@ entity pce_top is
 		VRAM0_RAM_A_DO   : in  std_logic_vector(15 downto 0) := (others => '0');
 		VRAM0_RAM_A_WAIT : in  std_logic := '0';
 
+		-- vram0_cache.vhd's own dbg_deadline_miss/dbg_fifo_overflow, exposed here for the
+		-- first time (2026-08-27, per an independent Fable-model audit's P3) -- previously
+		-- tied open inside gen_vram0_ext below, invisible to every board top. '0' always
+		-- on EXT_VRAM0=0 boards (gen_vram0_onchip, no vram0_cache instance to drive them).
+		DBG_DEADLINE_MISS : out std_logic;
+		DBG_FIFO_OVERFLOW : out std_logic;
+
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
 		ROM_A 		: out std_logic_vector(21 downto 0);
@@ -472,6 +479,8 @@ begin
 		data_b	=> (others => '0'),
 		wren_b	=> CLR_WE
 	);
+	DBG_DEADLINE_MISS <= '0';
+	DBG_FIFO_OVERFLOW <= '0';
 end generate;
 
 -- EXT_VRAM0 /= 0 (Nano 20K): src/common/mem/vram0_cache.vhd instead, backed by
@@ -495,8 +504,8 @@ begin
 		ram_a_di   => VRAM0_RAM_A_DI,
 		ram_a_do   => VRAM0_RAM_A_DO,
 		ram_a_wait => VRAM0_RAM_A_WAIT,
-		dbg_deadline_miss => open,
-		dbg_fifo_overflow => open
+		dbg_deadline_miss => DBG_DEADLINE_MISS,
+		dbg_fifo_overflow => DBG_FIFO_OVERFLOW
 	);
 end generate;
 

@@ -51,7 +51,9 @@ entity pcetang_nano20k is
       tmds_d_p    : out   std_logic_vector(2 downto 0);
 
       uart_rxd    : in    std_logic;
-      uart_txd    : out   std_logic
+      uart_txd    : out   std_logic;
+
+      leds_n      : out   std_logic_vector(1 downto 0)
    );
 end entity;
 
@@ -188,6 +190,18 @@ architecture rtl of pcetang_nano20k is
    signal vram0_ram_a_do   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_wait : std_logic;
    signal ram_b_wait_nc    : std_logic;
+
+   -- Sticky latches (2026-08-27, per an independent Fable-model audit's P3): the raw
+   -- pce_top pulses are single-cycle at clk_pce (~42.857MHz) -- invisible to the eye on
+   -- a real LED. Latched once seen, held until reset, so a real hardware run can show
+   -- "did this ever happen" without a scope. See vram0_cache.vhd's own header for why
+   -- dbg_deadline_miss is expected to fire often (a real, already-measured deadline
+   -- overrun, not a rare corner case) -- this LED is expected to light up immediately
+   -- on real hardware, not prove correctness by staying dark.
+   signal dbg_deadline_miss   : std_logic;
+   signal dbg_fifo_overflow   : std_logic;
+   signal dbg_deadline_miss_r : std_logic := '0';
+   signal dbg_fifo_overflow_r : std_logic := '0';
 
    signal overlay       : std_logic;
    signal overlay_x     : std_logic_vector(7 downto 0);
@@ -345,6 +359,7 @@ begin
       VRAM0_RAM_A_DI   => vram0_ram_a_di,
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
+      DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
 
       ROM_RD    => open,
       ROM_RDY   => '1',
@@ -409,5 +424,16 @@ begin
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );
+
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         dbg_deadline_miss_r <= dbg_deadline_miss_r or dbg_deadline_miss;
+         dbg_fifo_overflow_r <= dbg_fifo_overflow_r or dbg_fifo_overflow;
+      end if;
+   end process;
+
+   leds_n(0) <= not dbg_deadline_miss_r;
+   leds_n(1) <= not dbg_fifo_overflow_r;
 
 end architecture;

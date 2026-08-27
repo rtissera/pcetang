@@ -115,3 +115,11 @@ IO_LOC  "uart_rxd" B3;
 IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 IO_LOC  "uart_txd" C3;
 IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// Onboard LEDs, active low -- real pins from NECTang's own primer25k core_test.cst.
+// LED0 = dbg_deadline_miss (sticky), LED1 = dbg_fifo_overflow (sticky) -- see
+// pcetang_primer25k.vhd's own sticky-latch comment.
+IO_LOC  "leds_n[0]" D7;
+IO_PORT "leds_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "leds_n[1]" E8;
+IO_PORT "leds_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP;

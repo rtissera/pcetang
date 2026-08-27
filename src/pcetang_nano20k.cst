@@ -33,3 +33,12 @@ IO_LOC  "uart_txd" 69;
 IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC  "uart_rxd" 70;
 IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
+// Onboard LEDs, active low -- real pins from NECTang's own nano20k_core_test.cst.
+// LED0 = dbg_deadline_miss (sticky), LED1 = dbg_fifo_overflow (sticky) -- see
+// pcetang_nano20k.vhd's own sticky-latch comment for why raw pulses aren't wired
+// directly.
+IO_LOC  "leds_n[0]" 15;
+IO_PORT "leds_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC  "leds_n[1]" 16;
+IO_PORT "leds_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
