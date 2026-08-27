@@ -1576,9 +1576,39 @@ are not re-measured). Primer 25K Phase 1 (non-CD) re-confirmed `GowinSynthesis`-
 Console 60K Phase 1 and Nano 20K are unaffected (`NO_CD=>1`, `cd.vhd` never
 elaborated) and were not re-run.
 
-**Not done**: `vram0_cache.vhd`'s `tag_mem` forced into a now-available BSRAM block
-(the model agent's next-biggest predicted win, downstream of this freeing BSRAM —
-unstarted). `sdram.sv`'s `last_valid[]`/refresh-ordering fixes (unstarted, now lower
-priority). No real hardware or simulation test of ADPCM playback exists on any board —
-this result is `gw_sh`-confirmed for resource/timing closure and protocol-traced
-against `cd.vhd`'s own source for correctness, not verified against real audio output.
+**Not done**: `sdram.sv`'s `last_valid[]`/refresh-ordering fixes (unstarted, see below
+for why this is now the clear next lever). No real hardware or simulation test of
+ADPCM playback exists on any board — this result is `gw_sh`-confirmed for
+resource/timing closure and protocol-traced against `cd.vhd`'s own source for
+correctness, not verified against real audio output.
+
+### Follow-up: `vram0_cache.vhd`'s `tag_mem` landed in BSRAM for free; traced the new `clk_pce` critical path
+
+The model agent's next-biggest predicted win (forcing `tag_mem`, a tiny `dpram(9,4)`
+previously stuck in fabric at ~2681 LUTs + 2056 registers, into a real BSRAM block)
+turned out to need no RTL change at all: with 27 blocks now free, Gowin's own
+inference simply placed it in BSRAM on its own. Confirmed via the resource report —
+`tag_mem` now shows 1 BSRAM block. No action needed; this line item is resolved as a
+side effect of the ADPCM offload, not a separate task.
+
+Traced the real setup-timing report (`report_timing -setup -max_paths 25`) to see
+where the critical path moved:
+- **Global worst path (both clocks), slack 0.130ns**: `clk_sdram`,
+  `sdram_inst/last_a[0]_6_s0` → `sdram_inst/last_a[2]_19_s0/SET`. This is exactly the
+  already-identified `sdram.sv` bug (port C's cache-invalidate write storing all-ones
+  on a write, driving the tag comparator straight into a register's synchronous SET
+  pin — see the BSRAM-levers discussion above). Now confirmed as the literal worst
+  path in the entire design, not just a theoretical concern — the clearest, most
+  concrete next lever if `clk_sdram`'s margin ever needs to grow further, though it
+  currently closes clean.
+- **`clk_pce` worst path, slack 0.261ns**: `core/VDC0/SPR_TILE_X_0_s0` →
+  `core/VDC0/SPR_TILE_SPR0_SET_134_s1/CE`, 12 logic levels. This is inside HuC6270
+  (`VDC0`)'s own sprite-tile pixel/attribute computation — unrelated to
+  `vram0_cache`, SDRAM, or anything touched this session. `tag_mem` no longer appears
+  near the top of the setup report at all. Untouched, pre-existing logic; not
+  something this session's work created or can take credit/blame for.
+
+VRAM0's own real-time refill deadline (`dbg_deadline_miss`, a runtime counter
+separate from static timing closure) is unaffected by any of this session's changes:
+sdram.sv's arbitration priority (port A > B > C > refresh) is unchanged, so the new
+ADPCM traffic on port C cannot delay a VRAM0 fetch on port A.
