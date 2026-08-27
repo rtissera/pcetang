@@ -51,13 +51,16 @@
 -- (A > B > C > refresh) and a flagged, not-yet-measured refresh-starvation risk.
 --
 -- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): a minimal SCSI target stub now
--- answers `CD_COMM_SEND` -- any command other than REQUEST SENSE gets CHECK CONDITION; REQUEST
--- SENSE gets real SCSI-2 fixed-format sense data (NOT READY / MEDIUM NOT PRESENT) pushed
--- through `CD_DATA`/`CD_DATA_WR` into SCSI.vhd's own DATA-IN FIFO. See the `cd_stat_i`/
--- `cd_comm_i` signal block below for the full protocol trace and docs/ARCHITECTURE.md's
--- "Real syscard boot" Part 2 section for why this specific pair of commands is the real
--- minimum (a syscard with no disc polls TEST UNIT READY, gets CHECK CONDITION, then asks
--- REQUEST SENSE why). Whether this is enough for a real syscard to actually reach a boot
+-- answers `CD_COMM_SEND` -- any command other than REQUEST SENSE gets CHECK CONDITION;
+-- REQUEST SENSE gets real, hardware-verified sense data (NOT READY / NEC's own "no disc,
+-- tray closed" code, `0x0B` -- checked against a real PCE-CD emulator's source, not
+-- assumed from generic SCSI-2, see the `SENSE_NOT_READY` constant's own comment for the
+-- verification and the one real bug it caught) pushed through `CD_DATA`/`CD_DATA_WR`
+-- into SCSI.vhd's own DATA-IN FIFO. See the `cd_stat_i`/`cd_comm_i` signal block below
+-- for the full protocol trace and docs/ARCHITECTURE.md's "Real syscard boot" Part 2
+-- section for why this specific pair of commands is the real minimum (a syscard with no
+-- disc polls TEST UNIT READY, gets CHECK CONDITION, then asks REQUEST SENSE why). Whether
+-- this is enough for a real syscard to actually reach a boot
 -- screen, versus needing more of the command set, is not yet known -- no hardware test,
 -- no simulation testbench for this responder exists. What IS real: `gw_sh` will confirm
 -- whether this closes timing and fits, which is the first checkable fact about it.
@@ -373,13 +376,35 @@ architecture rtl of pcetang_primer25k_cd is
 
    constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
 
-   -- Fixed-format sense data, SCSI-2 standard constants (not project-specific): Error
-   -- Code 0x70 (current error), Sense Key 0x02 (NOT READY), Additional Sense Length 0x0A
-   -- (10 bytes follow), ASC 0x3A / ASCQ 0x00 (MEDIUM NOT PRESENT). 18 bytes total.
+   -- Fixed-format sense data. Verified against Mednafen's pce_fast/pcecd_drive.cpp
+   -- (mednafen/pce_fast/pcecd_drive.cpp, a real hardware-accurate PCE-CD emulator, BSD/
+   -- GPL, MakeSense()/PCECommandDefs -- fetched and checked 2026-08-27, not assumed from
+   -- generic SCSI-2 knowledge) after a direct request to verify this against real PCE-CD/
+   -- SCSI specs surfaced a real bug: byte 12 (ASC) was `0x3A`, the generic SCSI-2 MEDIUM
+   -- NOT PRESENT code -- real PCE-CD hardware/firmware uses NEC's own `0x0B` ("no disc,
+   -- tray closed") instead, per that source's `NSE_NO_DISC` constant, used specifically
+   -- for `SENSEKEY_NOT_READY` when a command requiring a disc gets one and none is
+   -- present. Every other byte here already matched Mednafen's `MakeSense()` exactly:
+   -- byte 0 = 0x70 (current error, "sense data is not SCSI compliant" per that function's
+   -- own comment), byte 2 = sense key (0x02 NOT READY), byte 7 = 0x0A (additional sense
+   -- length), byte 13 = ASCQ (0x00), byte 14 = FRU (0x00), all others 0.
+   --
+   -- Also confirmed from the same source: Mednafen's real command table flags every
+   -- command except REQUEST SENSE itself (TEST UNIT READY, READ(6), and the PCE-specific
+   -- 0xD8/0xD9/0xDA/0xDD/0xDE audio/subcode commands) as requiring a disc, and dispatches
+   -- the identical NOT_READY/NSE_NO_DISC response for ALL of them when none is present --
+   -- so this responder's blanket "any command but REQUEST SENSE gets the same response"
+   -- isn't a simplification of the real behavior for that command set, it matches it.
+   -- The one real gap: a genuinely unrecognized opcode (not in that 7-command real table)
+   -- gets ILLEGAL_REQUEST/NSE_INVALID_COMMAND (0x20) on real hardware, not NOT_READY --
+   -- this stub can't distinguish that case and would answer NOT_READY instead. Not fixed
+   -- here: real syscard boot is not known to issue any opcode outside that table (matches
+   -- Mednafen's own real-hardware-tested need to implement only those seven), so this is
+   -- a named, real gap, not a hidden one.
    type sense_data_t is array (0 to 17) of std_logic_vector(7 downto 0);
    constant SENSE_NOT_READY : sense_data_t := (
       x"70", x"00", x"02", x"00", x"00", x"00", x"00", x"0A",
-      x"00", x"00", x"00", x"00", x"3A", x"00", x"00", x"00", x"00", x"00"
+      x"00", x"00", x"00", x"00", x"0B", x"00", x"00", x"00", x"00", x"00"
    );
 
    type scsi_state_t is (SCSI_IDLE, SCSI_SENSE_PULSE, SCSI_SENSE_GAP, SCSI_SENSE_WAIT_END);
