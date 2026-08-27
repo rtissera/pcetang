@@ -1612,3 +1612,33 @@ VRAM0's own real-time refill deadline (`dbg_deadline_miss`, a runtime counter
 separate from static timing closure) is unaffected by any of this session's changes:
 sdram.sv's arbitration priority (port A > B > C > refresh) is unchanged, so the new
 ADPCM traffic on port C cannot delay a VRAM0 fetch on port A.
+
+### Follow-up: `sdram.sv`'s `last_valid[]` fix, isolated, `gw_sh`-confirmed
+
+Applied as its own scoped change (not bundled with anything else, so its effect could
+be measured in isolation): replaced the "stuff `last_a` with all-ones on a miss/write"
+sentinel with a real per-channel `last_valid[]` bit, for all three ports (A, B, C) --
+same fix `sdram32.sv` (the Nano 20K sibling) already carries, ported here rather than
+re-derived. Mechanical change: every `last_a[N] <= <write?> ? '1 : <addr>` site became
+a plain `last_a[N] <= <addr>` write plus a matching `last_valid[N] <= ~<write?>`, and
+every `fetch_req`/hit-check comparison against `last_a` gained a `last_valid[N]` term.
+Port B's existing completion-time invalidate-on-write (a second, separate site from
+its launch-time write, pre-existing and unrelated to this fix) became
+`last_valid[1] <= 1'b0` instead of restoring the sentinel.
+
+**Real `gw_sh` PnR, confirmed, isolated from the ADPCM offload above**: `clk_sdram`
+120.000 MHz constraint / **127.969 MHz actual** (margin 1.6% → 6.6%). `clk_pce`
+42.857 MHz constraint / **46.739 MHz actual** (margin 1.13% → 9.06%). `BSRAM 29/56
+(52%)` and `Logic 10772/23040 (47%)` both unchanged, as expected (no memory or logic
+added, just a register-write shape change). 0 setup/hold violations. Re-checked the
+setup-timing report's worst path directly: it is no longer a `.../SET` pin at all --
+the global worst path moved to an ordinary `last_a[2]→data` data path, slack risen
+from 0.130ns to 0.519ns. The specific pathology this fix targeted is confirmed gone,
+not just improved by placement noise.
+
+**Not done**: `sdram32.sv`'s second, larger fix (registering the cache-hit compare,
+delaying `addr`/`req`/`rd_n`/`di` by one cycle) -- a bigger, riskier change with a
+documented hardware-measured partial-fix failure mode ("252 of 256 bytes wrong" on
+real Nano 20K when only one side was delayed), not requested and not applied here.
+Refresh-first arbitration reordering in `sdram.sv` (the other real, previously-fixed-
+elsewhere bug class, starvation under sustained B/C traffic) -- still unstarted.

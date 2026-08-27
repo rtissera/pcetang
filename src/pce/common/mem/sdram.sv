@@ -55,6 +55,19 @@
 // Real ROM/CD-RAM traffic is expected to be bursty, not literally saturating, but this
 // is an assumption, not a measurement -- revisit if hardware testing ever shows visible
 // corruption or lockups under heavy CD access.
+//
+// PCE PORT (2026-08-27): `last_valid[]` replaces the "stuff last_a with all-ones on a
+// miss/write" sentinel, for ports A and C (port B already used a separate real
+// invalidate site, see below). sdram32.sv's header documents the same fix on the Nano
+// 20K variant of this donor: the all-ones trick makes the 20-bit comparator
+// (last_a != RAM_x_ADDR) drive a register's synchronous SET pins directly on every
+// miss, which is a measurably worse timing shape than a plain data path -- confirmed
+// as the real, single worst setup path in this design's own timing report after the
+// ADPCM-to-SDRAM offload (`sdram_inst/last_a[0]...->last_a[2].../SET`, see
+// docs/ARCHITECTURE.md). A dedicated valid bit per channel gives the same behaviour
+// through an ordinary register write instead. Ported here as its own scoped change,
+// not bundled with any other fix, so its effect on clk_sdram's margin can be measured
+// in isolation.
 
 //============================================================================
 //
@@ -159,16 +172,22 @@ reg  [1:0] bank;
 reg [15:0] data;
 reg        we;
 reg        ram_req=0;
-reg [21:2] last_a[3] = '{'1,'1,'1};
+reg [21:2] last_a[3];
+// PCE PORT (2026-08-27): one valid bit per channel -- see header's "last_valid[]"
+// note -- instead of an all-ones sentinel stuffed into last_a itself. Defaults to all
+// invalid at reset/power-up, same effective behaviour as the old sentinel (any real
+// address technically *could* collide with '1, this never technically could with a
+// cleared valid bit).
+reg  [2:0] last_valid = 3'b000;
 reg  [8:0] rfsh_cnt;
 
-wire       fetch_req = (RAM_A_RD_n || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
+wire       fetch_req = (RAM_A_RD_n || !last_valid[0] || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
 // PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
-wire       fetch_req_b = RAM_B_WE || (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});
+wire       fetch_req_b = RAM_B_WE || !last_valid[1] || (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});
 // PCE PORT: third client (CD-RAM). Same shape as fetch_req (port A) -- real read+write,
 // small line cache, no forced-miss-on-write -- see header for why this mirrors A rather
 // than B's convention.
-wire       fetch_req_c = (RAM_C_RD_n || last_a[2] != {1'b0,RAM_C_ADDR[20:2]});
+wire       fetch_req_c = (RAM_C_RD_n || !last_valid[2] || last_a[2] != {1'b0,RAM_C_ADDR[20:2]});
 
 // access manager
 always @(posedge clk) begin
@@ -196,7 +215,7 @@ always @(posedge clk) begin
 	// PCE PORT: !RAM_B_WE added -- a write must never be served from the cache, it has to
 	// reach real SDRAM (last_data is not updated by a write, so a "hit" here would just
 	// hand back stale pre-write data on the very next read).
-	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && (last_a[1] == {1'b0,RAM_B_ADDR[20:2]})) begin
+	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && last_valid[1] && (last_a[1] == {1'b0,RAM_B_ADDR[20:2]})) begin
 		old_b_req <= RAM_B_REQ;
 		RAM_B_DO <= last_data[1][(RAM_B_ADDR[1:0]*8) +:8];
 	end
@@ -229,7 +248,8 @@ always @(posedge clk) begin
 			{bank,a} <= RAM_A_ADDR;
 			data <= {RAM_A_DI,RAM_A_DI};
 			ram_req <= fetch_req;
-			last_a[0] <= RAM_A_RD_n ? '1 : RAM_A_ADDR[20:2];
+			last_a[0] <= RAM_A_ADDR[20:2];
+			last_valid[0] <= ~RAM_A_RD_n;
 			ch0_busy <= 1;
 			state <= STATE_START;
 		end
@@ -240,6 +260,7 @@ always @(posedge clk) begin
 			data <= {RAM_B_DI,RAM_B_DI};        // PCE PORT: write data, only used when RAM_B_WE
 			ram_req <= 1;
 			last_a[1] <= RAM_B_ADDR[20:2];
+			last_valid[1] <= 1'b1;
 			ch1_busy <= 1;
 			state <= STATE_START;
 		end
@@ -252,7 +273,8 @@ always @(posedge clk) begin
 			{bank,a} <= RAM_C_ADDR;
 			data <= {RAM_C_DI,RAM_C_DI};
 			ram_req <= fetch_req_c;
-			last_a[2] <= RAM_C_RD_n ? '1 : RAM_C_ADDR[20:2];
+			last_a[2] <= RAM_C_ADDR[20:2];
+			last_valid[2] <= ~RAM_C_RD_n;
 			ch2_busy <= 1;
 			state <= STATE_START;
 		end
@@ -288,7 +310,7 @@ always @(posedge clk) begin
 			// PCE PORT: a write's data_reg readback does not reflect what was just written
 			// (see header), so last_data[1] would go stale -- invalidate the line instead of
 			// caching it, forcing the next read to really re-fetch from SDRAM.
-			if(we) last_a[1] <= '1;
+			if(we) last_valid[1] <= 1'b0;
 			else begin
 				RAM_B_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
 				last_data[1][(a[1] ? 16 : 0) +:16] <= data_reg;
