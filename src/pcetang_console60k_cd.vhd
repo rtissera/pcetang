@@ -16,9 +16,10 @@
 -- MiSTle-Dev/FPGA-Companion's MiSTeryNano (same Tang board family) uses the same
 -- line-doubling approach for Atari ST.
 --
--- CD_COMM/CD_DATA/CD_STAT (the SCSI-command host interface) are still tied to safe
--- stubs -- real CD/CHD function needs BL616 firmware SCSI-target work, unstarted,
--- separate from and unblocked by this FPGA-side result.
+-- CD_COMM/CD_DATA/CD_STAT (the SCSI-command host interface) had a minimal target stub
+-- added 2026-08-28 -- see the note below at that date. Real CD/CHD function (actual
+-- disc data, not just "responds to a command") still needs BL616 firmware SCSI-target
+-- work, unstarted, separate from and unblocked by this FPGA-side result.
 --
 -- AUDIO (2026-08-26): PSG_SL/PSG_SR/CDDA_SL/CDDA_SR/ADPCM_S are wired real (previously
 -- open), into pce2hdmi_sd.sv's new audio ports -- deliberately, to correct a
@@ -34,12 +35,41 @@
 -- RAM_SEL window) -- same recipe as pcetang_primer25k_cd.vhd's own ROM+CD-RAM work, see
 -- that file's header for the fuller rationale and pcetang_console60k.vhd's header for
 -- the sibling ROM-only version of this same change. `CD_EN` flipped '0'->'1' so the CD
--- subsystem (and CD-RAM's real decode) actually elaborates; the SCSI target stub
--- (CD_STAT/CD_COMM/etc.) is NOT wired here -- still the same safe stubs as before, so a
--- real syscard boot would get no SCSI response yet. Also added `core_resetn` (this
--- board was still missing the reset-gating fix pcetang_console60k.vhd/
+-- subsystem (and CD-RAM's real decode) actually elaborates. Also added `core_resetn`
+-- (this board was still missing the reset-gating fix pcetang_console60k.vhd/
 -- pcetang_primer25k.vhd already carry -- now that ROM reads have real SDRAM latency,
 -- without it the CPU could issue ROM_RD mid-load, racing the write bridge on port B).
+--
+-- ADPCM OFFLOAD (2026-08-28): moved off the on-chip dpram(17,4) shim onto sdram.sv's
+-- port C, shared with the CD-RAM bridge above via a real owner arbiter (cdr_owner_t) --
+-- same design as pcetang_primer25k_cd.vhd's own ADPCM offload, copied here rather than
+-- re-derived. This board previously kept ADPCM on-chip deliberately (real BSRAM
+-- headroom existed and it wasn't broken) -- moved anyway per direct request, for
+-- consistency with Primer 25K CD's design. See that file's own ADPCM_SDRAM_BASE
+-- comment for the real interface trace (cd.vhd's DRAM_CLKEN timing, the byte-spans-
+-- two-WRITE-slots bug it already found and fixed, not re-litigated here).
+--
+-- Real gw_sh, confirmed: 0 setup/hold violations, BSRAM 94/118 (80%) -> 62/118 (53%)
+-- -- 32 blocks freed, matching ADPCM_DRAM's real cost exactly (same number Primer 25K
+-- CD's own offload measured). clk_pce 44.843/42.857 MHz (+4.63%, improved again),
+-- clk_sdram 170.122/120 MHz (+41.8%, comfortable).
+--
+-- SCSI TARGET STUB (2026-08-28): real, unmodified from pcetang_primer25k_cd.vhd's own
+-- design (spec-checked there against Mednafen's pce_fast/pcecd_drive.cpp, see that
+-- file's own signal-block comment for the full protocol trace) -- copied verbatim, not
+-- re-derived. Any command other than REQUEST SENSE (0x03) gets CHECK CONDITION;
+-- REQUEST SENSE gets real NOT-READY sense data (NEC's own 0x0B "no disc, tray closed")
+-- pushed through CD_DATA/CD_DATA_WR into SCSI.vhd's own DATA-IN FIFO. Answers a real
+-- syscard's boot-time polling with the honest "no disc" response; does not implement
+-- any command needed once a real disc image is actually served (unstarted BL616
+-- firmware work, see the top of this header). No hardware or simulation test of this
+-- responder exists on this board specifically -- same caveat as Primer 25K CD's.
+--
+-- Real gw_sh, confirmed: 0 setup/hold violations, BSRAM unchanged at 94/118 (80%) --
+-- cd_fifos.vhd's SCSI_FIFO was already shrunk 4096->64 entries by Primer 25K CD's own
+-- earlier fix (that file is shared, not per-board), so un-sweeping it here via a real
+-- CD_STAT_GET cost nothing extra. clk_pce 44.559/42.857 MHz (+3.97%, improved from the
+-- pre-SCSI-stub build's +0.55%), clk_sdram 136.228/120 MHz (+13.5%).
 --
 -- ARCADE CARD RAM: NOT done, despite being asked for -- real Arcade Card RAM is 2MB
 -- (arcade.sv's own RAM_A is 21 bits wide), and this board's entire SDRAM window (every
@@ -301,11 +331,9 @@ architecture rtl of pcetang_console60k_cd is
    signal wr_data        : std_logic_vector(7 downto 0);
 
    -- CD-RAM bridge: pce_top's CD_RAM_A/CD_RAM_DO/CD_RAM_DI/CD_RAM_RD/CD_RAM_WR through
-   -- sdram.sv's port C. Single client here (unlike Primer 25K CD, which also shares
-   -- this port with ADPCM RAM -- Console 60K CD keeps its existing on-chip ADPCM shim,
-   -- real BSRAM headroom exists and it isn't broken, so it's untouched by this change).
-   -- Level-held REQ (port A's convention, not port B's toggle), matching CD_RAM_RDY's
-   -- new contribution to WAIT_N.
+   -- sdram.sv's port C -- shared with ADPCM RAM (2026-08-28, see the cdr_owner_t signal
+   -- block above), same as pcetang_primer25k_cd.vhd. Level-held REQ (port A's
+   -- convention, not port B's toggle), matching CD_RAM_RDY's contribution to WAIT_N.
    signal cd_ram_a     : std_logic_vector(21 downto 0);
    signal cd_ram_do    : std_logic_vector(7 downto 0);
    signal cd_ram_di_i  : std_logic_vector(7 downto 0) := (others => '0');
@@ -325,6 +353,34 @@ architecture rtl of pcetang_console60k_cd is
    signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
 
+   -- Minimal SCSI target stub, real from pcetang_primer25k_cd.vhd (gw_sh-verified
+   -- there, spec-checked against Mednafen's pce_fast/pcecd_drive.cpp) -- see that
+   -- file's own header/signal-block comments for the full protocol trace and the one
+   -- real bug it caught (ASC byte). Any command other than REQUEST SENSE gets CHECK
+   -- CONDITION; REQUEST SENSE gets real sense data pushed through CD_DATA/CD_DATA_WR
+   -- into SCSI.vhd's own DATA-IN FIFO.
+   signal cd_stat_i     : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_msg_i      : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_stat_get_i : std_logic := '0';
+   signal cd_comm_i      : std_logic_vector(95 downto 0);
+   signal cd_comm_send_i : std_logic;
+   signal cd_comm_send_r : std_logic := '0';
+   signal cd_data_i     : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_data_wr_i  : std_logic := '0';
+   signal cd_data_end_i : std_logic;
+
+   constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
+
+   type sense_data_t is array (0 to 17) of std_logic_vector(7 downto 0);
+   constant SENSE_NOT_READY : sense_data_t := (
+      x"70", x"00", x"02", x"00", x"00", x"00", x"00", x"0A",
+      x"00", x"00", x"00", x"00", x"0B", x"00", x"00", x"00", x"00", x"00"
+   );
+
+   type scsi_state_t is (SCSI_IDLE, SCSI_SENSE_PULSE, SCSI_SENSE_GAP, SCSI_SENSE_WAIT_END);
+   signal scsi_state : scsi_state_t := SCSI_IDLE;
+   signal sense_idx  : integer range 0 to 17 := 0;
+
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
 
@@ -336,20 +392,35 @@ architecture rtl of pcetang_console60k_cd is
    signal brm_do : std_logic_vector(7 downto 0);
    signal brm_we : std_logic;
 
-   -- ADPCM RAM shim (2026-08-27): cd.vhd's internal ADPCM_DRAM dpram(17,4) was removed
-   -- project-wide in favor of pce_top's new ADPCM_RAM_* bridge ports (see
-   -- docs/ARCHITECTURE.md and cd.vhd's own header) so Primer 25K's CD build could offload
-   -- it to external SDRAM and recover ~32 BSRAM blocks. This board still has real,
-   -- audio-wired ADPCM playback (see header comment above -- BSRAM 110/118, PSG/CDDA/
-   -- ADPCM_S all real) and no SDRAM bridge of its own, so it gets this direct
-   -- replacement instead: the exact same dpram(17,4) cd.vhd used to instantiate
-   -- internally, wired straight through the new ports. ADPCM_RAM_READY tied '1' (never
-   -- stall) reproduces the original same-cycle-synchronous-memory assumption exactly --
-   -- see cd.vhd's DRAM_CLKEN wait-gate comment for why that assumption is safe here.
-   signal adpcm_ram_a     : std_logic_vector(16 downto 0);
-   signal adpcm_ram_do    : std_logic_vector(3 downto 0);
-   signal adpcm_ram_we    : std_logic;
-   signal adpcm_ram_di    : std_logic_vector(3 downto 0);
+   -- ADPCM RAM offload to SDRAM (2026-08-28): moved off the on-chip dpram(17,4) shim
+   -- onto sdram.sv's port C, sharing it with the CD-RAM bridge above -- same design as
+   -- pcetang_primer25k_cd.vhd's own ADPCM offload (real, gw_sh-verified there, 27
+   -- BSRAM blocks freed), copied here rather than re-derived. One nibble packed per
+   -- SDRAM byte (avoids read-modify-write, which would double port C's transaction
+   -- count). 128KB region at ADPCM_SDRAM_BASE, doubling the real 64KB (128Kx4)
+   -- ADPCM_DRAM capacity -- same provisional sizing as Primer 25K CD's.
+   --
+   -- Edge basis is ADPCM_RAM_SLOT_CNT changing, NOT ADPCM_RAM_REQ's own level -- see
+   -- pcetang_primer25k_cd.vhd's identical comment for the real reason (a byte write
+   -- spans two consecutive WRITE slots at two different addresses; REQ stays high
+   -- across both, so edge-detecting REQ itself would silently drop the second nibble).
+   constant ADPCM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#080000#, 21);
+
+   signal adpcm_ram_a_i     : std_logic_vector(16 downto 0);
+   signal adpcm_ram_do_i    : std_logic_vector(3 downto 0);
+   signal adpcm_ram_we_i    : std_logic;
+   signal adpcm_ram_req_i   : std_logic;
+   signal adpcm_ram_slot_cnt_i : std_logic_vector(1 downto 0);
+   signal adpcm_ram_di_i    : std_logic_vector(3 downto 0) := (others => '0');
+   signal adpcm_ram_ready_i : std_logic := '1';
+   signal adpcm_slot_cnt_r  : std_logic_vector(1 downto 0) := (others => '0');
+
+   -- CD-RAM/ADPCM port-C owner arbiter -- same shape as pcetang_primer25k_cd.vhd's
+   -- cdr_owner. CD-RAM wins ties (it directly stalls the CPU via CD_RAM_RDY/WAIT_N);
+   -- ADPCM tolerates real slack (~420ns/slot budget vs. ~83ns SDRAM round trip).
+   type cdr_owner_t is (OWNER_NONE, OWNER_CDRAM, OWNER_ADPCM);
+   signal cdr_owner : cdr_owner_t := OWNER_NONE;
+   signal cd_pend, adpcm_pend : std_logic := '0';
 
 begin
 
@@ -524,33 +595,56 @@ begin
       end if;
    end process;
 
-   -- CD-RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw, level-held for the duration of
-   -- a real CPU access) becomes a real SDRAM access via port C. Edge-detected
-   -- (cdram_rd_r/cdram_wr_r) so the level staying high through this bridge's own wait
-   -- doesn't re-trigger a second transaction. Same shape as pcetang_primer25k_cd.vhd's
-   -- CD-RAM arm of its cdr_state machine, minus the ADPCM-sharing owner logic (this
-   -- board's ADPCM stays on-chip, see the signal block above).
+   -- CD-RAM + ADPCM RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw, level-held) and
+   -- ADPCM_RAM_REQ (level-held for one DRAM_CLKEN slot, ~420ns) both become SDRAM
+   -- accesses via the same shared port C, one at a time, CD-RAM winning ties. Real,
+   -- unmodified from pcetang_primer25k_cd.vhd's own cdr_owner arbiter -- see that
+   -- file's identical comment for the full pend/ready-drop timing rationale.
    process (clk_pce)
-      variable cd_new : std_logic;
+      variable cd_new, adpcm_new : std_logic;
    begin
       if rising_edge(clk_pce) then
-         cdram_rd_r <= cd_ram_rd;
-         cdram_wr_r <= cd_ram_wr;
+         cdram_rd_r      <= cd_ram_rd;
+         cdram_wr_r      <= cd_ram_wr;
+         adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
 
          cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
+            adpcm_new := adpcm_ram_req_i;
+         else
+            adpcm_new := '0';
+         end if;
+
          if cd_new = '1' then
+            cd_pend      <= '1';
             cd_ram_rdy_i <= '0';
+         end if;
+         if adpcm_new = '1' then
+            adpcm_pend        <= '1';
+            adpcm_ram_ready_i <= '0';
          end if;
 
          case cdr_state is
             when CDR_IDLE =>
                cdr_req <= '0';
-               if cd_new = '1' then
+               if cd_pend = '1' or cd_new = '1' then
                   cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
                               resize(unsigned(cd_ram_a(17 downto 0)), 21));
                   cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write
                   cdr_di   <= cd_ram_do;
                   cdr_req  <= '1';
+                  cdr_owner <= OWNER_CDRAM;
+                  cd_pend  <= '0';
+                  cdr_settle_cnt <= (others => '0');
+                  cdr_state <= CDR_SETTLE;
+               elsif adpcm_pend = '1' or adpcm_new = '1' then
+                  cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
+                              resize(unsigned(adpcm_ram_a_i), 21));
+                  cdr_rd_n <= not adpcm_ram_we_i;
+                  cdr_di   <= "0000" & adpcm_ram_do_i;  -- one nibble packed per SDRAM byte
+                  cdr_req  <= '1';
+                  cdr_owner <= OWNER_ADPCM;
+                  adpcm_pend <= '0';
                   cdr_settle_cnt <= (others => '0');
                   cdr_state <= CDR_SETTLE;
                end if;
@@ -561,9 +655,15 @@ begin
                   if cdr_wait = '1' then
                      cdr_state <= CDR_HOLD;
                   else
-                     cd_ram_di_i  <= cdr_do;
-                     cd_ram_rdy_i <= '1';
+                     if cdr_owner = OWNER_CDRAM then
+                        cd_ram_di_i  <= cdr_do;
+                        cd_ram_rdy_i <= '1';
+                     else
+                        adpcm_ram_di_i    <= cdr_do(3 downto 0);
+                        adpcm_ram_ready_i <= '1';
+                     end if;
                      cdr_req <= '0';
+                     cdr_owner <= OWNER_NONE;
                      cdr_state <= CDR_IDLE;
                   end if;
                else
@@ -573,10 +673,62 @@ begin
             when CDR_HOLD =>
                cdr_req <= '1';
                if cdr_wait = '0' then
-                  cd_ram_di_i  <= cdr_do;
-                  cd_ram_rdy_i <= '1';
+                  if cdr_owner = OWNER_CDRAM then
+                     cd_ram_di_i  <= cdr_do;
+                     cd_ram_rdy_i <= '1';
+                  else
+                     adpcm_ram_di_i    <= cdr_do(3 downto 0);
+                     adpcm_ram_ready_i <= '1';
+                  end if;
                   cdr_req <= '0';
+                  cdr_owner <= OWNER_NONE;
                   cdr_state <= CDR_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   -- Minimal SCSI target stub -- real, unmodified from pcetang_primer25k_cd.vhd's own
+   -- process, see the cd_stat_i/cd_comm_i signal block above for the protocol trace.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         cd_comm_send_r <= cd_comm_send_i;
+         cd_stat_get_i  <= '0';
+         cd_data_wr_i   <= '0';
+
+         case scsi_state is
+            when SCSI_IDLE =>
+               if cd_comm_send_i = '1' and cd_comm_send_r = '0' then
+                  if cd_comm_i(7 downto 0) = SCSI_OP_REQUEST_SENSE then
+                     sense_idx  <= 0;
+                     scsi_state <= SCSI_SENSE_PULSE;
+                  else
+                     cd_stat_i     <= x"02";  -- CHECK CONDITION
+                     cd_msg_i      <= x"00";  -- COMMAND COMPLETE
+                     cd_stat_get_i <= '1';
+                  end if;
+               end if;
+
+            when SCSI_SENSE_PULSE =>
+               cd_data_i    <= SENSE_NOT_READY(sense_idx);
+               cd_data_wr_i <= '1';
+               scsi_state   <= SCSI_SENSE_GAP;
+
+            when SCSI_SENSE_GAP =>
+               if sense_idx = 17 then
+                  scsi_state <= SCSI_SENSE_WAIT_END;
+               else
+                  sense_idx  <= sense_idx + 1;
+                  scsi_state <= SCSI_SENSE_PULSE;
+               end if;
+
+            when SCSI_SENSE_WAIT_END =>
+               if cd_data_end_i = '1' then
+                  cd_stat_i     <= x"00";  -- GOOD -- REQUEST SENSE itself succeeded
+                  cd_msg_i      <= x"00";
+                  cd_stat_get_i <= '1';
+                  scsi_state    <= SCSI_IDLE;
                end if;
          end case;
       end if;
@@ -626,16 +778,6 @@ begin
       clock => clk_pce, address => brm_a, data => brm_di, wren => brm_we, q => brm_do
    );
 
-   adpcm_ram_shim: entity work.dpram
-   generic map (17, 4)
-   port map (
-      clock     => clk_pce,
-      address_a => adpcm_ram_a,
-      data_a    => adpcm_ram_do,
-      wren_a    => adpcm_ram_we,
-      q_a       => adpcm_ram_di
-   );
-
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
@@ -669,19 +811,19 @@ begin
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
       CD_RAM_RDY => cd_ram_rdy_i,
 
-      ADPCM_RAM_A => adpcm_ram_a, ADPCM_RAM_DO => adpcm_ram_do,
-      ADPCM_RAM_WE => adpcm_ram_we, ADPCM_RAM_REQ => open,
-      ADPCM_RAM_SLOT_CNT => open,
-      ADPCM_RAM_DI => adpcm_ram_di, ADPCM_RAM_READY => '1',
+      ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
+      ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,
+      ADPCM_RAM_SLOT_CNT => adpcm_ram_slot_cnt_i,
+      ADPCM_RAM_DI => adpcm_ram_di_i, ADPCM_RAM_READY => adpcm_ram_ready_i,
 
       AC_EN => '0',
 
-      CD_STAT => (others => '0'), CD_MSG => (others => '0'), CD_STAT_GET => '0',
-      CD_COMM => open, CD_COMM_SEND => open,
+      CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,
+      CD_COMM => cd_comm_i, CD_COMM_SEND => cd_comm_send_i,
       CD_DOUT_REQ => '0', CD_DOUT => open, CD_DOUT_SEND => open,
       CD_REGION => '0', CD_RESET => open,
-      CD_DATA => (others => '0'), CD_DATA_WR => '0', CD_AUDIO_WR => '0',
-      CD_SUBCD_WR => '0', CD_DATA_END => open, CD_DM => '0',
+      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => '0',
+      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => '0',
 
       CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
