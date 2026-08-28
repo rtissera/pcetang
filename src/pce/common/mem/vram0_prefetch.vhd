@@ -61,6 +61,24 @@
 -- expected for a BAT-only module (still ~100% wrong on their own deadline misses, same
 -- as the un-buffered baseline -- not a regression, simply not addressed).
 --
+-- REAL GW_SH TIMING DELTA (correction/completion of the commit message's own PnR
+-- numbers -- those reported the POST-change Fmax only, not the before/after delta):
+-- comparing against the LAST COMMITTED build's own PnR artifact (commit f5c23ed,
+-- already in the repo, VRAM0_LINE_REFILL=1 but no prefetch engine) against this
+-- change's own gw_sh run --
+-- clk_pce:   baseline Fmax 43.787 MHz (margin ~2.17% over the 42.857 MHz constraint)
+--            -> 43.029 MHz after this change (margin ~0.40%). This change is a REAL,
+--            non-trivial consumer of clk_pce's margin (~1.77 percentage points), not a
+--            free addition -- still 0 setup/hold violations, but materially closer to
+--            the constraint than before. Worth knowing before adding anything else to
+--            clk_pce's timing budget on this board.
+-- clk_sdram: baseline Fmax 120.454 MHz (margin ~0.38%) -> 150.248 MHz after this change
+--            (margin ~25.2%) -- a real INCREASE, opposite of what added logic would
+--            naively predict. Not independently root-caused (plausibly a PnR
+--            placement/optimization-order side effect of the overall netlist changing
+--            shape, not something this module's own logic explains) -- reported as
+--            measured, not further investigated.
+--
 -- REQUIRES G_LINE_REFILL=true AND G_PREFETCH=true on the paired vram0_cache instance
 -- (see that generic's own comment) -- a pf request always expects a real 4-word line
 -- answer.
