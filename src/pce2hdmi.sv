@@ -70,6 +70,12 @@ module pce2hdmi #(
 	input clk_pixel,
 	input clk_5x_pixel,
 
+	// pce_top.vhd audio outputs, direct -- summed into one stereo pair, same pattern
+	// pce2hdmi_sd.sv already uses. No resampling, no CDC synchronizer across the
+	// clk_pce/clk_audio boundary here either -- same accepted caveat as that file's own
+	// audio note. A board that doesn't wire real audio ties these to zero explicitly.
+	input signed [15:0] psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s,
+
 	// output signals
 	output       tmds_clk_n,
 	output       tmds_clk_p,
@@ -194,11 +200,14 @@ always @(posedge clk_pixel) begin
 		rgb <= 24'h101010;
 end
 
-// Silent audio for this first cut -- PCE's PSG_SL/SR + CDDA_SL/SR + ADPCM_S mixing into
-// one stereo pair is real, separate work, not done here.
-logic clk_audio = 0;
+// Audio: summed into one stereo pair on clk_pixel, same shape as pce2hdmi_sd.sv.
+logic clk_audio;
+assign clk_audio = clk_pixel;
 reg [15:0] audio_sample_word [1:0];
-initial begin audio_sample_word[0] = 0; audio_sample_word[1] = 0; end
+always_ff @(posedge clk_audio) begin
+	audio_sample_word[0] <= psg_sl + cdda_sl + adpcm_s;
+	audio_sample_word[1] <= psg_sr + cdda_sr + adpcm_s;
+end
 
 logic[2:0] tmds;
 wire tmdsClk;

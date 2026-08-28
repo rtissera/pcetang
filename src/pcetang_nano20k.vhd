@@ -178,6 +178,12 @@ architecture rtl of pcetang_nano20k is
          clk_pixel    : in std_logic;
          clk_5x_pixel : in std_logic;
 
+         psg_sl  : in std_logic_vector(15 downto 0);
+         psg_sr  : in std_logic_vector(15 downto 0);
+         cdda_sl : in std_logic_vector(15 downto 0);
+         cdda_sr : in std_logic_vector(15 downto 0);
+         adpcm_s : in std_logic_vector(15 downto 0);
+
          tmds_clk_n : out std_logic;
          tmds_clk_p : out std_logic;
          tmds_d_n   : out std_logic_vector(2 downto 0);
@@ -436,6 +442,9 @@ begin
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
       clk_pixel => clk_27, clk_5x_pixel => clk_135,
+      psg_sl => (others => '0'), psg_sr => (others => '0'),
+      cdda_sl => (others => '0'), cdda_sr => (others => '0'),
+      adpcm_s => (others => '0'),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );

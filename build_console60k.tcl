@@ -51,6 +51,7 @@ add_file src/hdmi2/hdmi.sv
 
 # This repo's own new RTL
 add_file src/pce2hdmi.sv
+add_file src/pce/common/mem/sdram.sv
 add_file src/pcetang_console60k_hdmi_pll.vhd
 add_file src/pce/common/pll/console60k_pll.vhd
 add_file src/pcetang_console60k.vhd
