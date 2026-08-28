@@ -599,7 +599,24 @@ always @(posedge clk) begin
 		// PCE PORT (2026-08-27): wide_acc (port A only) forces both DQM lanes low on a
 		// write -- a real 16-bit word write, not a byte-masked one. Ports B/C keep the
 		// original a[0] byte-select unchanged.
-		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {(we & ~a[0]) & ~wide_acc, (we & a[0]) & ~wide_acc, 2'b10, a[9:1]};
+		// PCE PORT (2026-08-28), REAL BUG FOUND AND FIXED: A10 (auto-precharge, the
+		// fixed '2'b10' this arm used to assert unconditionally) must be SUPPRESSED on
+		// a line refill's FIRST read -- asserting it here would auto-precharge (close)
+		// the row before the 2nd READ at STATE_CONT2 can reach it, a real SDR SDRAM
+		// protocol violation on real hardware (this project's own scratch Verilator
+		// model never caught it: it computes read data as a pure function of row/
+		// column and has no physical row-close side effect to violate -- found by
+		// re-deriving the Nano 20K counterpart of this mechanism from sdram32.sv's own
+		// address generation, which auto-precharges on every read and needed the
+		// identical fix, then re-checking this file against the same question).
+		// `line_refill & !we` mirrors the STATE_CONT2 arm's own predicate below exactly
+		// (line_refill is never combined with a write by design -- vram0_cache.vhd
+		// never asserts it on a write-drain -- but checking `!we` here too, not just
+		// `line_refill`, closes the same class of currently-unreachable-but-real gap a
+		// reviewer would otherwise flag, matching sdram32.sv's own fix). Ordinary
+		// reads/writes (line_refill='0', the vast majority of all traffic) are
+		// byte-for-byte unchanged: A10 stays asserted exactly as before.
+		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {(we & ~a[0]) & ~wide_acc, (we & a[0]) & ~wide_acc, ((line_refill & !we) ? 2'b00 : 2'b10), a[9:1]};
 
 		// init
 		{1'bX,     MODE_LDM, STATE_START}: SDRAM_A <= MODE;
