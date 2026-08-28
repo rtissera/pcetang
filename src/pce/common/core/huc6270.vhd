@@ -269,6 +269,27 @@ architecture rtl of HUC6270 is
 	signal BG_SRC 			: ShiftRegColor_t;
 	type BGColorArray_t is array (0 to 7) of std_logic_vector(7 downto 0);
 	signal BG_COLOR 		: BGColorArray_t;
+	-- BG_COLOR is a pixel-pipeline shift register, not memory -- every write/read uses a
+	-- literal index (element 7 written each DCK_CE, elements 0-6 shifted via an unrolled
+	-- `for i in 0 to 6 loop`, element 0 read at huc6270.vhd's own VD mux), never a
+	-- dynamic address. Real, measured bug this works around (2026-08-28): with two
+	-- HUC6270 instances present (SGX's VDC1 alongside VDC0), GowinSynthesis's BSRAM
+	-- packing heuristic infers this as an SPX9 primitive and picks an unsupported write
+	-- mode -- `ERROR (PA2122): ... WRITE_MODE = 2'b10` -- only in the two-instance case;
+	-- a single VDC0-only build never hits it. Forcing fabric registers (real Gowin
+	-- attribute, SUG550 section 5.15 `syn_ramstyle`, VHDL syntax confirmed against that
+	-- doc directly, not guessed) sidesteps the packing decision entirely rather than
+	-- restructuring this donor file's real pixel-pipeline logic to dodge a synthesis
+	-- heuristic.
+	attribute syn_ramstyle : string;
+	attribute syn_ramstyle of BG_COLOR : signal is "registers";
+	-- syn_ramstyle alone did NOT clear the real error (same primitive name
+	-- 'BG_COLOR[7]_BG_COLOR[7]_0_0_s' persisted) -- the doubled name in that error is
+	-- cross-INSTANCE merging (VDC0's BG_COLOR(7) folded into VDC1's, or vice versa),
+	-- same class of optimization the earlier real DI0019 warning on CLR_A already named
+	-- and already suggested the fix for: syn_preserve. Adding it too.
+	attribute syn_preserve : integer;
+	attribute syn_preserve of BG_COLOR : signal is 1;
 	signal BG_RAM_ADDR	: std_logic_vector(15 downto 0);
 	
 	signal SPR_FETCH		: std_logic;
@@ -352,7 +373,11 @@ architecture rtl of HUC6270 is
 	signal SPR_LINE_ADDR_B0 : std_logic_vector(8 downto 0);
 	signal SPR_LINE_ADDR_B1 : std_logic_vector(8 downto 0);
 	type SPColorArray_t is array (0 to 7) of std_logic_vector(8 downto 0);
-	signal SPR_COLOR		: SPColorArray_t; 
+	signal SPR_COLOR		: SPColorArray_t;
+	-- Same real bug/fix as BG_COLOR above -- identical shape (literal-index writes only,
+	-- element 7 double-assigned, 0-6 shifted), same two-VDC-instance SPX9 inference risk.
+	attribute syn_ramstyle of SPR_COLOR : signal is "registers";
+	attribute syn_preserve of SPR_COLOR : signal is 1;
 
 	signal SAT_ADDR		: std_logic_vector(7 downto 0);
 	signal SAT_Q			: std_logic_vector(15 downto 0);
