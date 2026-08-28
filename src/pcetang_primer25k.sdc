@@ -19,9 +19,9 @@ create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk
 
 create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 5 -multiply_by 12 [get_nets {clk_sdram}]
 
-create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 2 -multiply_by 3 [get_nets {clk_pixel}]
+create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 50 -multiply_by 27 [get_nets {clk_pixel}]
 
-create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 2 -multiply_by 15 [get_nets {clk_5x_pixel}]
+create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 10 -multiply_by 27 [get_nets {clk_5x_pixel}]
 
 # Same CDC shape as NECTang's own primer25k_core_test.sdc/primer25k_sdram_test.sdc.
 set_multicycle_path -setup 3 -from [get_clocks {clk_pce}] -to [get_clocks {clk_sdram}]

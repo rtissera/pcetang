@@ -45,8 +45,8 @@ add_file src/hdmi2/source_product_description_info_frame.sv
 add_file src/hdmi2/tmds_channel.sv
 add_file src/hdmi2/hdmi.sv
 
-add_file src/pce2hdmi.sv
-add_file src/pcetang_console60k_hdmi_pll.vhd
+add_file src/pce2hdmi_sd.sv
+add_file src/pcetang_console60k_hdmi_pll_480p.vhd
 add_file src/pce/common/pll/console60k_pll.vhd
 add_file src/pce/common/mem/sdram.sv
 add_file src/pcetang_primer25k.vhd

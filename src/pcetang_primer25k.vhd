@@ -60,7 +60,7 @@ architecture rtl of pcetang_primer25k is
       );
    end component;
 
-   component pcetang_console60k_hdmi_pll is
+   component pcetang_console60k_hdmi_pll_480p is
       port (
          clkin        : in  std_logic;
          reset        : in  std_logic;
@@ -148,10 +148,14 @@ architecture rtl of pcetang_primer25k is
       );
    end component;
 
-   component pce2hdmi is
+   component pce2hdmi_sd is
       generic (
-         CAP_WIDTH  : integer := 256;
-         CAP_HEIGHT : integer := 224
+         MAX_LINE_SAMPLES : integer := 540;
+         VIDEOID       : integer := 2;
+         VIDEO_REFRESH : real    := 60.0;
+         CLKFRQ        : integer := 27000;
+         SCREEN_WIDTH  : integer := 720;
+         SCREEN_HEIGHT : integer := 480
       );
       port (
          clk    : in std_logic;
@@ -174,6 +178,8 @@ architecture rtl of pcetang_primer25k is
          clk_pixel    : in std_logic;
          clk_5x_pixel : in std_logic;
 
+         psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : in std_logic_vector(15 downto 0);
+
          tmds_clk_n : out std_logic;
          tmds_clk_p : out std_logic;
          tmds_d_n   : out std_logic_vector(2 downto 0);
@@ -184,6 +190,8 @@ architecture rtl of pcetang_primer25k is
    signal clk_pce, clk_sdram, clk_pixel, clk_5x_pixel : std_logic;
    signal pll_lock, hdmi_pll_lock, reset_n : std_logic;
    signal sdram_init : std_logic;
+
+   signal psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : signed(15 downto 0);
 
    signal vram0_ram_a_addr : std_logic_vector(20 downto 0);
    signal vram0_ram_a_req  : std_logic;
@@ -288,7 +296,7 @@ begin
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll
+   hdmi_pll: pcetang_console60k_hdmi_pll_480p
    port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
 
@@ -548,7 +556,7 @@ begin
       CD_DATA => (others => '0'), CD_DATA_WR => '0', CD_AUDIO_WR => '0',
       CD_SUBCD_WR => '0', CD_DATA_END => open, CD_DM => '0',
 
-      CDDA_SL => open, CDDA_SR => open, ADPCM_S => open, PSG_SL => open, PSG_SR => open,
+      CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
       BG_EN => '1', SPR_EN => '1', GRID_EN => (others => '0'), CPU_PAUSE_EN => '0',
 
@@ -562,10 +570,12 @@ begin
    joy_in <= joy1(4) & joy1(5) & joy1(11) & joy1(10) when joy_out(0) = '1' else
              joy1(3) & joy1(2) & joy1(1)  & joy1(0);
 
-   -- Shrunk from Console 60K's 256x224 -- see pce2hdmi.sv's header for why (real
-   -- gw_sh IF0008 on this device at the larger size, this is the fix being tested).
-   hdmi_out: pce2hdmi
-   generic map (CAP_WIDTH => 160, CAP_HEIGHT => 144)
+   -- pce2hdmi (on-chip-BRAM capture framebuffer scandoubler) swapped for pce2hdmi_sd
+   -- (2-line ping-pong scandoubler, no capture framebuffer) -- real gw_sh-verified
+   -- -11 BSRAM blocks (45/56 -> 34/56), wired exactly as the already-hardware-proven
+   -- pcetang_primer25k_cd.vhd wires it. Output mode changes 720p60 -> 720x480p60
+   -- (pce2hdmi_sd's proven config) -- a real, accepted tradeoff, not an artifact.
+   hdmi_out: pce2hdmi_sd
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,
@@ -574,6 +584,9 @@ begin
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
       clk_pixel => clk_pixel, clk_5x_pixel => clk_5x_pixel,
+      psg_sl => std_logic_vector(psg_sl), psg_sr => std_logic_vector(psg_sr),
+      cdda_sl => std_logic_vector(cdda_sl), cdda_sr => std_logic_vector(cdda_sr),
+      adpcm_s => std_logic_vector(adpcm_s),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );
