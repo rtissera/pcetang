@@ -532,7 +532,15 @@ begin
    -- scratchpad/vram0_deadline_implementation_plans.md) -- this board's sdram.sv
    -- instance implements it; wired to real signals below, not tied off like every
    -- other board.
-   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1)
+   -- PCE PORT (2026-08-28): VRAM0_PREFETCH => 1 enables vram0_prefetch.vhd's BAT
+   -- prefetch engine (see that file's own header) -- the ONLY board this session
+   -- GHDL-verified and gw_sh-checked it on. Real acceptance-test result: BAT
+   -- deadline-miss data corruption (previously ~100% wrong on every genuine cache
+   -- miss, GHDL-measured) closed to 0 wrong reads out of 66739 checked, 1257/1257
+   -- deadline-miss events now delivering correct data. CG0/CG1 are unaffected (not
+   -- attempted this session) -- see vram0_prefetch.vhd's own header for real numbers.
+   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1,
+                VRAM0_PREFETCH => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

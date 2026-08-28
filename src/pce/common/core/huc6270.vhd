@@ -94,6 +94,12 @@ entity HUC6270 is
 		VM_DBG 				: out std_logic_vector(1 downto 0);
 		CM_DBG 				: out std_logic;
 		SCREEN_DBG 			: out std_logic_vector(2 downto 0);
+		-- PCE PORT (2026-08-28): real taps for vram0_prefetch.vhd's BAT prefetch engine
+		-- (see that file's own header) -- OFS_Y is the row huc6270 is CURRENTLY reading
+		-- from, BYR is the raw scroll register; both purely combinational reads of
+		-- existing internal signals, same precedent as SCREEN_DBG above, no new logic.
+		OFS_Y_DBG 			: out std_logic_vector(8 downto 0);
+		BYR_DBG 			: out std_logic_vector(8 downto 0);
 		SOUR_DBG 			: out std_logic_vector(15 downto 0);
 		DESR_DBG 			: out std_logic_vector(15 downto 0);
 		LENR_DBG 			: out std_logic_vector(15 downto 0);
@@ -1588,6 +1594,8 @@ begin
 	VM_DBG <= VM;
 	CM_DBG <= CM;
 	SCREEN_DBG <= SCREEN;
+	OFS_Y_DBG <= std_logic_vector(OFS_Y);
+	BYR_DBG <= BYR;
 	SOUR_DBG <= SOUR;
 	DESR_DBG <= DESR;
 	LENR_DBG <= LENR;

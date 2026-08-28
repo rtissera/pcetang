@@ -273,7 +273,17 @@ entity vram0_cache is
       -- header already documents three times over. FALSE-by-default makes that
       -- impossible: the new ports simply go unused unless a real integration
       -- explicitly opts in.
-      G_LINE_REFILL : boolean := false
+      G_LINE_REFILL : boolean := false;
+
+      -- PCE PORT (2026-08-28): third, lowest-priority byte_seq client for
+      -- vram0_prefetch.vhd's BAT prefetch engine (see that file's own header). Defaults
+      -- FALSE for the same reason G_LINE_REFILL does: an instantiation that predates
+      -- this feature leaves pf_req permanently '0' (its own safe default), so the new
+      -- SEQ_IDLE branch below never fires and this file is byte-identical to a version
+      -- that never had it. Requires G_LINE_REFILL=true too (a pf request always expects
+      -- a real 4-word line answer, see pf_rdata) -- both generics are ANDed at every use
+      -- site below, not just documented as a dependency.
+      G_PREFETCH : boolean := false
    );
    port (
       clock      : in  std_logic;                      -- core clock (CLK / clk_pce)
@@ -283,6 +293,18 @@ entity vram0_cache is
       data_a     : in  std_logic_vector(15 downto 0);
       wren_a     : in  std_logic;
       q_a        : out std_logic_vector(15 downto 0);
+
+      -- PCE PORT (2026-08-28): G_PREFETCH's pf_* channel -- a third, lowest-priority
+      -- byte_seq request source (below write-drain and a genuine cache-miss refill, see
+      -- byte_seq's SEQ_IDLE below), used by vram0_prefetch.vhd to fetch a whole BAT row
+      -- ahead of when huc6270 needs it. A pf-sourced completion never installs into this
+      -- cache's own way_k/tag_mem (see refill_can_install) -- the fetched line belongs
+      -- entirely to the caller's own buffer. Safe to leave unconnected (pf_req's default
+      -- '0') when G_PREFETCH is false.
+      pf_addr  : in  std_logic_vector(14 downto 0) := (others => '0');
+      pf_req   : in  std_logic := '0';
+      pf_rdata : out std_logic_vector(63 downto 0);
+      pf_done  : out std_logic;
 
       -- sdram32 port A -- same clock domain as `clock`; the crossing into clk_sdram
       -- happens inside sdram32 itself, same as every other consumer of that port.
@@ -428,6 +450,12 @@ architecture rtl of vram0_cache is
    type seq_state_t is (SEQ_IDLE, SEQ_REQ, SEQ_WAIT_RISE, SEQ_WAIT_FALL, SEQ_DONE);
    signal seq_state : seq_state_t := SEQ_IDLE;
    signal seq_is_write  : std_logic := '0';
+   -- PCE PORT (2026-08-28): true for the whole REQ..DONE round trip of a G_PREFETCH
+   -- pf_req-sourced fetch, so refill_can_install can exclude it (pf data never installs
+   -- into way_k/tag_mem, see that signal) and pf_done can pulse only for its own
+   -- requester. Always driven '0' by both the write-drain and genuine-refill picks in
+   -- byte_seq, so this is byte-identical to a file without it whenever G_PREFETCH=false.
+   signal seq_is_pf      : std_logic := '0';
    signal seq_addr      : std_logic_vector(14 downto 0) := (others => '0');
    signal seq_wdata     : std_logic_vector(15 downto 0) := (others => '0');
    signal seq_rdata     : std_logic_vector(63 downto 0) := (others => '0');
@@ -715,6 +743,7 @@ begin
                      seq_addr      <= fifo_addr(pick);
                      seq_wdata     <= fifo_data(pick);
                      seq_is_write  <= '1';
+                     seq_is_pf     <= '0';
                      drain_ptr     <= (pick + 1) mod FIFO_DEPTH;
                      seq_state     <= SEQ_REQ;
                   end if;
@@ -735,6 +764,25 @@ begin
                      seq_addr <= refill_addr;
                   end if;
                   seq_is_write <= '0';
+                  seq_is_pf    <= '0';
+                  -- PCE PORT (2026-08-28): marks a pick as taken so the new pf branch
+                  -- below (lowest priority) never fires the same cycle as a genuine
+                  -- miss refill -- found_pick previously only tracked the write-drain
+                  -- loop above, since nothing else ever needed to check it.
+                  found_pick   := true;
+                  seq_state    <= SEQ_REQ;
+               end if;
+
+               -- PCE PORT (2026-08-28): G_PREFETCH's third, lowest-priority pick --
+               -- see this generic's own comment and vram0_prefetch.vhd's header. Never
+               -- taken while a write-drain or genuine miss refill is pending this same
+               -- cycle (found_pick), and inert whenever G_PREFETCH or G_LINE_REFILL is
+               -- false (pf_req's own default '0' would also gate it even without the
+               -- generic checks, but the explicit AND documents the hard dependency).
+               if not found_pick and G_PREFETCH and G_LINE_REFILL and pf_req = '1' then
+                  seq_addr     <= pf_addr;
+                  seq_is_write <= '0';
+                  seq_is_pf    <= '1';
                   seq_state    <= SEQ_REQ;
                end if;
 
@@ -857,6 +905,18 @@ begin
    refill_tag_changed <= to_sl(unsigned(tag_q_b) /= seq_tag);
    refill_can_install <= to_sl(seq_state = SEQ_DONE and seq_is_write = '0')
       and (to_sl(G_LINE_REFILL) or (refill_tag_changed or not way_q_b(seq_way)(16)))
-      and not wren_a;
+      and not wren_a
+      -- PCE PORT (2026-08-28): a G_PREFETCH pf_req-sourced completion never installs
+      -- here -- it belongs entirely to the caller's own buffer (vram0_prefetch.vhd),
+      -- not this cache's way_k/tag_mem. seq_is_pf is always '0' when G_PREFETCH=false
+      -- (see its own declaration), so this term is a no-op then.
+      and not seq_is_pf;
+
+   -- PCE PORT (2026-08-28): G_PREFETCH's pf_* answer path. pf_rdata mirrors seq_rdata
+   -- unconditionally (only meaningful the cycle pf_done pulses, same convention as
+   -- ram_a_line_do/seq_rdata elsewhere in this file); pf_done pulses exactly one clock
+   -- when byte_seq's CURRENT completion was this channel's own request.
+   pf_rdata <= seq_rdata;
+   pf_done  <= to_sl(seq_state = SEQ_DONE and seq_is_pf = '1');
 
 end architecture;

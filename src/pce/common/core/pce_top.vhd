@@ -48,7 +48,18 @@ entity pce_top is
 		-- vram0_cache.vhd's own false-by-default safety rationale (a board with
 		-- EXT_VRAM0/=0 but a controller that can't answer a line-refill request would
 		-- otherwise silently install all-zero data into every refilled cache line).
-		VRAM0_LINE_REFILL : integer := 0
+		VRAM0_LINE_REFILL : integer := 0;
+		-- PCE PORT (2026-08-28): vram0_prefetch.vhd's BAT prefetch engine (see that
+		-- file's own header) -- requires VRAM0_LINE_REFILL /= 0 too (gen_vram0_ext
+		-- below ANDs them at the vram0_cache instantiation site). Kept as its OWN
+		-- generic, separate from VRAM0_LINE_REFILL, deliberately NOT tied to it:
+		-- this session only GHDL-verified and gw_sh-checked the prefetch engine on
+		-- Primer 25K plain (sdram.sv); Nano 20K (sdram32.sv) already has
+		-- VRAM0_LINE_REFILL=>1 from an earlier session's work, and tying this
+		-- generic to that one would have silently turned the (unverified-there)
+		-- prefetch engine on for Nano 20K too. Defaults to 0 (off) -- every board
+		-- must opt in explicitly, same rationale as VRAM0_LINE_REFILL's own.
+		VRAM0_PREFETCH : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -224,6 +235,15 @@ alias  VDC0_DO_LO		: std_logic_vector(7 downto 0) is VDC0_DO(7 downto 0);
 signal VDC0_BUSY_N	: std_logic;
 signal VDC0_IRQ_N		: std_logic;
 signal VDC0_COLNO		: std_logic_vector(8 downto 0);
+
+-- PCE PORT (2026-08-28): VDC0's own SCREEN_DBG/OFS_Y_DBG/BYR_DBG taps, feeding
+-- vram0_prefetch.vhd's BAT prefetch engine below (gen_vram0_ext only -- unused, left
+-- open, on the EXT_VRAM0=0 on-chip path). Always wired from VDC0 regardless of
+-- EXT_VRAM0, same as every other *_DBG port on that entity -- harmless dead logic on
+-- boards that don't consume them (synthesis strips unused combinational fanout).
+signal VDC0_SCREEN_DBG : std_logic_vector(2 downto 0);
+signal VDC0_OFS_Y_DBG  : std_logic_vector(8 downto 0);
+signal VDC0_BYR_DBG    : std_logic_vector(8 downto 0);
 signal VDC1_DO			: std_logic_vector(15 downto 0);		-- only lower 8 bits are used in 8-bit mode
 alias  VDC1_DO_LO		: std_logic_vector(7 downto 0) is VDC1_DO(7 downto 0);
 signal VDC1_BUSY_N	: std_logic;
@@ -473,9 +493,13 @@ port map(
 	RAM_DI	=> VRAM0_DI,
 	RAM_DO	=> VRAM0_DO,
 	RAM_WE	=> VRAM0_WE,
-	
+
 	BG_EN		=> BG_EN,
-	SPR_EN	=> SPR_EN
+	SPR_EN	=> SPR_EN,
+
+	SCREEN_DBG => VDC0_SCREEN_DBG,
+	OFS_Y_DBG  => VDC0_OFS_Y_DBG,
+	BYR_DBG    => VDC0_BYR_DBG
 );
 
 -- EXT_VRAM0 = 0: donor behaviour, byte-identical, including the CLR_A/CLR_WE cold-reset
@@ -507,26 +531,111 @@ end generate;
 -- file's header for why that's a deliberate scope decision.
 gen_vram0_ext: if EXT_VRAM0 /= 0 generate
 begin
-	VRAM0 : entity work.vram0_cache
-	generic map (G_LINE_REFILL => VRAM0_LINE_REFILL /= 0)
-	port map (
-		clock      => CLK,
-		dck_ce     => VDC_CLKEN,
-		address_a  => VRAM0_A(14 downto 0),
-		data_a     => VRAM0_DO,
-		wren_a     => VRAM0_WE and not VRAM0_A(15),
-		q_a        => VRAM0_DI,
-		ram_a_addr => VRAM0_RAM_A_ADDR,
-		ram_a_req  => VRAM0_RAM_A_REQ,
-		ram_a_rd_n => VRAM0_RAM_A_RD_N,
-		ram_a_di   => VRAM0_RAM_A_DI,
-		ram_a_do   => VRAM0_RAM_A_DO,
-		ram_a_wait => VRAM0_RAM_A_WAIT,
-		ram_a_line_refill => VRAM0_RAM_A_LINE_REFILL,
-		ram_a_line_do     => VRAM0_RAM_A_LINE_DO,
-		dbg_deadline_miss => DBG_DEADLINE_MISS,
-		dbg_fifo_overflow => DBG_FIFO_OVERFLOW
-	);
+
+	-- PCE PORT (2026-08-28): VRAM0_PREFETCH /= 0 -- vram0_prefetch.vhd's BAT prefetch
+	-- engine (see that file's own header) sits between VDC0's real RAM_A/RAM_DI/RAM_DO/
+	-- RAM_WE and vram0_cache's own address_a/q_a/data_a/wren_a. Split into its own
+	-- nested generate, NOT just an inert-when-off internal mux, so that a board which
+	-- does NOT opt in (VRAM0_PREFETCH left at its default 0 -- Nano 20K, Primer 25K CD,
+	-- as of this port) pays exactly ZERO extra BSRAM/logic for this feature and is
+	-- wired byte-identically to before this port existed (see gen_vram0_pf_none below)
+	-- -- this session only GHDL-verified and gw_sh-checked the prefetch engine on
+	-- Primer 25K plain; unconditionally instantiating vram0_prefetch (and its 64-word
+	-- buffer BRAM) on every EXT_VRAM0/=0 board regardless of opt-in would have silently
+	-- taxed boards this session never measured.
+	gen_vram0_pf: if VRAM0_PREFETCH /= 0 generate
+		signal ds_address_a : std_logic_vector(14 downto 0);
+		signal ds_data_a    : std_logic_vector(15 downto 0);
+		signal ds_wren_a    : std_logic;
+		signal ds_q_a       : std_logic_vector(15 downto 0);
+		signal pf_addr      : std_logic_vector(14 downto 0);
+		signal pf_req       : std_logic;
+		signal pf_rdata     : std_logic_vector(63 downto 0);
+		signal pf_done      : std_logic;
+	begin
+		PREFETCH0 : entity work.vram0_prefetch
+		port map (
+			clock      => CLK,
+			hsync_f    => VCE_HSYNC_F,
+			screen_dbg => VDC0_SCREEN_DBG,
+			ofs_y_dbg  => VDC0_OFS_Y_DBG,
+			byr_dbg    => VDC0_BYR_DBG,
+
+			address_a  => VRAM0_A(14 downto 0),
+			data_a     => VRAM0_DO,
+			wren_a     => VRAM0_WE and not VRAM0_A(15),
+			q_a        => VRAM0_DI,
+
+			ds_address_a => ds_address_a,
+			ds_data_a    => ds_data_a,
+			ds_wren_a    => ds_wren_a,
+			ds_q_a       => ds_q_a,
+
+			pf_addr  => pf_addr,
+			pf_req   => pf_req,
+			pf_rdata => pf_rdata,
+			pf_done  => pf_done,
+
+			dbg_pf_hit     => open,
+			dbg_pf_overrun => open
+		);
+
+		VRAM0 : entity work.vram0_cache
+		generic map (
+			G_LINE_REFILL => VRAM0_LINE_REFILL /= 0,
+			G_PREFETCH    => true
+		)
+		port map (
+			clock      => CLK,
+			dck_ce     => VDC_CLKEN,
+			address_a  => ds_address_a,
+			data_a     => ds_data_a,
+			wren_a     => ds_wren_a,
+			q_a        => ds_q_a,
+			pf_addr    => pf_addr,
+			pf_req     => pf_req,
+			pf_rdata   => pf_rdata,
+			pf_done    => pf_done,
+			ram_a_addr => VRAM0_RAM_A_ADDR,
+			ram_a_req  => VRAM0_RAM_A_REQ,
+			ram_a_rd_n => VRAM0_RAM_A_RD_N,
+			ram_a_di   => VRAM0_RAM_A_DI,
+			ram_a_do   => VRAM0_RAM_A_DO,
+			ram_a_wait => VRAM0_RAM_A_WAIT,
+			ram_a_line_refill => VRAM0_RAM_A_LINE_REFILL,
+			ram_a_line_do     => VRAM0_RAM_A_LINE_DO,
+			dbg_deadline_miss => DBG_DEADLINE_MISS,
+			dbg_fifo_overflow => DBG_FIFO_OVERFLOW
+		);
+	end generate;
+
+	-- VRAM0_PREFETCH = 0 (the default): byte-identical to the file as it existed before
+	-- vram0_prefetch.vhd -- no extra module, no extra BRAM, VDC0's real signals wired
+	-- straight into vram0_cache exactly as before this port.
+	gen_vram0_pf_none: if VRAM0_PREFETCH = 0 generate
+	begin
+		VRAM0 : entity work.vram0_cache
+		generic map (G_LINE_REFILL => VRAM0_LINE_REFILL /= 0)
+		port map (
+			clock      => CLK,
+			dck_ce     => VDC_CLKEN,
+			address_a  => VRAM0_A(14 downto 0),
+			data_a     => VRAM0_DO,
+			wren_a     => VRAM0_WE and not VRAM0_A(15),
+			q_a        => VRAM0_DI,
+			ram_a_addr => VRAM0_RAM_A_ADDR,
+			ram_a_req  => VRAM0_RAM_A_REQ,
+			ram_a_rd_n => VRAM0_RAM_A_RD_N,
+			ram_a_di   => VRAM0_RAM_A_DI,
+			ram_a_do   => VRAM0_RAM_A_DO,
+			ram_a_wait => VRAM0_RAM_A_WAIT,
+			ram_a_line_refill => VRAM0_RAM_A_LINE_REFILL,
+			ram_a_line_do     => VRAM0_RAM_A_LINE_DO,
+			dbg_deadline_miss => DBG_DEADLINE_MISS,
+			dbg_fifo_overflow => DBG_FIFO_OVERFLOW
+		);
+	end generate;
+
 end generate;
 
 CLR_A  <= CLR_A + 1  when rising_edge(CLK);
