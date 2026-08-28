@@ -208,6 +208,8 @@ architecture rtl of pcetang_primer25k is
    signal vram0_ram_a_di   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_do   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_wait : std_logic;
+   signal vram0_ram_a_line_refill : std_logic;
+   signal vram0_ram_a_line_do     : std_logic_vector(63 downto 0);
 
    -- Sticky latches (2026-08-27, per an independent Fable-model audit's P3) -- see
    -- pcetang_nano20k.vhd's identical comment for why (raw pce_top pulses are invisible
@@ -348,7 +350,7 @@ begin
       RAM_A_DI   => vram0_ram_a_di,
       RAM_A_DO   => vram0_ram_a_do,
       RAM_A_WAIT => vram0_ram_a_wait,
-      RAM_A_LINE_REFILL => '0', RAM_A_LINE_DO => open,
+      RAM_A_LINE_REFILL => vram0_ram_a_line_refill, RAM_A_LINE_DO => vram0_ram_a_line_do,
       RAM_B_ADDR => romb_addr,
       RAM_B_REQ  => romb_req,
       RAM_B_WE   => romb_we,
@@ -525,7 +527,12 @@ begin
    );
 
    core: entity work.pce_top
-   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1)
+   -- PCE PORT (2026-08-28): VRAM0_LINE_REFILL => 1 enables the real 4-word line-refill
+   -- mechanism (see sdram.sv's own "line refill" header note and
+   -- scratchpad/vram0_deadline_implementation_plans.md) -- this board's sdram.sv
+   -- instance implements it; wired to real signals below, not tied off like every
+   -- other board.
+   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
@@ -538,6 +545,7 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
       DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
+      VRAM0_RAM_A_LINE_REFILL => vram0_ram_a_line_refill, VRAM0_RAM_A_LINE_DO => vram0_ram_a_line_do,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,

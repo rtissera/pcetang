@@ -360,6 +360,10 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
       DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
+      -- PCE PORT (2026-08-28): 4-word VRAM0 line-refill -- not implemented on this
+      -- board (sdram32.sv untouched this session; VRAM0_LINE_REFILL stays at pce_top's
+      -- own default of 0), tied off.
+      VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
 
       ROM_RD    => open,
       ROM_RDY   => '1',

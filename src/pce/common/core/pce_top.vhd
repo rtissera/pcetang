@@ -39,7 +39,16 @@ entity pce_top is
 		-- run with EXT_VRAM0=1 and CD still present: fits (barely, 46/46) but drags
 		-- MCODE and vram0_cache's own metadata into logic fallback too and leaves 1545
 		-- setup violations. See NECTang's docs/PORTING.md's "VRAM0 external memory" section.
-		NO_CD : integer := 0
+		NO_CD : integer := 0;
+		-- PCE PORT (2026-08-28): 4-word VRAM0 line-refill (see vram0_cache.vhd's own
+		-- G_LINE_REFILL generic and sdram.sv's "line refill" header note). Only
+		-- meaningful when EXT_VRAM0 /= 0 AND the board's own external controller
+		-- actually implements it (sdram.sv does; sdram32.sv/Nano 20K does not).
+		-- Defaults to 0 (off) -- every board must opt in explicitly, matching
+		-- vram0_cache.vhd's own false-by-default safety rationale (a board with
+		-- EXT_VRAM0/=0 but a controller that can't answer a line-refill request would
+		-- otherwise silently install all-zero data into every refilled cache line).
+		VRAM0_LINE_REFILL : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -62,6 +71,13 @@ entity pce_top is
 		-- on EXT_VRAM0=0 boards (gen_vram0_onchip, no vram0_cache instance to drive them).
 		DBG_DEADLINE_MISS : out std_logic;
 		DBG_FIFO_OVERFLOW : out std_logic;
+
+		-- PCE PORT (2026-08-28): 4-word VRAM0 line-refill -- see VRAM0_LINE_REFILL
+		-- generic's own comment. Only meaningful when that generic is nonzero; tied
+		-- '0'/open on every other board configuration (see both generate branches
+		-- below).
+		VRAM0_RAM_A_LINE_REFILL : out std_logic;
+		VRAM0_RAM_A_LINE_DO     : in  std_logic_vector(63 downto 0) := (others => '0');
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -481,6 +497,7 @@ begin
 	);
 	DBG_DEADLINE_MISS <= '0';
 	DBG_FIFO_OVERFLOW <= '0';
+	VRAM0_RAM_A_LINE_REFILL <= '0';
 end generate;
 
 -- EXT_VRAM0 /= 0 (Nano 20K): src/common/mem/vram0_cache.vhd instead, backed by
@@ -491,6 +508,7 @@ end generate;
 gen_vram0_ext: if EXT_VRAM0 /= 0 generate
 begin
 	VRAM0 : entity work.vram0_cache
+	generic map (G_LINE_REFILL => VRAM0_LINE_REFILL /= 0)
 	port map (
 		clock      => CLK,
 		dck_ce     => VDC_CLKEN,
@@ -504,6 +522,8 @@ begin
 		ram_a_di   => VRAM0_RAM_A_DI,
 		ram_a_do   => VRAM0_RAM_A_DO,
 		ram_a_wait => VRAM0_RAM_A_WAIT,
+		ram_a_line_refill => VRAM0_RAM_A_LINE_REFILL,
+		ram_a_line_do     => VRAM0_RAM_A_LINE_DO,
 		dbg_deadline_miss => DBG_DEADLINE_MISS,
 		dbg_fifo_overflow => DBG_FIFO_OVERFLOW
 	);

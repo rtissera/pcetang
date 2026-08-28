@@ -851,6 +851,10 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
       DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
+      -- PCE PORT (2026-08-28): 4-word VRAM0 line-refill -- not enabled on this build
+      -- yet (out of the goal this was built for: plain PCE, no CD); tied off, same
+      -- pattern as every other board that hasn't opted in.
+      VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
