@@ -23,7 +23,7 @@ use ieee.numeric_std.all;
 entity pcetang_primer25k is
    port (
       clk           : in    std_logic;                      -- 50 MHz crystal
-      key_reset_n   : in    std_logic;                       -- S2, active low
+      key_reset_n   : in    std_logic;                       -- H11/S1, active HIGH while held (name is a misnomer, see reset_n below)
 
       O_sdram_clk   : out   std_logic;
       O_sdram_cke   : out   std_logic;
@@ -301,14 +301,18 @@ architecture rtl of pcetang_primer25k is
 
 begin
 
-   reset_n <= key_reset_n and pll_lock and hdmi_pll_lock;
+   -- key_reset_n is misnamed: H11 (schematic net H11_IOT3A_S1) is pulled DOWN
+   -- (.cst PULL_MODE=DOWN) and driven to 3V3 through S1+R7 only while held, so
+   -- the raw pin is active-HIGH-while-pressed, not active-low as the name
+   -- implies. Invert at point of use rather than rename board-wide.
+   reset_n <= (not key_reset_n) and pll_lock and hdmi_pll_lock;
 
    pll: console60k_pll
-   port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
+   port map (clkin => clk, reset => key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, lock => pll_lock);
 
    hdmi_pll: pcetang_console60k_hdmi_pll_480p
-   port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
+   port map (clkin => clk, reset => key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
 
    -- Same init-hold shape as NECTang's own primer25k_core_test.vhd.
