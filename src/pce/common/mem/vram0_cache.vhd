@@ -187,12 +187,85 @@
 -- either -- both debug outputs are tied to `open` in pce_top.vhd's gen_vram0_ext block on
 -- every board using this module today. Found via an Opus research pass cross-reading this
 -- file against both real consumer controllers directly, not from a hardware report.
+--
+-- PCE PORT (2026-08-28): "line refill" -- when the new G_LINE_REFILL generic is true
+-- (default FALSE -- see its own declaration-site comment for why, and for the real
+-- silent-corruption trap that default avoids), a read MISS fetches the WHOLE 4-word
+-- cache line in one sdram.sv port-A transaction (new `ram_a_line_refill`/
+-- `ram_a_line_do`, see that controller's own "line refill" header note), not just the
+-- one missed word. sdram32.sv (Nano 20K) was NOT given this mechanism this session, so
+-- this file must keep working, byte-for-byte, against sdram32.sv unchanged when
+-- G_LINE_REFILL is left at its default -- closing the real, measured VRAM0 deadline gap
+-- for the BAT stream specifically (75.4% of consecutive BAT fetches land in the SAME
+-- cache line within a scanline, real GHDL-measured, see
+-- scratchpad/vram0_deadline_implementation_plans.md and
+-- scratchpad/vram0_stride_measurement.md; CG0/CG1/sprites see ~0% within-scanline
+-- reuse, so this doesn't fix THEIR deadline, but does cut their FUTURE miss rate ~4x by
+-- populating all 4 rows of a tile/sprite plane at once instead of one).
+--
+-- When G_LINE_REFILL, byte_seq (SEQ_IDLE's refill pick) always requests the LINE's own
+-- word0 (`refill_addr(14 downto 2) & "00"`), not the exact word that missed -- fixed
+-- order 0,1,2,3, not critical-word-first (see sdram.sv's header for why: two fixed
+-- burst-of-2 halves, not one wrapping burst-of-4). On completion, ALL 4 ways install
+-- atomically in one cycle (gen_way_a_wiring), not just the one `seq_way` a single-word
+-- refill used to touch. `seq_way` itself stays in the file (still meaningful, still
+-- driving the single-way install) for when G_LINE_REFILL is false -- see its own
+-- declaration-site comment.
+--
+-- Invariant 2 (this file's own documented "don't clobber a fresher live write that
+-- raced in" rule) had to be generalized PER WORD for this, not left keyed on a single
+-- word -- a same-tag compulsory miss can have word 1 already holding a fresher live
+-- write while word 0 does not, and the ORIGINAL single-way version of this guard had
+-- no way to express that once 4 ways install at once. way_wren_a(k) now checks each
+-- way's own way_q_b(k)(16) independently; refill_can_install itself keeps only the
+-- preconditions genuinely shared by all 4 ways (SEQ_DONE, a real read, no live write
+-- this cycle) -- see gen_way_a_wiring's own comment for the fuller reasoning. Caught in
+-- review before this shipped, not found the hard way via GHDL like this file's other
+-- three documented bugs -- but exactly the same CLASS of mistake (a blanket check
+-- silently assumed the old single-word shape still applied), so recorded with the same
+-- weight as the others rather than dropped as "just a design pass."
+--
+-- A second real bug, found and fixed while wiring the refill_started/refill_pending
+-- handshake up to a line-based seq_addr for the first time: the ORIGINAL
+-- `seq_state = SEQ_REQ ... and seq_addr = refill_addr` comparisons (both cache_ctrl
+-- sites) assumed seq_addr was always refill_addr's own EXACT word -- true before this
+-- change, false after (seq_addr is now the line's word0, refill_addr can be any of the
+-- 4 words). Left as an exact match, refill_started/refill_pending would simply never
+-- update whenever the missed word wasn't already word 0 of its line -- a real,
+-- would-have-shipped bug (refill_pending stuck at '1' forever, blocking every future
+-- miss on that access from ever being latched again), not a hypothetical. Fixed by
+-- comparing on the LINE instead (`seq_addr(14 downto 2) = refill_addr(14 downto 2)`,
+-- the same bits idx_of/tag_of already use) -- see cache_ctrl's own site for the fuller
+-- note.
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity vram0_cache is
+   generic (
+      -- PCE PORT (2026-08-28): this file is shared between sdram.sv (Primer 25K) and
+      -- sdram32.sv (Nano 20K) -- see the header's very first paragraph. Only sdram.sv
+      -- was given the line-refill mechanism this session (RAM_A_LINE_REFILL/
+      -- RAM_A_LINE_DO) -- sdram32.sv was NOT touched. Defaults to FALSE deliberately:
+      -- this generic must be explicitly turned on at the instantiation site (pce_top.vhd,
+      -- not touched this session either) once BOTH pce_top.vhd threads the new ports
+      -- up to a real board top AND that board top wires them to a controller that
+      -- actually implements line-refill. Left FALSE (the default), every line below
+      -- gated on it reproduces the ORIGINAL single-word-refill file byte-for-byte --
+      -- confirmed by running the ORIGINAL, unmodified scratchpad/tb_vram0_cache.vhd
+      -- against this file with the default generic, see line_refill_verification.md's
+      -- Stage 4b. Defaulting this to TRUE instead would be the real, silent-corruption
+      -- trap: pce_top.vhd's EXISTING (unmodified) instantiation would then leave
+      -- ram_a_line_do unconnected while byte_seq actually asserted ram_a_line_refill
+      -- and tried to read it -- on Nano 20K (sdram32.sv, which cannot answer that
+      -- request at all) this would silently install all-ZERO data into all 4 ways of
+      -- every refilled line, exactly the class of silent corruption this file's
+      -- header already documents three times over. FALSE-by-default makes that
+      -- impossible: the new ports simply go unused unless a real integration
+      -- explicitly opts in.
+      G_LINE_REFILL : boolean := false
+   );
    port (
       clock      : in  std_logic;                      -- core clock (CLK / clk_pce)
       dck_ce     : in  std_logic;                       -- VDC_CLKEN: marks a new access
@@ -213,6 +286,18 @@ entity vram0_cache is
       ram_a_di   : out std_logic_vector(15 downto 0);
       ram_a_do   : in  std_logic_vector(15 downto 0);
       ram_a_wait : in  std_logic;
+      -- PCE PORT (2026-08-28): 4-word cache-line refill -- see byte_seq below and
+      -- sdram.sv's own "line refill" header note, and the G_LINE_REFILL generic's own
+      -- comment for why this defaults OFF. Asserted for the whole REQ/WAIT round trip
+      -- of a genuine read-miss refill (never a write-drain, see byte_seq's SEQ_REQ),
+      -- only when G_LINE_REFILL. ram_a_line_do holds all 4 words of the completed
+      -- line, valid the same cycle ram_a_wait falls for that request -- given a safe
+      -- default so an instantiation that predates this feature (or targets sdram32.sv,
+      -- which doesn't drive it) can legally leave it unconnected; safe specifically
+      -- BECAUSE byte_seq never reads it at all when G_LINE_REFILL is false (its default),
+      -- not merely because the default value looks harmless in isolation.
+      ram_a_line_refill : out std_logic;
+      ram_a_line_do     : in  std_logic_vector(63 downto 0) := (others => '0');
 
       -- Instrumentation, not function: both pulse for one `clock` cycle on the event they
       -- name. Wire to spare LEDs/a counter on a real bring-up; see NECTang's docs/PORTING.md.
@@ -316,19 +401,27 @@ architecture rtl of vram0_cache is
    signal fifo_valid : std_logic_vector(0 to FIFO_DEPTH-1) := (others => '0');
 
    -- Byte sequencer: services either a write-drain (popped from the FIFO) or a read
-   -- refill (the word that just missed), one at a time. Writes have priority -- losing a
-   -- write is worse than a slow refill, and real VRAM write bursts and dense BG/SPR fetch
-   -- do not overlap in practice (DMA/CPU-heavy writes run during BURST/vblank, when the
-   -- BAT/CG/sprite fetch slots are not active). Owned solely by byte_seq (drain_ptr
-   -- included).
+   -- refill, one at a time. Writes have priority -- losing a write is worse than a slow
+   -- refill, and real VRAM write bursts and dense BG/SPR fetch do not overlap in
+   -- practice (DMA/CPU-heavy writes run during BURST/vblank, when the BAT/CG/sprite
+   -- fetch slots are not active). Owned solely by byte_seq (drain_ptr included).
    -- PCE PORT (2026-08-27): collapsed from 7 states (two full 8-bit handshakes per 16-bit
    -- word) to 5 -- one handshake, now that ram_a_di/do are 16 bits wide. See byte_seq.
+   -- PCE PORT (2026-08-28): when G_LINE_REFILL, a read refill fetches the whole 4-word
+   -- cache line (see byte_seq's SEQ_IDLE pick and sdram.sv's own "line refill" header
+   -- note), not just the one missed word -- seq_rdata widens 16->64 bits to hold all 4
+   -- words (word k in bits (k*16+15 downto k*16), matching ram_a_line_do's own
+   -- convention) before the atomic 4-way install below. When G_LINE_REFILL is false
+   -- (the default -- see its own comment), every one of these is byte-identical to the
+   -- original file: seq_addr is the exact missed word, seq_rdata's low 16 bits hold
+   -- ram_a_do, and `seq_way` (which word within the line originally missed) is exactly
+   -- as meaningful as it always was, still driving a single-way install.
    type seq_state_t is (SEQ_IDLE, SEQ_REQ, SEQ_WAIT_RISE, SEQ_WAIT_FALL, SEQ_DONE);
    signal seq_state : seq_state_t := SEQ_IDLE;
    signal seq_is_write  : std_logic := '0';
    signal seq_addr      : std_logic_vector(14 downto 0) := (others => '0');
    signal seq_wdata     : std_logic_vector(15 downto 0) := (others => '0');
-   signal seq_rdata     : std_logic_vector(15 downto 0) := (others => '0');
+   signal seq_rdata     : std_logic_vector(63 downto 0) := (others => '0');
    signal seq_idx       : idx_t := (others => '0');
    signal seq_tag       : tag_t := (others => '0');
    signal seq_way       : integer range 0 to 3 := 0;
@@ -392,22 +485,61 @@ begin
    -- SINGLE write port (see header, storage failure 3). The refill install steals port A
    -- for the one cycle it needs; harmless because q_a is only consumed at the next
    -- DCK_CE, 4-8 cycles away, and address_a is stable across the whole dwell.
-   -- PCE PORT (2026-08-27), Bug 2 fix: on a tag-changing install (real eviction), every
-   -- way other than seq_way must be invalidated at seq_idx -- otherwise it keeps the
-   -- PREVIOUS tag's valid bit, and a later read of that word would falsely HIT with the
-   -- wrong line's stale data (worse than the old bug: silent wrong data instead of an
-   -- infinite miss). Mirrors invariant 1's "clear the other 3 words' valid bits on tag
-   -- change" for live writes, applied here to refill installs. way_data_a's non-target-way
-   -- value during an install is a don't-care unless way_wren_a(k) actually picks it (only
-   -- when refill_tag_changed='1' -- see below), so a fixed invalidate pattern is safe even
-   -- for the same-tag compulsory-miss case where that way's wren stays 0.
+   -- PCE PORT (2026-08-28), line-refill install, gated by G_LINE_REFILL (see its own
+   -- declaration comment for why this defaults off): when true, a refill always
+   -- fetches all 4 words of the line (see byte_seq), and the install writes REAL
+   -- fetched data into every way it touches -- there is no more "invalidate the other
+   -- 3 ways with don't-care data" branch (that only existed because the OLD design had
+   -- real data for just the one missed word; strictly better now, since a genuine
+   -- eviction populates all 4 ways with fresh, correct data instead of leaving 3 of
+   -- them merely invalidated to take a compulsory miss again later). Per-way guard
+   -- (advisor-caught correction to the original single-way version of this comment):
+   -- invariant 2's "don't clobber a fresher live write that raced in" protection MUST
+   -- be evaluated per word, not just for the one word that happened to trigger the
+   -- miss -- on a same-tag compulsory miss, word 1 might already hold a fresher live
+   -- write while word 0 does not, and a blanket 4-way install would silently clobber
+   -- it. way_wren_a(k) below checks EACH way's own way_q_b(k)(16) (already read live
+   -- every cycle via way_addr_b(k)<=seq_idx, no new read port needed) instead of a
+   -- single seq_way-indexed check. On a genuine eviction (refill_tag_changed='1'),
+   -- every way installs unconditionally (the old tag's data there is being
+   -- deliberately overwritten, mirrors invariant 1's own "clear on tag change" for
+   -- live writes, just with real data instead of a clear).
+   --
+   -- When G_LINE_REFILL is false (the default), every expression below collapses back
+   -- to EXACTLY the original single-way form: only `seq_way` installs real data
+   -- (seq_rdata's low 16 bits, the only word ever fetched), the other 3 ways get the
+   -- original "invalidate" pattern on a genuine eviction and are otherwise untouched --
+   -- confirmed byte-for-byte against the ORIGINAL, unmodified
+   -- scratchpad/tb_vram0_cache.vhd, see line_refill_verification.md's Stage 4b. This
+   -- is a compile-time generic, not a runtime mux -- synthesis constant-folds away
+   -- whichever half is unused, at zero cost either way.
    gen_way_a_wiring: for k in 0 to 3 generate
       way_addr_a(k) <= std_logic_vector(seq_idx) when refill_can_install = '1'
                        else address_a(10 downto 2);
-      way_data_a(k) <= '0' & '1' & seq_rdata when (refill_can_install = '1' and seq_way = k)
-                       else "00" & x"0000" when refill_can_install = '1'
+      -- PCE PORT (2026-08-28) BUG FOUND AND FIXED (before this ever left this session --
+      -- caught by Stage 4b's real GHDL run against the ORIGINAL testbench, not shipped):
+      -- an earlier version of this line used seq_rdata((k*16+15) downto k*16) for BOTH
+      -- modes -- correct for G_LINE_REFILL (seq_rdata really does hold 4 packed words
+      -- then), but wrong for legacy mode, where seq_rdata's fetched word is ALWAYS in
+      -- bits 15:0 regardless of which way k it installs into (only ONE word is ever
+      -- fetched, for k=seq_way specifically -- see SEQ_WAIT_FALL's own
+      -- `seq_rdata(15 downto 0) <= ram_a_do`). The bug: for k=seq_way with seq_way>0,
+      -- it read seq_rdata's UPPER, never-written bits instead -- real data went in
+      -- correctly for the very first cycle via q_a_i's install-diversion bypass (which
+      -- reads seq_rdata directly, not through the way memory), then every SUBSEQUENT
+      -- read of that word came back 0000 (way_q_a's actual stored value), a real,
+      -- would-have-shipped silent-corruption bug in the fallback path this generic
+      -- exists specifically to keep safe.
+      way_data_a(k) <= '0' & '1' & seq_rdata((k*16+15) downto (k*16))
+                          when (refill_can_install = '1' and G_LINE_REFILL)
+                       else '0' & '1' & seq_rdata(15 downto 0)
+                          when (refill_can_install = '1' and not G_LINE_REFILL and seq_way = k)
+                       else "00" & x"0000"
+                          when (refill_can_install = '1' and not G_LINE_REFILL)
                        else '0' & way_sel(k) & data_a;
-      way_wren_a(k) <= (refill_can_install and (to_sl(seq_way = k) or refill_tag_changed))
+      way_wren_a(k) <= (refill_can_install and
+                          ((to_sl(G_LINE_REFILL) and (refill_tag_changed or not way_q_b(k)(16)))
+                           or (to_sl(not G_LINE_REFILL) and (to_sl(seq_way = k) or refill_tag_changed))))
                        or ((not refill_can_install) and wren_a
                            and (way_sel(k) or tag_changed_live));
    end generate;
@@ -479,10 +611,21 @@ begin
             refill_addr    <= req_addr_d;
             refill_started <= '0';
          end if;
-         if seq_state = SEQ_REQ and seq_is_write = '0' and seq_addr = refill_addr then
+         -- PCE PORT (2026-08-28): a refill's seq_addr is now the LINE's own word0 (see
+         -- byte_seq's SEQ_IDLE pick), not necessarily refill_addr's own exact word --
+         -- an exact `seq_addr = refill_addr` match would never fire whenever the
+         -- missed word wasn't word 0 of its line, permanently stranding
+         -- refill_pending='1' (a real bug this session's own design review caught
+         -- while wiring the line-refill request up, not shipped). idx_of/tag_of don't
+         -- depend on the word-within-line bits at all, so comparing on the LINE
+         -- (top 13 address bits) is both correct and exactly what "this refill covers
+         -- refill_addr's line" means once a refill is whole-line, not single-word.
+         if seq_state = SEQ_REQ and seq_is_write = '0'
+            and seq_addr(14 downto 2) = refill_addr(14 downto 2) then
             refill_started <= '1';
          end if;
-         if seq_state = SEQ_DONE and seq_is_write = '0' and seq_addr = refill_addr then
+         if seq_state = SEQ_DONE and seq_is_write = '0'
+            and seq_addr(14 downto 2) = refill_addr(14 downto 2) then
             refill_pending <= '0';
          end if;
 
@@ -543,13 +686,14 @@ begin
    end process;
 
    ------------------------------------------------------------------ byte_seq
-   -- Owns: seq_*, drain_ptr, ram_a_addr/req/rd_n/di.
+   -- Owns: seq_*, drain_ptr, ram_a_addr/req/rd_n/di/line_refill.
    process (clock)
       variable pick       : integer range 0 to FIFO_DEPTH-1;
       variable found_pick : boolean;
    begin
       if rising_edge(clock) then
-         ram_a_req <= '0';
+         ram_a_req         <= '0';
+         ram_a_line_refill <= '0';
 
          case seq_state is
             when SEQ_IDLE =>
@@ -566,8 +710,21 @@ begin
                      seq_state     <= SEQ_REQ;
                   end if;
                end loop;
+               -- PCE PORT (2026-08-28): when G_LINE_REFILL, a read refill always targets
+               -- the LINE's own word0 (bits 1:0 forced to "00"), not the specific word
+               -- that missed -- see sdram.sv's header for why fixed order 0,1,2,3 was
+               -- kept instead of critical-word-first (two fixed burst-of-2 halves, not
+               -- one wrapping burst-of-4, so "start at the missed word" only helps for
+               -- words 0/2). When G_LINE_REFILL is false (the default), seq_addr is
+               -- exactly refill_addr, byte-identical to the original file. Write-drains
+               -- above are completely unaffected either way -- still single-word, still
+               -- the exact popped FIFO address.
                if not found_pick and refill_pending = '1' and refill_started = '0' then
-                  seq_addr     <= refill_addr;
+                  if G_LINE_REFILL then
+                     seq_addr <= refill_addr(14 downto 2) & "00";
+                  else
+                     seq_addr <= refill_addr;
+                  end if;
                   seq_is_write <= '0';
                   seq_state    <= SEQ_REQ;
                end if;
@@ -577,6 +734,14 @@ begin
             -- old two-full-handshake low-byte/high-byte sequence. seq_addr's own bit 0 is
             -- always 0 (word-aligned), so the address is unchanged from the old low-byte
             -- launch.
+            -- PCE PORT (2026-08-28): ram_a_line_refill asserted for a read (never a
+            -- write-drain), ONLY when G_LINE_REFILL -- held through SEQ_WAIT_RISE too,
+            -- mirroring ram_a_req's own held-then-defaulted-to-0 pattern exactly
+            -- (sdram.sv only actually samples it at launch, but the interface contract
+            -- is "hold for the whole request", same as ram_a_rd_n/ram_a_addr). When
+            -- G_LINE_REFILL is false, the top-of-process default (ram_a_line_refill<='0')
+            -- is simply never overridden here -- byte-identical to a file that never
+            -- had this port at all.
             when SEQ_REQ =>
                seq_idx    <= idx_of(seq_addr);
                seq_tag    <= tag_of(seq_addr);
@@ -585,15 +750,34 @@ begin
                ram_a_rd_n <= seq_is_write;
                ram_a_di   <= seq_wdata;
                ram_a_req  <= '1';
+               if G_LINE_REFILL then
+                  ram_a_line_refill <= not seq_is_write;
+               end if;
                seq_state  <= SEQ_WAIT_RISE;
             when SEQ_WAIT_RISE =>               -- wait for the controller to observe REQ
                ram_a_req <= '1';
+               if G_LINE_REFILL then
+                  ram_a_line_refill <= not seq_is_write;
+               end if;
                if ram_a_wait = '1' then
                   seq_state <= SEQ_WAIT_FALL;
                end if;
             when SEQ_WAIT_FALL =>               -- then wait for it to complete
+               -- PCE PORT (2026-08-28): when G_LINE_REFILL, captures the whole 4-word
+               -- line (ram_a_line_do), not just the one word ram_a_do carries -- see
+               -- seq_rdata's own widened declaration. Harmless to always capture the
+               -- line-refill path on a write-drain too, where it's simply never read
+               -- back downstream. When G_LINE_REFILL is false, only seq_rdata's low 16
+               -- bits are driven (from ram_a_do), byte-identical to the original file
+               -- (seq_rdata's upper 48 bits are simply never read by anything in that
+               -- mode -- gen_way_a_wiring's "not G_LINE_REFILL" branches never index
+               -- past bit 15, see their own site).
                if ram_a_wait = '0' then
-                  seq_rdata <= ram_a_do;
+                  if G_LINE_REFILL then
+                     seq_rdata <= ram_a_line_do;
+                  else
+                     seq_rdata(15 downto 0) <= ram_a_do;
+                  end if;
                   seq_state <= SEQ_DONE;
                end if;
 
@@ -650,9 +834,20 @@ begin
    -- compulsory miss still requires the target word not already valid (protects a fresher
    -- live write that raced in between miss-trigger and refill-complete from being clobbered
    -- by the stale fetched data -- the ORIGINAL, still-real reason for this term).
+   --
+   -- PCE PORT (2026-08-28), line-refill: when G_LINE_REFILL, the same-tag-vs-eviction
+   -- OR above now gates only the SEQ_DONE/not-wren_a/not-write preconditions that are
+   -- shared across all 4 ways -- the "target word not already valid" half of the OR
+   -- moved into gen_way_a_wiring's own way_wren_a(k), evaluated per way against that
+   -- way's own way_q_b(k)(16), not a single seq_way-indexed check (see that generate's
+   -- own comment for why a blanket check would silently clobber a fresher live write
+   -- to a DIFFERENT word of the same line than the one that originally missed). When
+   -- G_LINE_REFILL is false (the default), the `to_sl(not G_LINE_REFILL) and (...)`
+   -- term below reproduces the ORIGINAL blanket precondition exactly
+   -- (`refill_tag_changed or not way_q_b(seq_way)(16)`), unchanged.
    refill_tag_changed <= to_sl(unsigned(tag_q_b) /= seq_tag);
    refill_can_install <= to_sl(seq_state = SEQ_DONE and seq_is_write = '0')
-      and (refill_tag_changed or not way_q_b(seq_way)(16))
+      and (to_sl(G_LINE_REFILL) or (refill_tag_changed or not way_q_b(seq_way)(16)))
       and not wren_a;
 
 end architecture;

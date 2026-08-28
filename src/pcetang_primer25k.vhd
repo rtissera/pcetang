@@ -91,6 +91,15 @@ architecture rtl of pcetang_primer25k is
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
          RAM_A_DO   : out   std_logic_vector(15 downto 0);
          RAM_A_WAIT : out   std_logic;
+         -- PCE PORT (2026-08-28): 4-word VRAM0 line-refill -- see sdram.sv's own header.
+         -- Tied off here (feature not yet wired end-to-end on this board -- vram0_cache's
+         -- own G_LINE_REFILL generic defaults false, so this is inert either way, but
+         -- tied explicitly rather than relying on the Verilog-side default across the
+         -- VHDL/Verilog boundary, which Gowin's mixed-language elaborator does not honor
+         -- (real EX4232 error, confirmed) -- matches this file's own existing convention
+         -- of always tying off unused ports explicitly (see RAM_C_* below).
+         RAM_A_LINE_REFILL : in    std_logic;
+         RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
          RAM_B_ADDR : in    std_logic_vector(20 downto 0);
          RAM_B_REQ  : in    std_logic;
          RAM_B_WE   : in    std_logic;
@@ -339,6 +348,7 @@ begin
       RAM_A_DI   => vram0_ram_a_di,
       RAM_A_DO   => vram0_ram_a_do,
       RAM_A_WAIT => vram0_ram_a_wait,
+      RAM_A_LINE_REFILL => '0', RAM_A_LINE_DO => open,
       RAM_B_ADDR => romb_addr,
       RAM_B_REQ  => romb_req,
       RAM_B_WE   => romb_we,

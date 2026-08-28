@@ -77,6 +77,53 @@
 // through an ordinary register write instead. Ported here as its own scoped change,
 // not bundled with any other fix, so its effect on clk_sdram's margin can be measured
 // in isolation.
+//
+// PCE PORT (2026-08-28): "line refill" -- 4-word VRAM0 cache-line refill for port A, to
+// close the real, measured VRAM0 deadline gap for the BAT stream specifically (see
+// docs/ARCHITECTURE.md's VRAM0 deadline-gap section and
+// scratchpad/vram0_deadline_implementation_plans.md option (c) -- real GHDL-measured
+// per-stream same-line locality: 75.4% for BAT, ~0% for CG0/CG1/sprites within a
+// scanline; CG0/CG1 still benefit via fewer FUTURE misses, not this scanline's
+// deadline). `vram0_cache.vhd`'s own cache line is 4 words (`address(10:2)`); on a
+// genuine read-miss refill (never a write-drain), it now requests the WHOLE line's
+// base word (word 0) with a new `RAM_A_LINE_REFILL` flag held for the request, instead
+// of just the one missed word. This file answers with TWO back-to-back burst-of-2 READ
+// commands to the SAME already-open row -- confirmed bit-exact from this file's own
+// `{bank,a} <= RAM_A_ADDR` and the STATE_CONT/STATE_START column/row split: VRAM0's
+// cache-line-selecting address bits fall entirely inside the column field (`a[9:1]`),
+// never the row field (`a[22:10]`), for every word in a 4-aligned line, so no new
+// ACTIVE is needed between the two READs. `BURST_LENGTH`/`ACCESS_TYPE`/the mode
+// register are completely untouched -- an earlier draft of this design considered
+// switching to a real burst-of-4 and was rejected specifically because that's a global,
+// once-at-init mode-register setting, real risk to ports B/C and the Primer 25K CD
+// build's already-thin clk_sdram margin, for the same net effect the two-burst
+// approach gets without touching the mode register at all.
+//
+// Real, measured (not assumed) SIM-model calibration and timing derivation for this
+// change lives in scratchpad/line_refill_verification.md, not repeated here -- but the
+// key structural facts: the 2nd READ launches at STATE_CONT+2 (clk_sdram cycles), to
+// column = 1st READ's own column + 2 words; RAM_A_WAIT is held (not cleared at the
+// usual STATE_READY) through a new STATE_LAST_LR = STATE_READY+4 for a line refill
+// specifically -- the PROVEN minimum (a real simulation sweep, not a guess: +2/+3 each
+// miss one of the two trailing words, see the verification log), not an
+// arbitrarily-conservative pad; RAM_A_ADDR's word-within-line bits are forced to 0 (always
+// fetch fixed order word0,1,2,3 -- critical-word-first was considered and dropped, see
+// the plan doc, since with two FIXED burst-of-2 halves rather than one wrapping
+// burst-of-4, "start at the missed word" only helps if it's word 0 or 2) for BOTH the
+// launch address and last_a[0]'s own tag (the second one caught by advisor review --
+// masking only the launch address while leaving the tag unmasked would let a
+// word0/word1 fetch's cache tag falsely match a later word2/word3 request). A line
+// refill always forces a real SDRAM access (never the free low-level-cache-hit path --
+// see the STATE_IDLE port-A launch block below), since the new `last_data0_ext`
+// holding words 2/3 has no tag/valid tracking of its own and a coincidental hit would
+// hand back stale, unrelated data for those two words specifically.
+//
+// This must NOT (and per scratchpad/line_refill_verification.md's Stage 3 differential
+// test, does NOT) change ports B/C's own behaviour, timing, or the refresh-starvation
+// fix's ordering in any way when RAM_A_LINE_REFILL is never asserted -- `line_refill`
+// is reset every STATE_IDLE cycle alongside `we`/`ch0_busy`/etc (same pattern), so
+// every new state (STATE_CONT2/STATE_READY2/STATE_LAST_LR) is provably unreachable
+// outside a real line-refill transaction, not just unlikely to be reached.
 
 //============================================================================
 //
@@ -124,6 +171,18 @@ module sdram
 	input      [15:0] RAM_A_DI,
 	output reg [15:0] RAM_A_DO,
 	output reg        RAM_A_WAIT,
+	// PCE PORT (2026-08-28): 4-word cache-line refill for VRAM0 -- see header's "line
+	// refill" note. Sampled at launch exactly like RAM_A_RD_n/RAM_A_ADDR; held by the
+	// caller for the whole 4-word request, but only the launch-time value matters here.
+	// Never combined with a write (vram0_cache.vhd only asserts this on a genuine read
+	// miss refill, never a write-drain).
+	input             RAM_A_LINE_REFILL = 1'b0,
+	// PCE PORT (2026-08-28): all 4 words of a completed line refill, valid (and stable
+	// until the NEXT line-refill transaction) from the same cycle RAM_A_WAIT falls for
+	// that transaction. {word3,word2,word1,word0}. RAM_A_DO itself is unchanged (still
+	// just the originally-addressed word, 16 bits) for compatibility with every other
+	// caller of this port.
+	output reg [63:0] RAM_A_LINE_DO,
 
 	input      [20:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
@@ -177,6 +236,24 @@ localparam STATE_CONT  = STATE_START+RASCAS_DELAY;
 localparam STATE_READY = STATE_CONT+CAS_LATENCY+2'd2;
 localparam STATE_LAST  = STATE_READY;      // last state in cycle
 
+// PCE PORT (2026-08-28): line-refill extension -- see header's "line refill" note and
+// docs/ARCHITECTURE.md's VRAM0 deadline-gap section. A 4-word line refill issues a
+// SECOND back-to-back burst-of-2 READ, to the SAME already-open row, exactly 2
+// clk_sdram cycles after the first (STATE_CONT2 = STATE_CONT+2) -- real SDR SDRAM
+// behaviour, not a new mode; BURST_LENGTH/ACCESS_TYPE/the mode register are untouched.
+// STATE_READY2/STATE_LAST_LR mirror STATE_READY/STATE_LAST, offset by that same +2,
+// since every downstream timing event of the 2nd READ inherits its +2 offset from the
+// 1st. The state counter (4 bits, max 15) comfortably covers this -- no widening
+// needed. STATE_LAST_LR = STATE_READY+4 is the PROVEN minimum, not a guess: a real
+// simulation sweep of the +2/+3/+4 offsets (see line_refill_verification.md Stage 2)
+// showed +2 misses word2, +3 misses word3 (both a real same-edge non-blocking-
+// assignment read-before-write of last_data0_ext, not a fluke), +4 is the first value
+// where all 4 words land correctly with zero X's -- confirmed by direct simulation,
+// then adopted as final rather than starting conservative and never revisiting it.
+localparam STATE_CONT2   = STATE_CONT + 3'd2;
+localparam STATE_READY2  = STATE_READY + 3'd2;
+localparam STATE_LAST_LR = STATE_READY + 3'd4;
+
 reg  [3:0] state;
 reg [22:0] a;
 reg  [1:0] bank;
@@ -196,6 +273,22 @@ reg  [8:0] rfsh_cnt;
 // BOTH SDRAM_DQ byte lanes instead of masking one (port A is now a real 16-bit-wide
 // access, not two sequential 8-bit ones).
 reg        wide_acc = 1'b0;
+
+// PCE PORT (2026-08-28): line-refill state -- see header. `line_refill` mirrors
+// `wide_acc`'s own lifetime exactly (set at port-A's launch, reset every STATE_IDLE
+// cycle alongside `we`/`ch0_busy` so a stale '1' can never leak into a B/C/refresh
+// transaction -- see the STATE_IDLE reset block below). `last_data0_ext` holds words 2
+// and 3 of the line (word2 in [15:0], word3 in [31:16]) captured by the SAME
+// arm-then-consume idiom `store` already uses for word1, just re-triggered 2 cycles
+// later to match the 2nd READ's own 2-cycle-later issuance -- see the STATE_READY2/
+// store_lr handling below. RAM_A_ADDR_LINE_MASKED forces the word-within-line bits
+// (RAM_A_ADDR[2:1]) to 0 for BOTH the launch address latch AND last_a[0]'s own tag --
+// the advisor caught that masking only the launch address while leaving last_a[0]
+// unmasked would tag a word0/word1-pair fetch as if it were the word2/word3 pair,
+// manufacturing exactly the false-hit hazard the masking exists to prevent.
+reg        line_refill = 1'b0;
+reg [31:0] last_data0_ext = 32'h0;
+wire [20:0] RAM_A_ADDR_LINE_MASKED = {RAM_A_ADDR[20:3], 3'b000};
 
 wire       fetch_req = (RAM_A_RD_n || !last_valid[0] || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
 // PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
@@ -217,6 +310,9 @@ always @(posedge clk) begin
 	reg        ch1_busy;
 	reg        ch2_busy;
 	reg  [3:0] store;
+	// PCE PORT (2026-08-28): line-refill's own one-shot deferred capture for word3 --
+	// same idiom as `store`, see the STATE_READY2 handling below.
+	reg        store_lr;
 
 	data_reg <= SDRAM_DQ;
 
@@ -274,6 +370,12 @@ always @(posedge clk) begin
 		ch0_busy <= 0;
 		ch1_busy <= 0;
 		ch2_busy <= 0;
+		// PCE PORT (2026-08-28): reset every idle cycle, alongside we/ch0_busy/etc --
+		// mirrors their own pattern exactly, so a line-refill flag can never leak into a
+		// later B/C/refresh transaction that doesn't override it below (state cannot
+		// reach STATE_CONT2/READY2/LAST_LR at all unless this is '1', so this reset is
+		// what makes those states provably unreachable outside a real line refill).
+		line_refill <= 1'b0;
 
 		// PCE PORT (2026-08-27): refresh checked FIRST, ahead of all three clients --
 		// see header's refresh-first note for the real starvation bug this avoids.
@@ -286,13 +388,23 @@ always @(posedge clk) begin
 		// just reordered.
 		else if((~old_a_req && RAM_A_REQ && (fetch_req || rfsh_cnt[8])) || RAM_A_WAIT) begin
 			we <= RAM_A_RD_n;
-			{bank,a} <= RAM_A_ADDR;
+			// PCE PORT (2026-08-28): line-refill address forced to the line's own word0
+			// (see header) -- both the launch latch AND last_a[0]'s own tag, so the
+			// low-level 2-word opportunistic cache can never mistag a word0/word1 fetch
+			// as a word2/word3 one (see RAM_A_ADDR_LINE_MASKED's declaration comment).
+			{bank,a} <= RAM_A_LINE_REFILL ? {2'b00, RAM_A_ADDR_LINE_MASKED} : RAM_A_ADDR;
 			data <= RAM_A_DI;                  // PCE PORT: real 16-bit word, no replication
 			wide_acc <= 1'b1;                  // PCE PORT: see wide_acc declaration
-			ram_req <= fetch_req;
-			last_a[0] <= RAM_A_ADDR[20:2];
+			// PCE PORT (2026-08-28): a line refill always performs a REAL SDRAM access,
+			// never the free-hit path -- last_data0_ext (words 2/3) has no tag/valid
+			// tracking of its own, so a coincidental hit on the low-level word0/word1
+			// cache would return stale/unrelated data for words 2/3. Cheap, safe: real
+			// line-refill callers only ever request this on a genuine miss anyway.
+			ram_req <= RAM_A_LINE_REFILL ? 1'b1 : fetch_req;
+			last_a[0] <= RAM_A_LINE_REFILL ? RAM_A_ADDR_LINE_MASKED[20:2] : RAM_A_ADDR[20:2];
 			last_valid[0] <= ~RAM_A_RD_n;
 			ch0_busy <= 1;
+			line_refill <= RAM_A_LINE_REFILL;
 			state <= STATE_START;
 		end
 		else if((old_b_req ^ RAM_B_REQ) && fetch_req_b) begin
@@ -333,7 +445,13 @@ always @(posedge clk) begin
 		if(~ram_req) rfsh_cnt <= 0;
 		if(ch0_busy) begin
 			ch0_busy <= 0;
-			RAM_A_WAIT <= 0;
+			// PCE PORT (2026-08-28): for a line refill, RAM_A_WAIT must NOT clear here --
+			// words 2/3 (the 2nd back-to-back READ's own burst) haven't landed yet. It
+			// clears instead at STATE_LAST_LR, below, once all 4 words are safe. Every
+			// other access (the vast majority: writes, B/C-mirroring behaviour on port A,
+			// non-line-refill reads) is completely unchanged -- WAIT still clears here,
+			// same cycle as always.
+			if(!line_refill) RAM_A_WAIT <= 0;
 			if(ram_req) begin
 				// PCE PORT (2026-08-27): port A is a real 16-bit word access now (see
 				// wide_acc) -- no a[0] byte-select on either the write echo or the read.
@@ -377,9 +495,31 @@ always @(posedge clk) begin
 		end
 	end
 
+	// PCE PORT (2026-08-28): line-refill words 2/3 -- extends the SAME arm-then-consume
+	// idiom `store` already uses for word1 (see its own site above), just re-triggered
+	// exactly 2 clk_sdram cycles later, matching the 2nd READ's own 2-cycle-later
+	// issuance (see the SDRAM state machines block below) so every downstream timing
+	// event inherits the identical +2 offset the 1st READ's own events already have.
+	// `line_refill` gates both terms; state cannot reach STATE_READY2/STATE_LAST_LR at
+	// all unless it's set (STATE_LAST wrap stays at 9 for every other transaction --
+	// see below), so this is defense-in-depth, not the only thing preventing this from
+	// firing during a B/C/refresh/non-line-refill-A transaction.
+	if(store_lr) begin
+		last_data0_ext[31:16] <= data_reg;   // word3
+		store_lr <= 1'b0;
+	end
+	if(line_refill && state == STATE_READY2) begin
+		last_data0_ext[15:0] <= data_reg;    // word2
+		store_lr <= 1'b1;
+	end
+	if(line_refill && state == STATE_LAST_LR) begin
+		RAM_A_WAIT    <= 1'b0;
+		RAM_A_LINE_DO <= {last_data0_ext, last_data[0]};
+	end
+
 	if(mode != MODE_NORMAL || state != STATE_IDLE || reset) begin
 		state <= state + 1'd1;
-		if(state == STATE_LAST) state <= STATE_IDLE;
+		if(state == (line_refill ? STATE_LAST_LR : STATE_LAST)) state <= STATE_IDLE;
 	end
 end
 
@@ -442,6 +582,18 @@ always @(posedge clk) begin
 		                          default: {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_NOP;
 	endcase
 
+	// PCE PORT (2026-08-28): line-refill's 2nd back-to-back READ -- see header. Kept as
+	// a trailing override rather than folded into the casex above (a NEW casex arm keyed
+	// only on `state==STATE_CONT2` would ALSO match ordinary non-line-refill reads that
+	// happen to pass through that same state value during their own STATE_CONT..
+	// STATE_LAST run -- the casex's existing selector doesn't carry `line_refill`, and
+	// widening it to do so would touch every other arm's bit positions for no reason).
+	// Explicit `!we`: a line refill should never coincide with a write (vram0_cache.vhd
+	// never asserts RAM_A_LINE_REFILL on a write-drain), kept as defense-in-depth.
+	if(line_refill && ram_req && !we && mode == MODE_NORMAL && state == STATE_CONT2) begin
+		{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_READ;
+	end
+
 	casex({ram_req,mode,state})
 		{1'b1,  MODE_NORMAL, STATE_START}: SDRAM_A <= a[22:10];
 		// PCE PORT (2026-08-27): wide_acc (port A only) forces both DQM lanes low on a
@@ -455,6 +607,15 @@ always @(posedge clk) begin
 
 		                          default: SDRAM_A <= 13'b0000000000000;
 	endcase
+
+	// PCE PORT (2026-08-28): line-refill's 2nd READ column = 1st READ's column + 2 words
+	// (the SAME row/bank, already open -- see header). DQM bits forced 0 (unmasked),
+	// matching the existing STATE_CONT arm's own read-side value (`we`=0 there always
+	// zeroes both DQM terms already); A10/A9 bits ('10') copied verbatim from that same
+	// arm. Mirrors, does not duplicate, the existing read column's own expression.
+	if(line_refill && ram_req && !we && mode == MODE_NORMAL && state == STATE_CONT2) begin
+		SDRAM_A <= {2'b00, 2'b10, (a[9:1] + 9'd2)};
+	end
 end
 
 
