@@ -92,6 +92,11 @@ architecture rtl of pcetang_nano20k is
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
          RAM_A_DO   : out   std_logic_vector(15 downto 0);
          RAM_A_WAIT : out   std_logic;
+         -- PCE PORT (2026-08-28): 4-word VRAM0 line-refill, the Nano 20K counterpart of
+         -- the mechanism already live on Primer 25K's sdram.sv -- see sdram32.sv's own
+         -- "line refill" header note.
+         RAM_A_LINE_REFILL : in    std_logic := '0';
+         RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
          RAM_B_ADDR : in    std_logic_vector(20 downto 0);
          RAM_B_REQ  : in    std_logic;
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
@@ -189,6 +194,8 @@ architecture rtl of pcetang_nano20k is
    signal vram0_ram_a_di   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_do   : std_logic_vector(15 downto 0);
    signal vram0_ram_a_wait : std_logic;
+   signal vram0_ram_a_line_refill : std_logic;
+   signal vram0_ram_a_line_do     : std_logic_vector(63 downto 0);
    signal ram_b_wait_nc    : std_logic;
 
    -- Sticky latches (2026-08-27, per an independent Fable-model audit's P3): the raw
@@ -279,6 +286,8 @@ begin
       RAM_A_DI   => vram0_ram_a_di,
       RAM_A_DO   => vram0_ram_a_do,
       RAM_A_WAIT => vram0_ram_a_wait,
+      RAM_A_LINE_REFILL => vram0_ram_a_line_refill,
+      RAM_A_LINE_DO     => vram0_ram_a_line_do,
       RAM_B_ADDR => (others => '0'),
       RAM_B_REQ  => '0',
       RAM_B_DO   => open,
@@ -347,7 +356,11 @@ begin
    );
 
    core: entity work.pce_top
-   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1)
+   -- PCE PORT (2026-08-28): VRAM0_LINE_REFILL => 1 enables the real 4-word line-refill
+   -- mechanism -- sdram32.sv now implements it (see that file's own "line refill" header
+   -- note); wired to real signals below, mirroring pcetang_primer25k.vhd's own enablement
+   -- of the sdram.sv version.
+   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1)
    port map (
       RESET      => not reset_n,
       COLD_RESET => not reset_n,
@@ -360,10 +373,8 @@ begin
       VRAM0_RAM_A_DO   => vram0_ram_a_do,
       VRAM0_RAM_A_WAIT => vram0_ram_a_wait,
       DBG_DEADLINE_MISS => dbg_deadline_miss, DBG_FIFO_OVERFLOW => dbg_fifo_overflow,
-      -- PCE PORT (2026-08-28): 4-word VRAM0 line-refill -- not implemented on this
-      -- board (sdram32.sv untouched this session; VRAM0_LINE_REFILL stays at pce_top's
-      -- own default of 0), tied off.
-      VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
+      VRAM0_RAM_A_LINE_REFILL => vram0_ram_a_line_refill,
+      VRAM0_RAM_A_LINE_DO     => vram0_ram_a_line_do,
 
       ROM_RD    => open,
       ROM_RDY   => '1',

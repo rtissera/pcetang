@@ -51,6 +51,58 @@
 //
 //  Part of the PC Engine / SGX / TG16 port to Sipeed Tang boards. GPLv3.
 //
+//  PCE PORT (2026-08-28): "line refill" -- 4-word VRAM0 cache-line refill for port A,
+//  the Nano 20K counterpart of the mechanism already shipped on Primer 25K's sdram.sv
+//  (see that file's own "line refill" header note and
+//  scratchpad/vram0_deadline_implementation_plans.md option (c)). vram0_cache.vhd's own
+//  cache line is 4 PCE (16-bit) words = 8 bytes; THIS controller's native "word" is
+//  already the 4-byte SDRAM access (word_a) -- confirmed from source, not assumed:
+//  vram0_cache.vhd:749 drives `ram_a_addr <= "00000" & seq_addr & '0'` (byte address =
+//  seq_addr*2, same convention sdram.sv relies on), and word_a = a_addr_d[20:2] drops
+//  RAM_A_ADDR's bit 1 (the half-word select, byte_a[1]) as well as bit 0 -- so ONE line
+//  is exactly TWO back-to-back word_a fetches (word_a, word_a+1), not four. A line's own
+//  base word_a (seq_addr(1:0)="00") is always EVEN, and its own +1 covers the line's
+//  other half without ever crossing the column->row boundary (an even base's column is
+//  <=254, +1<=255, both inside the 8-bit column field -- the row field never changes).
+//  BURST_LENGTH/ACCESS_TYPE/the mode register are completely untouched -- this issues a
+//  SECOND ordinary single-beat (BURST_LENGTH=0) READ command to the SAME already-open
+//  row, not a burst-length or mode-register change.
+//
+//  Real, load-bearing correction versus a naive port of sdram.sv's own two-burst scheme
+//  (found from reading THIS file's own address generation, not assumed to carry over):
+//  this controller issues auto-precharge (SDRAM_A[10]=1) on EVERY read today, since it
+//  normally never keeps a row open across transactions -- each STATE_IDLE->STATE_LAST
+//  run is a fresh ACTIVE+READ+auto-precharge, single-shot. For a line refill the row
+//  MUST stay open between the two back-to-back reads, so the FIRST read's auto-precharge
+//  bit is suppressed (SDRAM_A[10]=0, gated on `line_refill && !we` -- see the address-
+//  generation block's own comment for why the !we term is load-bearing, not decorative)
+//  and only the SECOND (last) read closes the row as normal -- see the address-generation
+//  block below. Getting this backwards would have the bank start closing after read 1,
+//  corrupting read 2's data on
+//  real hardware in a way no behavioral model would catch unless it explicitly tracks
+//  row-open state (this file's own testbench does, specifically to catch this class of
+//  bug -- see scratchpad/nano20k_line_refill_verification.md).
+//
+//  RAM_A_LINE_REFILL is sampled through the SAME one-cycle a_addr_d-style pipeline
+//  register as RAM_A_ADDR/RAM_A_RD_n/RAM_A_DI (line_refill_d, declared below), not used
+//  directly at the launch decision -- this file's own real-hardware fix (see a_addr_d's
+//  own comment above) already established that mixing an unregistered control signal
+//  into the SAME launch decision as the registered address bundle reintroduces the exact
+//  skew/hazard that fix exists to prevent. vram0_cache.vhd holds RAM_A_LINE_REFILL
+//  steady for the whole REQ/WAIT round trip (same convention as ram_a_req itself), so
+//  the extra cycle of registration costs nothing.
+//
+//  RAM_A_ADDR's word-within-line bits are forced to 0 for BOTH the launch address latch
+//  AND last_a[0]'s own tag (mirrors sdram.sv's own masking correction) -- word_a/byte_a
+//  are set from the masked address, not the exact missed word, so the line is always
+//  fetched in fixed order word0,word1 (from word_a) then word2,word3 (from word_a+1),
+//  never starting mid-line.
+//
+//  A line refill always forces a real SDRAM access (never the free-hit path below) --
+//  last_data0_ext (words 2/3) has no tag/valid tracking of its own, so a coincidental
+//  hit on the low-level 2-word cache (last_data[0]/last_valid[0]) would hand back stale,
+//  unrelated data for words 2/3 specifically.
+//
 //============================================================================
 
 module sdram32
@@ -85,6 +137,18 @@ module sdram32
 	input      [15:0] RAM_A_DI,
 	output reg [15:0] RAM_A_DO,
 	output reg        RAM_A_WAIT,
+	// PCE PORT (2026-08-28): 4-word cache-line refill for VRAM0 -- see header's "line
+	// refill" note. Sampled through line_refill_d exactly like RAM_A_RD_n/RAM_A_ADDR;
+	// held by the caller for the whole 4-word request, but only the launch-time value
+	// matters here. Never combined with a write (vram0_cache.vhd only asserts this on a
+	// genuine read-miss refill, never a write-drain).
+	input             RAM_A_LINE_REFILL = 1'b0,
+	// PCE PORT (2026-08-28): all 4 words of a completed line refill, valid (and stable
+	// until the NEXT line-refill transaction) from the same cycle RAM_A_WAIT falls for
+	// that transaction. {word3,word2,word1,word0}. RAM_A_DO itself is unchanged (still
+	// just the originally-addressed word, 16 bits) for compatibility with every other
+	// caller of this port.
+	output reg [63:0] RAM_A_LINE_DO,
 
 	input      [20:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
@@ -148,6 +212,27 @@ localparam STATE_READY = STATE_CONT + CAS_LATENCY + SAMPLE_SKEW;
 // unanalysed interface.
 localparam STATE_LAST  = STATE_READY + 3'd3;
 
+// PCE PORT (2026-08-28): line-refill extension -- see header's "line refill" note. A
+// 4-word line refill issues a SECOND back-to-back single-beat READ, to the SAME
+// already-open row, exactly 1 clk_sdram cycle after the first (STATE_CONT2 =
+// STATE_CONT+1) -- real SDR SDRAM CCD (column-to-column delay) for BURST_LENGTH=0 is 1
+// clock, fixed, not clock-period-dependent (unlike RASCAS_DELAY/tRCD), so this does not
+// need to scale with SAMPLE_SKEW the way that constant does. STATE_READY2/STATE_LAST_LR
+// mirror STATE_READY/STATE_LAST, offset by that same +1, since every downstream timing
+// event of the 2nd READ inherits its +1 offset from the 1st (its own CAS_LATENCY+
+// SAMPLE_SKEW is identical to the 1st read's). STATE_LAST_LR keeps the SAME +3 idle-cycle
+// margin after read 2's own STATE_READY2 that STATE_LAST already keeps after every
+// ordinary single read's STATE_READY -- read 2 is, from the chip's point of view, an
+// ordinary read (it's the one that auto-precharges, see header), so it needs the same
+// post-read margin before the next ACTIVE that any other read already gets, not a novel
+// smaller one. (Real GHDL/Verilator confirmation that a smaller pad already suffices
+// FUNCTIONALLY, and that this one is not required for correctness but is kept for
+// margin-parity, is in scratchpad/nano20k_line_refill_verification.md.) The 4-bit state
+// counter (max 15) comfortably covers STATE_LAST_LR=14 -- no widening needed.
+localparam STATE_CONT2   = STATE_CONT + 3'd1;
+localparam STATE_READY2  = STATE_READY + 3'd1;
+localparam STATE_LAST_LR = STATE_READY2 + 3'd3;
+
 reg  [3:0] state;
 reg [18:0] word_a;                    // word address of the access in flight
 reg  [1:0] byte_a;                    // byte within that word
@@ -158,6 +243,19 @@ reg        ram_req = 0;
 reg [18:0] last_a[2];                 // cached word address per channel
 reg  [1:0] last_valid = 2'b00;        // and whether that cache line means anything
 reg  [8:0] rfsh_cnt;
+
+// PCE PORT (2026-08-28): line-refill state -- mirrors sdram.sv's own `line_refill`/
+// `last_data0_ext` idiom. `line_refill` is reset every STATE_IDLE cycle alongside
+// ram_req/we/ch0_busy/ch1_busy (see that reset block below), so a stale '1' can never
+// leak into a later non-line-refill transaction -- every new state (CONT2/READY2/
+// LAST_LR) is therefore provably unreachable outside a real line-refill transaction, not
+// just unlikely to be reached. `last_data0_ext` holds words 2 and 3 of the line (word2 in
+// [15:0], word3 in [31:16]), captured directly from data_reg at STATE_READY2 -- no
+// two-stage deferred capture is needed here (unlike sdram.sv's `store`/`store_lr`), since
+// this controller's own read data already arrives complete in ONE beat per READ command
+// (BURST_LENGTH=0), not split across two beats of a burst-of-2.
+reg        line_refill = 1'b0;
+reg [31:0] last_data0_ext;            // words 2+3 of the line
 
 reg [31:0] dq_out;
 reg        dq_oe;
@@ -210,12 +308,17 @@ end
 reg [20:0] a_addr_d, b_addr_d;
 reg        a_req_d, a_rd_n_d, b_req_d;
 reg [15:0] a_di_d;
+// PCE PORT (2026-08-28): line-refill's own pipeline register, same treatment as
+// a_addr_d/a_rd_n_d/a_di_d above and for the same reason -- see RAM_A_LINE_REFILL's own
+// port comment.
+reg        line_refill_d;
 reg hit_a, hit_b;
 always @(posedge clk) begin
 	a_addr_d <= RAM_A_ADDR;
 	a_req_d  <= RAM_A_REQ;
 	a_rd_n_d <= RAM_A_RD_n;
 	a_di_d   <= RAM_A_DI;
+	line_refill_d <= RAM_A_LINE_REFILL;
 	b_addr_d <= RAM_B_ADDR;
 	b_req_d  <= RAM_B_REQ;
 
@@ -225,6 +328,13 @@ end
 
 wire fetch_req = (a_rd_n_d || !hit_a);
 wire fetch_req_b = !hit_b;   // PCE PORT: B is read-only, no rd_n term needed
+
+// PCE PORT (2026-08-28): line-refill's launch address, masked to the line's own base
+// word0 -- forces BOTH the word-select bit (RAM_A_ADDR[1], byte_a) and word_a's own LSB
+// (RAM_A_ADDR[2]) to 0. Same masking formula as sdram.sv's RAM_A_ADDR_LINE_MASKED, since
+// both controllers share vram0_cache.vhd's `RAM_A_ADDR = seq_addr*2` convention
+// (confirmed at vram0_cache.vhd:749, not assumed).
+wire [20:0] a_addr_d_line_masked = {a_addr_d[20:3], 3'b000};
 
 // access manager
 always @(posedge clk) begin
@@ -271,6 +381,12 @@ always @(posedge clk) begin
 		we       <= 0;
 		ch0_busy <= 0;
 		ch1_busy <= 0;
+		// PCE PORT (2026-08-28): reset every idle cycle, alongside ram_req/we/ch0_busy --
+		// mirrors their own pattern exactly, so a line-refill flag can never leak into a
+		// later transaction that doesn't override it below (state cannot reach
+		// STATE_CONT2/READY2/LAST_LR at all unless this is '1', so this reset is what
+		// makes those states provably unreachable outside a real line refill).
+		line_refill <= 1'b0;
 
 		// Refresh goes FIRST once its deadline is reached, ahead of both ports.
 		//
@@ -298,20 +414,29 @@ always @(posedge clk) begin
 		// just reordered.
 		else if((~old_a_req && a_req_d && (fetch_req || rfsh_cnt[8])) || RAM_A_WAIT) begin
 			we        <= a_rd_n_d;
-			word_a    <= a_addr_d[20:2];
-			byte_a    <= a_addr_d[1:0];
+			// PCE PORT (2026-08-28): a line refill always requests the LINE's own base
+			// word0 (see header) -- both word_a/byte_a AND last_a[0]'s own tag, so the
+			// low-level 2-word opportunistic cache can never mistag a word0/word1 fetch
+			// as a word2/word3 one.
+			word_a    <= line_refill_d ? a_addr_d_line_masked[20:2] : a_addr_d[20:2];
+			byte_a    <= line_refill_d ? 2'b00 : a_addr_d[1:0];
 			// PCE PORT (2026-08-27): port A is a real 16-bit word now (see RAM_A_DI/DO
 			// width note) -- writes both bytes of the addressed half, not one byte of
 			// four. a_addr_d[0] is always 0 (word-aligned from vram0_cache.vhd); [1]
 			// selects which half of the 4-byte SDRAM line.
 			data      <= {2{a_di_d}};
 			dqm_w     <= a_addr_d[1] ? 4'b0011 : 4'b1100;
-			ram_req   <= fetch_req;
+			// PCE PORT (2026-08-28): a line refill always performs a REAL SDRAM access,
+			// never the free-hit path -- last_data0_ext (words 2/3) has no tag/valid
+			// tracking of its own, so a coincidental hit on the low-level word0/word1
+			// cache would return stale/unrelated data for words 2/3 specifically.
+			ram_req   <= line_refill_d ? 1'b1 : fetch_req;
 			// A write invalidates the line rather than trying to patch it: the byte went
 			// to the chip, and the cached copy would otherwise go stale.
-			last_a[0]     <= a_addr_d[20:2];
+			last_a[0]     <= line_refill_d ? a_addr_d_line_masked[20:2] : a_addr_d[20:2];
 			last_valid[0] <= ~a_rd_n_d;
 			ch0_busy  <= 1;
+			line_refill <= line_refill_d;
 			state     <= STATE_START;
 		end
 		else if((old_b_req ^ b_req_d) && !hit_b) begin
@@ -330,7 +455,12 @@ always @(posedge clk) begin
 		if(~ram_req) rfsh_cnt <= 0;
 		if(ch0_busy) begin
 			ch0_busy   <= 0;
-			RAM_A_WAIT <= 0;
+			// PCE PORT (2026-08-28): for a line refill, RAM_A_WAIT must NOT clear here --
+			// words 2/3 (the 2nd back-to-back READ's own beat) haven't landed yet. It
+			// clears instead at STATE_LAST_LR, below, once all 4 words are safe. Every
+			// other access (writes, ordinary non-line-refill reads) is completely
+			// unchanged -- WAIT still clears here, same cycle as always.
+			if(!line_refill) RAM_A_WAIT <= 0;
 			if(ram_req) begin
 				// PCE PORT (2026-08-27): 16-bit word select via byte_a[1] (which half of
 				// the 4-byte line), not the old byte_a[1:0]*8 byte select.
@@ -350,9 +480,23 @@ always @(posedge clk) begin
 		end
 	end
 
+	// PCE PORT (2026-08-28): line-refill words 2/3 -- the 2nd back-to-back READ's own
+	// single beat lands here, exactly STATE_CONT2-STATE_CONT (1) cycles after the 1st
+	// read's own STATE_READY. `line_refill` gates both terms; state cannot reach
+	// STATE_READY2/STATE_LAST_LR at all unless it's set (STATE_LAST wrap stays at 13 for
+	// every other transaction -- see below), so this is defense-in-depth, not the only
+	// thing preventing this from firing during a non-line-refill transaction.
+	if(line_refill && state == STATE_READY2) begin
+		last_data0_ext <= data_reg;          // words 2 (low) and 3 (high)
+	end
+	if(line_refill && state == STATE_LAST_LR) begin
+		RAM_A_WAIT    <= 1'b0;
+		RAM_A_LINE_DO <= {last_data0_ext, last_data[0]};
+	end
+
 	if(mode != MODE_NORMAL || state != STATE_IDLE || reset) begin
 		state <= state + 1'd1;
-		if(state == STATE_LAST) state <= STATE_IDLE;
+		if(state == (line_refill ? STATE_LAST_LR : STATE_LAST)) state <= STATE_IDLE;
 	end
 end
 
@@ -366,6 +510,20 @@ localparam CMD_LOAD_MODE       = 3'b000;
 
 wire [10:0] row = word_a[18:8];
 wire  [7:0] col = word_a[7:0];
+
+// PCE PORT (2026-08-28): line-refill's 2nd back-to-back READ launch condition. Read 1's
+// A10 (auto-precharge) suppression below is gated on the LITERALLY IDENTICAL `line_refill
+// && !we` term (not bare `line_refill`) specifically so these two predicates can never
+// diverge -- see header's precharge-sequencing note for why divergence would be a real
+// bug: a transaction that suppresses read 1's auto-precharge and then never issues read 2
+// leaves the row open with nothing left to close it. (line_refill=1 with we=1 should be
+// unreachable in real use -- vram0_cache.vhd only ever asserts RAM_A_LINE_REFILL on a
+// genuine read-miss refill, never a write-drain -- but the predicates are kept literally
+// matched rather than relying on that external guarantee, so this file's own invariant
+// doesn't depend on a caller behaving correctly.) The additional ram_req/mode terms here
+// are defense-in-depth (line_refill can only be set when mode==MODE_NORMAL at launch, and
+// ram_req is not changed again until the next STATE_IDLE).
+wire line_refill_2nd_read = line_refill && ram_req && !we && mode == MODE_NORMAL && state == STATE_CONT2;
 
 // command and address generation
 always @(posedge clk) begin
@@ -384,10 +542,23 @@ always @(posedge clk) begin
 		                          default: {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_NOP;
 	endcase
 
+	// PCE PORT (2026-08-28): line-refill's 2nd back-to-back READ -- see header. Kept as
+	// a trailing override rather than folded into the casex above (a NEW casex arm keyed
+	// only on state==STATE_CONT2 would ALSO match any ordinary non-line-refill
+	// transaction that happens to pass through that same state value during its own
+	// STATE_CONT..STATE_LAST run -- the casex's own selector doesn't carry line_refill).
+	if(line_refill_2nd_read) begin
+		{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_READ;
+	end
+
 	casex({ram_req,mode,state})
 		{1'b1,  MODE_NORMAL, STATE_START}: SDRAM_A <= row;
-		// A10 high = auto precharge, A9:A8 unused, A7:A0 = column
-		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {1'b1, 2'b00, col};
+		// A10 high = auto precharge, A9:A8 unused, A7:A0 = column. PCE PORT (2026-08-28):
+		// suppressed (A10=0) on a line refill's FIRST read only -- the row must stay open
+		// for the 2nd read that follows at STATE_CONT2 (see header's precharge-sequencing
+		// note). Every other read (the vast majority: ordinary non-line-refill accesses)
+		// is unchanged, still auto-precharges here exactly as before.
+		{1'b1,  MODE_NORMAL, STATE_CONT }: SDRAM_A <= {((line_refill && !we) ? 1'b0 : 1'b1), 2'b00, col};
 
 		// init
 		{1'bX,     MODE_LDM, STATE_START}: SDRAM_A <= MODE;
@@ -395,6 +566,16 @@ always @(posedge clk) begin
 
 		                          default: SDRAM_A <= 11'b000_0000_0000;
 	endcase
+
+	// PCE PORT (2026-08-28): line-refill's 2nd READ column = 1st read's own column + 1
+	// (the SAME row/bank, already open -- see header; word_a's own even/odd pairing
+	// guarantees this never crosses into the row field). This IS the last read of the
+	// transaction, so unlike read 1 it auto-precharges normally (A10=1) to close the row
+	// afterward -- mirrors, does not duplicate, the existing read column's own STATE_CONT
+	// expression above.
+	if(line_refill_2nd_read) begin
+		SDRAM_A <= {1'b1, 2'b00, col + 8'd1};
+	end
 end
 
 // Write data leaves half a cycle before everything else, and stays a cycle longer.
