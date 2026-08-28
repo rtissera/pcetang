@@ -459,6 +459,7 @@ port map(
 );
 
 VDC0 : entity work.HUC6270
+generic map (SGX_BUILD => (LITE = 0))
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,
@@ -644,6 +645,7 @@ CLR_WE <= COLD_RESET when rising_edge(CLK);
 generate_SGX: if (LITE = 0) generate begin
 
 	VDC1 : entity work.HUC6270
+	generic map (SGX_BUILD => true)
 	port map(
 		CLK 		=> CLK,
 		CLR_MEM  => COLD_RESET,

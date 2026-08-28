@@ -55,7 +55,17 @@ use ieee.numeric_std.all;
 library work;
 
 entity HUC6270 is
-	port( 
+	-- SGX_BUILD (2026-08-28): true only when this HUC6270 is one of TWO instances in
+	-- the design (pce_top.vhd's LITE=0 SGX build, VDC0+VDC1 both present) -- passed as
+	-- `LITE = 0` from both instantiation sites, see pce_top.vhd. Gates a real
+	-- synthesis-directive fix (see BG_COLOR/SPR_COLOR's own attribute comments below)
+	-- that is ONLY needed in the two-instance case and, per a real measured regression
+	-- on Nano 20K (see docs/ARCHITECTURE.md / session memory), must NOT apply when only
+	-- one instance exists -- every currently-shipped board is LITE=>1, so this defaults
+	-- false and those builds see zero elaboration difference from before this generic
+	-- existed.
+	generic (SGX_BUILD : boolean := false);
+	port(
 		CLK		: in std_logic;
 		RST_N		: in std_logic;
 		CLR_MEM	: in std_logic;
@@ -269,6 +279,37 @@ architecture rtl of HUC6270 is
 	signal BG_SRC 			: ShiftRegColor_t;
 	type BGColorArray_t is array (0 to 7) of std_logic_vector(7 downto 0);
 	signal BG_COLOR 		: BGColorArray_t;
+	-- BG_COLOR is a pixel-pipeline shift register, not memory (literal-index writes/
+	-- reads only -- element 7 written every DCK_CE, elements 0-6 shifted via an
+	-- unrolled `for i in 0 to 6 loop`, element 0 read at the VD mux -- zero dynamic
+	-- addressing). With two HUC6270 instances present (SGX_BUILD=true, pce_top.vhd's
+	-- LITE=0 SGX build), GowinSynthesis's BSRAM packing heuristic merges BG_COLOR
+	-- ACROSS instances into one SPX9 primitive and picks an unsupported write mode --
+	-- ERROR (PA2122), WRITE_MODE = 2'b10 -- confirmed via gw_sh, never hit before
+	-- (LITE=0 had never been built anywhere in this repo). syn_preserve=1 (real Gowin
+	-- attribute, SUG550 section 5.12, VHDL syntax confirmed against that doc directly)
+	-- blocks the merge -- matches what an earlier real DI0019 warning on a different
+	-- signal (CLR_A) already named as the fix for exactly this class of bug.
+	--
+	-- Value is CONDITIONAL on SGX_BUILD (2026-08-28, real regression found and
+	-- reverted once already -- see docs/ARCHITECTURE.md / session memory): applying
+	-- syn_preserve=1 unconditionally regressed Nano 20K's real timing closure (2 Setup
+	-- Violated Endpoints, clk_sdram actual Fmax below its own constraint) even though
+	-- Nano 20K only ever has ONE HUC6270 instance and should have been unaffected --
+	-- root cause of that specific regression not chased further. A `generate`-gated
+	-- attribute was tried first and does NOT work: GowinSynthesis's VHDL front-end
+	-- errors `'bg_color' is not declared` for an attribute inside a generate
+	-- statement's declarative part targeting a signal declared in the enclosing
+	-- architecture -- a real tool/parser limitation, not a VHDL-legality question.
+	-- `boolean'pos(SGX_BUILD)` instead keeps the attribute specification in the same
+	-- declarative region as the signal (parses fine, proven) while making its VALUE
+	-- conditional: 0 for every currently-shipped board (SGX_BUILD defaults false,
+	-- matching `syn_preserve`'s own documented default-off state), 1 only for a real
+	-- LITE=0 (SGX) build. syn_ramstyle (also tried, alone, in the first fix attempt)
+	-- was dropped entirely -- never proven necessary; syn_preserve alone is the one
+	-- confirmed load-bearing attribute for clearing the PA2122 error.
+	attribute syn_preserve : integer;
+	attribute syn_preserve of BG_COLOR : signal is boolean'pos(SGX_BUILD);
 	signal BG_RAM_ADDR	: std_logic_vector(15 downto 0);
 	
 	signal SPR_FETCH		: std_logic;
@@ -352,7 +393,9 @@ architecture rtl of HUC6270 is
 	signal SPR_LINE_ADDR_B0 : std_logic_vector(8 downto 0);
 	signal SPR_LINE_ADDR_B1 : std_logic_vector(8 downto 0);
 	type SPColorArray_t is array (0 to 7) of std_logic_vector(8 downto 0);
-	signal SPR_COLOR		: SPColorArray_t; 
+	signal SPR_COLOR		: SPColorArray_t;
+	-- Same real bug/fix/gating as BG_COLOR above -- identical shape.
+	attribute syn_preserve of SPR_COLOR : signal is boolean'pos(SGX_BUILD); 
 
 	signal SAT_ADDR		: std_logic_vector(7 downto 0);
 	signal SAT_Q			: std_logic_vector(15 downto 0);
