@@ -28,6 +28,30 @@
 -- on this path either). Real numbers with this wiring: BSRAM 110/118 (94%). Real audio
 -- correctness (mixing, resampling, CDC) is unstarted work, same status as the picture.
 --
+-- ROM + CD-RAM on real SDRAM (2026-08-28): the on-chip 32K ROM buffer and the CD-RAM
+-- stub (both previously `open`/unbacked) are replaced by bridges to sdram.sv's port B
+-- (ROM, 256KB, exact real syscard3.pce size) and port C (CD-RAM, 256KB, cd.vhd's own
+-- RAM_SEL window) -- same recipe as pcetang_primer25k_cd.vhd's own ROM+CD-RAM work, see
+-- that file's header for the fuller rationale and pcetang_console60k.vhd's header for
+-- the sibling ROM-only version of this same change. `CD_EN` flipped '0'->'1' so the CD
+-- subsystem (and CD-RAM's real decode) actually elaborates; the SCSI target stub
+-- (CD_STAT/CD_COMM/etc.) is NOT wired here -- still the same safe stubs as before, so a
+-- real syscard boot would get no SCSI response yet. Also added `core_resetn` (this
+-- board was still missing the reset-gating fix pcetang_console60k.vhd/
+-- pcetang_primer25k.vhd already carry -- now that ROM reads have real SDRAM latency,
+-- without it the CPU could issue ROM_RD mid-load, racing the write bridge on port B).
+--
+-- ARCADE CARD RAM: NOT done, despite being asked for -- real Arcade Card RAM is 2MB
+-- (arcade.sv's own RAM_A is 21 bits wide), and this board's entire SDRAM window (every
+-- RAM_x_ADDR port on sdram.sv) is ALSO only 21 bits = 2MB total, already spoken for by
+-- ROM+CD-RAM above. AC_RAM_A shares CD_RAM_A's bus inside pce_top.vhd (`CD_RAM_A <=
+-- '0' & AC_RAM_A when AC_RAM_CS_N='0' else ...`), so CD-RAM's bridge above WOULD carry
+-- Arcade Card traffic too if `AC_EN` were set -- but only by aliasing/wrapping its real
+-- 2MB range down into CD-RAM's 256KB SDRAM slice, a real correctness bug, not a
+-- shortcut. `AC_EN` stays '0'. Real Arcade Card support needs sdram.sv's own address
+-- bus widened past 21 bits first -- already flagged as future "Phase 3" work in
+-- pcetang_primer25k_cd.vhd's own address-map comment, not started here either.
+--
 -- Otherwise identical to pcetang_console60k.vhd: ROM loading via iosys_bl616, real
 -- joypad input.
 --
@@ -44,6 +68,17 @@ entity pcetang_console60k_cd is
       clk         : in    std_logic;                      -- 50 MHz crystal
       key_reset_n : in    std_logic;                       -- S2, active low
       leds_n      : out   std_logic_vector(1 downto 0);
+
+      O_sdram_clk   : out   std_logic;
+      O_sdram_cke   : out   std_logic;
+      O_sdram_cs_n  : out   std_logic;
+      O_sdram_cas_n : out   std_logic;
+      O_sdram_ras_n : out   std_logic;
+      O_sdram_wen_n : out   std_logic;
+      O_sdram_dqm   : out   std_logic_vector(1 downto 0);
+      O_sdram_addr  : out   std_logic_vector(12 downto 0);
+      O_sdram_ba    : out   std_logic_vector(1 downto 0);
+      IO_sdram_dq   : inout std_logic_vector(15 downto 0);
 
       -- HDMI
       tmds_clk_n  : out   std_logic;
@@ -77,6 +112,44 @@ architecture rtl of pcetang_console60k_cd is
          clk_pixel    : out std_logic;
          clk_5x_pixel : out std_logic;
          lock         : out std_logic
+      );
+   end component;
+
+   component sdram is
+      port (
+         clk        : in    std_logic;
+         init       : in    std_logic;
+         SDRAM_A    : out   std_logic_vector(12 downto 0);
+         SDRAM_DQ   : inout std_logic_vector(15 downto 0);
+         SDRAM_BA   : out   std_logic_vector(1 downto 0);
+         SDRAM_DQML : out   std_logic;
+         SDRAM_DQMH : out   std_logic;
+         SDRAM_nWE  : out   std_logic;
+         SDRAM_nCAS : out   std_logic;
+         SDRAM_nRAS : out   std_logic;
+         SDRAM_nCS  : out   std_logic;
+         SDRAM_CKE  : out   std_logic;
+         SDRAM_CLK  : out   std_logic;
+         RAM_A_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_A_REQ  : in    std_logic;
+         RAM_A_RD_n : in    std_logic;
+         RAM_A_DI   : in    std_logic_vector(15 downto 0);
+         RAM_A_DO   : out   std_logic_vector(15 downto 0);
+         RAM_A_WAIT : out   std_logic;
+         RAM_A_LINE_REFILL : in    std_logic;
+         RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
+         RAM_B_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_B_REQ  : in    std_logic;
+         RAM_B_WE   : in    std_logic;
+         RAM_B_DI   : in    std_logic_vector(7 downto 0);
+         RAM_B_DO   : out   std_logic_vector(7 downto 0);
+         RAM_B_WAIT : out   std_logic;
+         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_REQ  : in    std_logic;
+         RAM_C_RD_n : in    std_logic;
+         RAM_C_DI   : in    std_logic_vector(7 downto 0);
+         RAM_C_DO   : out   std_logic_vector(7 downto 0);
+         RAM_C_WAIT : out   std_logic
       );
    end component;
 
@@ -161,8 +234,9 @@ architecture rtl of pcetang_console60k_cd is
       );
    end component;
 
-   signal clk_pce, clk_pixel, clk_5x_pixel : std_logic;
+   signal clk_pce, clk_sdram, clk_pixel, clk_5x_pixel : std_logic;
    signal pll_lock, hdmi_pll_lock, reset_n : std_logic;
+   signal sdram_init : std_logic;
 
    signal psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : signed(15 downto 0);
 
@@ -178,23 +252,78 @@ architecture rtl of pcetang_console60k_cd is
    signal rom_do       : std_logic_vector(7 downto 0);
    signal rom_do_valid : std_logic;
 
-   -- ROM: on-chip only for Phase 1 (Console 60K's whole engine fits on-chip per
-   -- NECTang's own real numbers -- no external memory needed here). First attempt used
-   -- addr_width=19 (512K) -- real gw_sh measured that as needing 3,518,715 DFF total
-   -- (ERROR (RP0001), limit 60780): this single dual-port memory alone (512K x8 =
-   -- 4Mbit) is bigger than Console 60K's ENTIRE on-chip BSRAM capacity (118 blocks x
-   -- 18Kbit =~ 2.1Mbit total), let alone the ~30% of it NECTang's own real measurements
-   -- show still free after the base engine (82/118 blocks already spent). Not an
-   -- inference bug -- a real sizing mistake, corrected to 32K (addr_width=15), the same
-   -- proven-safe depth class PRAM/RAM/VRAM0/VRAM1 already use successfully throughout
-   -- this codebase. Real HuCards range far larger; this is a first-cut ceiling for
-   -- proving the integration builds at all, not a spec -- external memory for real
-   -- cartridge sizes is separate, unstarted work.
-   constant ROM_ABITS : integer := 15;
+   -- ROM + CD-RAM/Arcade-Card window, both real SDRAM now (2026-08-28) -- same recipe
+   -- as pcetang_primer25k_cd.vhd's own ROM (port B) + CD-RAM (port C) bridges, see that
+   -- file's header for the fuller rationale. Console 60K CD needs this for real: a
+   -- syscard BIOS is 256KB, far past what fit on-chip before (32K), and CD-RAM/Arcade
+   -- Card backup RAM has no on-chip home at all in the donor once real size is honored.
+   --
+   -- No VRAM0-on-SDRAM co-tenant here (EXT_VRAM0=>0, stays on-chip -- Console 60K's
+   -- whole engine minus ROM/CD-RAM already fits), so the split is simpler than Primer
+   -- 25K's: ROM at 0x000000 (256KB, exact real syscard3.pce size), CD-RAM at 0x040000
+   -- (256KB, cd.vhd's own RAM_SEL window, confirmed from source same as Primer 25K's).
+   constant ROM_SDRAM_BASE   : unsigned(20 downto 0) := to_unsigned(16#000000#, 21);
+   constant ROM_SDRAM_ABITS  : integer := 18;  -- 256KB, exact real syscard size
+   constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#040000#, 21);
+
    signal rom_a       : std_logic_vector(21 downto 0);
-   signal rom_do_core : std_logic_vector(7 downto 0);
-   signal rom_wr_addr : unsigned(ROM_ABITS-1 downto 0) := (others => '0');
+   signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
+   signal rom_rdy_i   : std_logic := '1';
+   signal rom_rd_i    : std_logic;
+   signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
+
+   -- Core reset gated on rom_loading (same fix as pcetang_console60k.vhd's
+   -- core_resetn) -- held in reset through the whole ROM load, released exactly on
+   -- loading's falling edge. Needed now that ROM reads have real SDRAM latency: without
+   -- this, the CPU could run and issue ROM_RD mid-load, racing the write bridge on the
+   -- same SDRAM port B.
+   signal core_resetn : std_logic := '0';
+
+   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_req  : std_logic := '0';
+   signal romb_we   : std_logic := '0';
+   signal romb_di   : std_logic_vector(7 downto 0);
+   signal romb_do   : std_logic_vector(7 downto 0);
+   signal romb_wait : std_logic;
+
+   type romb_state_t is (RB_IDLE, RB_SETTLE, RB_WAIT);
+
+   signal rd_state       : romb_state_t := RB_IDLE;
+   signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal rd_req         : std_logic := '0';
+   signal rd_addr        : std_logic_vector(20 downto 0);
+
+   signal wr_state       : romb_state_t := RB_IDLE;
+   signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal wr_req         : std_logic := '0';
+   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_data        : std_logic_vector(7 downto 0);
+
+   -- CD-RAM bridge: pce_top's CD_RAM_A/CD_RAM_DO/CD_RAM_DI/CD_RAM_RD/CD_RAM_WR through
+   -- sdram.sv's port C. Single client here (unlike Primer 25K CD, which also shares
+   -- this port with ADPCM RAM -- Console 60K CD keeps its existing on-chip ADPCM shim,
+   -- real BSRAM headroom exists and it isn't broken, so it's untouched by this change).
+   -- Level-held REQ (port A's convention, not port B's toggle), matching CD_RAM_RDY's
+   -- new contribution to WAIT_N.
+   signal cd_ram_a     : std_logic_vector(21 downto 0);
+   signal cd_ram_do    : std_logic_vector(7 downto 0);
+   signal cd_ram_di_i  : std_logic_vector(7 downto 0) := (others => '0');
+   signal cd_ram_rd    : std_logic;
+   signal cd_ram_wr    : std_logic;
+   signal cd_ram_rdy_i : std_logic := '1';
+
+   signal cdr_addr : std_logic_vector(20 downto 0);
+   signal cdr_req  : std_logic := '0';
+   signal cdr_rd_n : std_logic := '0';
+   signal cdr_di   : std_logic_vector(7 downto 0);
+   signal cdr_do   : std_logic_vector(7 downto 0);
+   signal cdr_wait : std_logic;
+
+   type cdr_state_t is (CDR_IDLE, CDR_SETTLE, CDR_HOLD);
+   signal cdr_state      : cdr_state_t := CDR_IDLE;
+   signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
+   signal cdram_rd_r, cdram_wr_r : std_logic := '0';
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -228,11 +357,29 @@ begin
 
    pll: console60k_pll
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
-             clk_sdram => open, lock => pll_lock);
+             clk_sdram => clk_sdram, lock => pll_lock);
 
    hdmi_pll: pcetang_console60k_hdmi_pll_480p
    port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
+
+   -- Same init-hold shape as pcetang_console60k.vhd's sdram_init process.
+   process (clk_pce)
+      variable reset_cnt : unsigned(15 downto 0) := (others => '0');
+   begin
+      if rising_edge(clk_pce) then
+         if pll_lock = '0' or reset_n = '0' then
+            reset_cnt := (others => '0');
+         elsif reset_cnt /= X"FFFF" then
+            reset_cnt := reset_cnt + 1;
+         end if;
+         if reset_cnt < X"2000" then
+            sdram_init <= '1';
+         else
+            sdram_init <= '0';
+         end if;
+      end if;
+   end process;
 
    -- DS2/SNES-shaped bit order per iosys_bl616.v's own comment: R L X A RT LT DN UP
    -- START SELECT Y B. Not wired to a real controller in this first cut -- tied
@@ -278,6 +425,15 @@ begin
    begin
       if rising_edge(clk_pce) then
          rom_loading_r <= rom_loading(0);
+
+         if reset_n = '0' then
+            core_resetn <= '0';
+         elsif rom_loading(0) = '1' and rom_loading_r = '0' then
+            core_resetn <= '0';
+         elsif rom_loading(0) = '0' and rom_loading_r = '1' then
+            core_resetn <= '1';
+         end if;
+
          if rom_loading(0) = '1' and rom_loading_r = '0' then
             rom_wr_addr <= (others => '0');
          elsif rom_do_valid = '1' then
@@ -286,18 +442,182 @@ begin
       end if;
    end process;
 
-   rom_mem: entity work.dpram
-   generic map (addr_width => ROM_ABITS, data_width => 8)
-   port map (
-      clock    => clk_pce,
-      address_a => rom_a(ROM_ABITS-1 downto 0),
-      data_a    => (others => '0'),
-      wren_a    => '0',
-      q_a       => rom_do_core,
+   -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read
+   -- bridge (gameplay fetch) owns it otherwise. Mutually exclusive because the core is
+   -- held in core_resetn's reset for the whole load, so ROM_RD cannot fire during it.
+   romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
+   romb_req  <= wr_req  when rom_loading_r = '1' else rd_req;
+   romb_we   <= '1'     when rom_loading_r = '1' else '0';
+   romb_di   <= wr_data;
 
-      address_b => std_logic_vector(rom_wr_addr),
-      data_b    => rom_do,
-      wren_b    => rom_do_valid
+   -- ROM write bridge: one iosys_bl616 byte becomes one real SDRAM write via port B.
+   -- Same pattern as pcetang_console60k.vhd's ROM write bridge.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case wr_state is
+            when RB_IDLE =>
+               if rom_do_valid = '1' then
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_data <= rom_do;
+                  wr_req  <= not wr_req;
+                  wr_settle_cnt <= (others => '0');
+                  wr_state <= RB_SETTLE;
+               end if;
+
+            when RB_SETTLE =>
+               if wr_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     wr_state <= RB_WAIT;
+                  else
+                     wr_state <= RB_IDLE;
+                  end if;
+               else
+                  wr_settle_cnt <= wr_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  wr_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   -- ROM read bridge: one pce_top ROM_RD per CPU cart-ROM byte access becomes one real
+   -- SDRAM read via port B. Same pattern as pcetang_console60k.vhd's ROM read bridge.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case rd_state is
+            when RB_IDLE =>
+               rom_rdy_i <= '1';
+               if rom_rd_i = '1' then
+                  rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                  rom_rdy_i <= '0';
+                  rd_req <= not rd_req;
+                  rd_settle_cnt <= (others => '0');
+                  rd_state <= RB_SETTLE;
+               end if;
+
+            when RB_SETTLE =>
+               if rd_settle_cnt = "100" then
+                  if romb_wait = '1' then
+                     rd_state <= RB_WAIT;
+                  else
+                     rom_do_i <= romb_do;
+                     rom_rdy_i <= '1';
+                     rd_state <= RB_IDLE;
+                  end if;
+               else
+                  rd_settle_cnt <= rd_settle_cnt + 1;
+               end if;
+
+            when RB_WAIT =>
+               if romb_wait = '0' then
+                  rom_do_i <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state <= RB_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   -- CD-RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw, level-held for the duration of
+   -- a real CPU access) becomes a real SDRAM access via port C. Edge-detected
+   -- (cdram_rd_r/cdram_wr_r) so the level staying high through this bridge's own wait
+   -- doesn't re-trigger a second transaction. Same shape as pcetang_primer25k_cd.vhd's
+   -- CD-RAM arm of its cdr_state machine, minus the ADPCM-sharing owner logic (this
+   -- board's ADPCM stays on-chip, see the signal block above).
+   process (clk_pce)
+      variable cd_new : std_logic;
+   begin
+      if rising_edge(clk_pce) then
+         cdram_rd_r <= cd_ram_rd;
+         cdram_wr_r <= cd_ram_wr;
+
+         cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         if cd_new = '1' then
+            cd_ram_rdy_i <= '0';
+         end if;
+
+         case cdr_state is
+            when CDR_IDLE =>
+               cdr_req <= '0';
+               if cd_new = '1' then
+                  cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
+                              resize(unsigned(cd_ram_a(17 downto 0)), 21));
+                  cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write
+                  cdr_di   <= cd_ram_do;
+                  cdr_req  <= '1';
+                  cdr_settle_cnt <= (others => '0');
+                  cdr_state <= CDR_SETTLE;
+               end if;
+
+            when CDR_SETTLE =>
+               cdr_req <= '1';
+               if cdr_settle_cnt = "100" then
+                  if cdr_wait = '1' then
+                     cdr_state <= CDR_HOLD;
+                  else
+                     cd_ram_di_i  <= cdr_do;
+                     cd_ram_rdy_i <= '1';
+                     cdr_req <= '0';
+                     cdr_state <= CDR_IDLE;
+                  end if;
+               else
+                  cdr_settle_cnt <= cdr_settle_cnt + 1;
+               end if;
+
+            when CDR_HOLD =>
+               cdr_req <= '1';
+               if cdr_wait = '0' then
+                  cd_ram_di_i  <= cdr_do;
+                  cd_ram_rdy_i <= '1';
+                  cdr_req <= '0';
+                  cdr_state <= CDR_IDLE;
+               end if;
+         end case;
+      end if;
+   end process;
+
+   sdram_inst: sdram
+   port map (
+      clk        => clk_sdram,
+      init       => sdram_init,
+      SDRAM_A    => O_sdram_addr,
+      SDRAM_DQ   => IO_sdram_dq,
+      SDRAM_BA   => O_sdram_ba,
+      SDRAM_DQML => O_sdram_dqm(0),
+      SDRAM_DQMH => O_sdram_dqm(1),
+      SDRAM_nWE  => O_sdram_wen_n,
+      SDRAM_nCAS => O_sdram_cas_n,
+      SDRAM_nRAS => O_sdram_ras_n,
+      SDRAM_nCS  => O_sdram_cs_n,
+      SDRAM_CKE  => O_sdram_cke,
+      SDRAM_CLK  => O_sdram_clk,
+      -- No VRAM0 on SDRAM on this board (EXT_VRAM0=>0, stays on-chip).
+      RAM_A_ADDR => (others => '0'),
+      RAM_A_REQ  => '0',
+      RAM_A_RD_n => '1',
+      RAM_A_DI   => (others => '0'),
+      RAM_A_DO   => open,
+      RAM_A_WAIT => open,
+      RAM_A_LINE_REFILL => '0',
+      RAM_A_LINE_DO     => open,
+      RAM_B_ADDR => romb_addr,
+      RAM_B_REQ  => romb_req,
+      RAM_B_WE   => romb_we,
+      RAM_B_DI   => romb_di,
+      RAM_B_DO   => romb_do,
+      RAM_B_WAIT => romb_wait,
+      RAM_C_ADDR => cdr_addr,
+      RAM_C_REQ  => cdr_req,
+      RAM_C_RD_n => cdr_rd_n,
+      RAM_C_DI   => cdr_di,
+      RAM_C_DO   => cdr_do,
+      RAM_C_WAIT => cdr_wait
    );
 
    backup_ram: entity work.spram
@@ -319,8 +639,8 @@ begin
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
-      RESET      => not reset_n,
-      COLD_RESET => not reset_n,
+      RESET      => not core_resetn,
+      COLD_RESET => not core_resetn,
       CLK        => clk_pce,
 
       VRAM0_RAM_A_ADDR => open, VRAM0_RAM_A_REQ => open, VRAM0_RAM_A_RD_N => open,
@@ -329,11 +649,11 @@ begin
       DBG_DEADLINE_MISS => open, DBG_FIFO_OVERFLOW => open,
       VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
 
-      ROM_RD    => open,
-      ROM_RDY   => '1',            -- no wait-state support in this first cut
+      ROM_RD    => rom_rd_i,
+      ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
-      ROM_DO    => rom_do_core,
-      ROM_SZ    => x"008",         -- placeholder, same as NECTang's own bring-ups
+      ROM_DO    => rom_do_i,
+      ROM_SZ    => x"040",         -- 256K real syscard decode, see ROM_SDRAM_BASE above
       ROM_POP   => '0',
       ROM_CLKEN => open,
 
@@ -345,8 +665,9 @@ begin
 
       JOY_OUT => joy_out, JOY_IN => joy_in,
 
-      CD_EN => '0', CD_RAM_A => open, CD_RAM_DO => open,
-      CD_RAM_DI => (others => '0'), CD_RAM_RD => open, CD_RAM_WR => open,
+      CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
+      CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
+      CD_RAM_RDY => cd_ram_rdy_i,
 
       ADPCM_RAM_A => adpcm_ram_a, ADPCM_RAM_DO => adpcm_ram_do,
       ADPCM_RAM_WE => adpcm_ram_we, ADPCM_RAM_REQ => open,
