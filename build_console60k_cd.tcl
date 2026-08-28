@@ -28,6 +28,7 @@ add_file src/pce/tg16-mister-rtl/huc6260.vhd
 add_file src/pce/tg16-mister-rtl/huc6202.vhd
 add_file src/pce/tg16-mister-rtl/CEGen.vhd
 add_file src/pce/common/core/arcade.sv
+add_file src/pce/common/core/cheatcodes.sv
 add_file src/pce/common/core/huc6270.vhd
 add_file src/pce/tg16-mister-rtl/cd/MSM5205.vhd
 add_file src/pce/tg16-mister-rtl/cd/SCSI.vhd

@@ -1,8 +1,21 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 
--- pcetang Phase 2: Tang Console 60K, CD/SCSI/ADPCM elaborated (NO_CD=>0), sibling to
--- pcetang_console60k.vhd's Phase 1 (no-CD) build -- same split pattern NECTang itself
--- uses for feature-combo variants (e.g. primer25k_core_test vs primer25k_sgx_core_test).
+-- pcetang Phase 2: Tang Console 60K, the combined target -- PCE + PCE-CD + SGX all
+-- elaborated together (NO_CD=>0, LITE=>0, SGX=>'1'), not a separate SGX variant file.
+-- Sibling to pcetang_console60k.vhd's Phase 1 (HuCard-only, no CD, no SGX) build.
+--
+-- SGX (2026-08-29): LITE flipped 1->0 and SGX flipped '0'->'1' for real, permanently --
+-- this board's target config is PCE+PCE-CD+SGX combined, per direct instruction, not a
+-- separate SGX variant. Needed a real Gowin BSRAM cross-instance-merge bug fixed first
+-- (huc6270.vhd's BG_COLOR/SPR_COLOR, commit 2f7ccdc, gated on a new SGX_BUILD generic
+-- so boards without a second VDC instance are unaffected -- see that commit and session
+-- memory for the full investigation, including a reverted first attempt that regressed
+-- Nano 20K). Real gw_sh, confirmed: 0 setup/hold violations, BSRAM 113/118 (96%),
+-- clk_pce 42.920/42.857 MHz (+0.15%), clk_sdram 120.273/120 MHz (+0.23%) -- fits, but
+-- razor-thin on both clocks and BSRAM, essentially zero headroom for future growth on
+-- this board. LITE=0 also elaborates the cheat-code engine (GAMEGENIE/CODES,
+-- build_console60k_cd.tcl now includes cheatcodes.sv) -- stays dead-code-swept since
+-- GG_EN='0', costs nothing in the measurement above.
 --
 -- VIDEO PATH: pce2hdmi_sd.sv (line-doubling scandoubler), NOT pce2hdmi.sv (full-frame
 -- capture) -- a full-frame buffer at this board's ~19-33 real measured BSRAM block cost
@@ -779,7 +792,7 @@ begin
    );
 
    core: entity work.pce_top
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
+   generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
@@ -803,7 +816,7 @@ begin
 
       GG_EN => '0', GG_CODE => (others => '0'), GG_RESET => '0', GG_AVAIL => open,
 
-      SP64 => '0', SGX => '0',
+      SP64 => '0', SGX => '1',
 
       JOY_OUT => joy_out, JOY_IN => joy_in,
 
