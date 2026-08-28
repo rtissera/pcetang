@@ -195,13 +195,22 @@
 -- `ram_a_line_do`, see that controller's own "line refill" header note), not just the
 -- one missed word. sdram32.sv (Nano 20K) was NOT given this mechanism this session, so
 -- this file must keep working, byte-for-byte, against sdram32.sv unchanged when
--- G_LINE_REFILL is left at its default -- closing the real, measured VRAM0 deadline gap
--- for the BAT stream specifically (75.4% of consecutive BAT fetches land in the SAME
--- cache line within a scanline, real GHDL-measured, see
+-- G_LINE_REFILL is left at its default.
+--
+-- CORRECTION (2026-08-28, real GHDL dbg_deadline_miss measurement, see
+-- scratchpad/deadline_miss_rate_measurement.md): this does NOT close the per-access
+-- deadline. cache_ctrl's own give-up logic ends every outstanding refill at exactly
+-- dwell-1 cycles regardless of refill speed, so a genuine miss misses its deadline
+-- whether it's a single-word legacy refill or this line refill -- measured 100% both
+-- ways at this project's tested dwell. What this mechanism actually buys is fewer
+-- misses triggered in the first place: 75.4% of consecutive BAT fetches land in the
+-- SAME cache line within a scanline (real GHDL-measured, see
 -- scratchpad/vram0_deadline_implementation_plans.md and
--- scratchpad/vram0_stride_measurement.md; CG0/CG1/sprites see ~0% within-scanline
--- reuse, so this doesn't fix THEIR deadline, but does cut their FUTURE miss rate ~4x by
--- populating all 4 rows of a tile/sprite plane at once instead of one).
+-- scratchpad/vram0_stride_measurement.md), so BAT's real measured miss rate drops
+-- 17.2%->5.44% (3.16x fewer). CG0/CG1/sprites see ~0% within-scanline reuse, so this
+-- doesn't reduce THIS scanline's misses for them, but does cut FUTURE-scanline miss
+-- rate by a real measured 1.6-2.0x (well under the ~4x this file originally projected
+-- below) by populating all 4 rows of a tile/sprite plane at once instead of one.
 --
 -- When G_LINE_REFILL, byte_seq (SEQ_IDLE's refill pick) always requests the LINE's own
 -- word0 (`refill_addr(14 downto 2) & "00"`), not the exact word that missed -- fixed

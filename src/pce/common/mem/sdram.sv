@@ -78,13 +78,20 @@
 // not bundled with any other fix, so its effect on clk_sdram's margin can be measured
 // in isolation.
 //
-// PCE PORT (2026-08-28): "line refill" -- 4-word VRAM0 cache-line refill for port A, to
-// close the real, measured VRAM0 deadline gap for the BAT stream specifically (see
+// PCE PORT (2026-08-28): "line refill" -- 4-word VRAM0 cache-line refill for port A.
+//
+// CORRECTION (2026-08-28, real GHDL dbg_deadline_miss measurement, see
+// scratchpad/deadline_miss_rate_measurement.md): this does NOT close the VRAM0
+// deadline gap -- deadline-miss rate is empirically saturated at the cache-miss rate
+// in BOTH single-word and line-refill configs (cache_ctrl's give-up logic ends every
+// outstanding refill at dwell-1 cycles regardless of refill speed). What this real,
+// measured mechanism buys is fewer misses triggered at all: BAT's real measured miss
+// rate drops 17.2%->5.44% (3.16x fewer, real GHDL-measured per-stream same-line
+// locality: 75.4% for BAT, ~0% for CG0/CG1/sprites within a scanline -- see
 // docs/ARCHITECTURE.md's VRAM0 deadline-gap section and
-// scratchpad/vram0_deadline_implementation_plans.md option (c) -- real GHDL-measured
-// per-stream same-line locality: 75.4% for BAT, ~0% for CG0/CG1/sprites within a
-// scanline; CG0/CG1 still benefit via fewer FUTURE misses, not this scanline's
-// deadline). `vram0_cache.vhd`'s own cache line is 4 words (`address(10:2)`); on a
+// scratchpad/vram0_deadline_implementation_plans.md option (c)). CG0/CG1 still
+// benefit via fewer FUTURE misses (1.6-2.0x measured), not this scanline's deadline.
+// `vram0_cache.vhd`'s own cache line is 4 words (`address(10:2)`); on a
 // genuine read-miss refill (never a write-drain), it now requests the WHOLE line's
 // base word (word 0) with a new `RAM_A_LINE_REFILL` flag held for the request, instead
 // of just the one missed word. This file answers with TWO back-to-back burst-of-2 READ
