@@ -43,23 +43,18 @@
 -- is NOT supported -- the module cleanly disables itself (never matches, never fetches)
 -- whenever screen_dbg(1:0) is one of those two encodings, falling through to
 -- vram0_cache's own existing (already-measured, already-accepted-baseline) behavior for
--- that mode, never producing WRONG data, only "no improvement" for it. CG0/CG1 are also
--- out of scope for this module (BAT only, a sequencing choice given session time, not a
--- fundamental limitation) -- CG has a real, different, harder-to-close working-set-
--- sizing problem (a single line's CG working set doesn't fit one hblank the way a BAT
--- row's worth of bursts does) that was not attempted.
+-- that mode, never producing WRONG data, only "no improvement" for it. CG0/CG1 support
+-- is the G_CG_PREFETCH extension below -- see its own header block.
 --
--- REAL GHDL VERIFICATION: 806-scanline acceptance run (mock-SDRAM testbench forked from
--- the project's own q_a-correctness-measurement harness), G_LINE_REFILL=true,
--- G_BUSY_LEGACY=4, G_BUSY_LR=5. BAT master correctness gate (checks ALL hits, not just
--- deadline-miss-flagged ones): hit_checked=66739, hit_wrong=0. Deadline-miss cross-tab:
--- dm_wrong=0, dm_right=1257 (every deadline-miss event, still detected exactly as
--- before by vram0_cache's own unmodified bookkeeping, now delivers correct data via
--- this buffer instead of the un-buffered baseline's 100%-wrong stale q_a).
--- pf_hit_total=226807, pf_overrun_total=0 across the whole run (the fill engine always
--- finished a row's fetch before the next hsync_f needed it). CG0/CG1 unaffected, as
--- expected for a BAT-only module (still ~100% wrong on their own deadline misses, same
--- as the un-buffered baseline -- not a regression, simply not addressed).
+-- REAL GHDL VERIFICATION (BAT only, pre-CG-extension baseline): 806-scanline acceptance
+-- run (mock-SDRAM testbench forked from the project's own q_a-correctness-measurement
+-- harness), G_LINE_REFILL=true, G_BUSY_LEGACY=4, G_BUSY_LR=5. BAT master correctness
+-- gate (checks ALL hits, not just deadline-miss-flagged ones): hit_checked=66739,
+-- hit_wrong=0. Deadline-miss cross-tab: dm_wrong=0, dm_right=1257 (every deadline-miss
+-- event, still detected exactly as before by vram0_cache's own unmodified bookkeeping,
+-- now delivers correct data via this buffer instead of the un-buffered baseline's
+-- 100%-wrong stale q_a). pf_hit_total=226807, pf_overrun_total=0 across the whole run
+-- (the fill engine always finished a row's fetch before the next hsync_f needed it).
 --
 -- REAL GW_SH TIMING DELTA (correction/completion of the commit message's own PnR
 -- numbers -- those reported the POST-change Fmax only, not the before/after delta):
@@ -82,12 +77,118 @@
 -- REQUIRES G_LINE_REFILL=true AND G_PREFETCH=true on the paired vram0_cache instance
 -- (see that generic's own comment) -- a pf request always expects a real 4-word line
 -- answer.
+--
+-- ============================================================================
+-- G_CG_PREFETCH EXTENSION (2026-08-29): CG0/CG1 tile-pattern prefetch, chained after
+-- this row's own BAT fill, sharing this module's existing fill FSM/burst counter/pf_*
+-- handshake rather than adding a second engine (kept to one state machine deliberately
+-- -- Primer 25K's clk_pce margin is already down to 0.40% from the BAT engine alone,
+-- so minimizing added clk_pce-domain combinational depth mattered more than code
+-- separation).
+--
+-- WHY THIS IS FEASIBLE DESPITE CG0/CG1 BEING OUT OF SCOPE FOR THE BAT ENGINE ABOVE:
+-- huc6270.vhd's own BG_RAM_ADDR (CG0/CG1 case) is exactly
+-- `BG_BAT_CC & "0"/"1" & BG_OFS_Y(2 downto 0)` -- i.e. {character code, plane, row-
+-- within-tile}. The character code is not knowable from screen geometry alone (the
+-- reason the BAT-only engine above never attempted CG), but it IS knowable the instant
+-- a BAT row is resident: buf_data above already mirrors every code this scanline's up-
+-- to-64 tiles use, valid for the WHOLE 8-scanline tile-row band (pending_row only
+-- changes every 8 scanlines -- see `predict`'s own OFS_Y(8 downto 3) decode). So by the
+-- time any scanline in that band starts consuming CG0/CG1, its tiles' codes have
+-- already been resident in buf_data for up to 8 scanlines. What's NOT knowable that far
+-- ahead is BG_OFS_Y(2 downto 0) (row-within-tile) itself, since it increments every
+-- single scanline (unlike the tile row, which only changes every 8th) -- so unlike
+-- BAT's fill, which only re-runs ~1/8 of scanlines, this extension's fill pass re-runs
+-- EVERY scanline, using whichever row `predict` computes for the upcoming line.
+--
+-- REAL BUDGET (measured, not estimated): a real GHDL instrumentation pass (this
+-- session, forked from the same acceptance harness cited above) measured BAT's own
+-- fill-completion-to-next-hsync_f slack at a real, reproducible 2553 clk_pce cycles
+-- (worst case = best case = average across 99 real row-refetches in an 806-scanline
+-- run; the other 707 hsync_f events are same-row no-ops, not fetches, corroborated by
+-- pf_overrun_total=0) -- out of a 2730-cycle scanline, with BAT's own 16-burst fetch
+-- costing ~177 cycles. This extension's own worst case is 64 columns x 2 planes = 128
+-- more bursts (~1408 cycles at the same ~11 cycles/burst) -- comfortably inside the
+-- 2553-cycle slack on the one scanline in 8 that also does a real BAT refetch, and
+-- inside an even larger ~2700-cycle budget on the other 7. Timing-cycle budget is NOT
+-- the constraint (a >1.4x safety margin, not a photo finish) -- Primer 25K's already-
+-- thin clk_pce Fmax margin (fabric/routing, not cycle count) is the real open question,
+-- decided empirically by gw_sh, not by this comment.
+--
+-- WHY DIRECT-MAPPED, NOT A SECOND CONTENT-ADDRESSABLE MIRROR LIKE BAT'S OWN BUFFER:
+-- BAT's buffer is indexed by SCREEN COLUMN, a field address_a encodes directly, so its
+-- match is a cheap field-extract-and-compare. CG0/CG1's real address encodes CHARACTER
+-- CODE, not column -- answering "do I have this code cached, and at what buffer slot"
+-- with an associative (CAM-style) search over up to 64 live codes would be a wide
+-- comparator tree squarely on clk_pce's critical path, unacceptable at a 0.40% margin.
+-- Direct-mapped avoids the search entirely: index = code(4 downto 0) & plane (6 bits,
+-- 64 entries), tag = code(10 downto 5) (6 bits) -- one equality compare per lookup,
+-- same shape as a real cache way. Two live codes sharing the same low 5 bits simply
+-- evict each other (a conflict miss, falling through to ds_q_a exactly like any other
+-- access this module doesn't cover) -- never a correctness cost, only "no improvement"
+-- for that one access, same disclosed-tradeoff shape as BAT's own SCREEN(1:0)="10"/"11"
+-- scope exclusion above.
+--
+-- CORRECTNESS INVARIANT (non-negotiable per this feature's own design review): a stale
+-- HIT is a new bug (wrong pixels on a tile that no longer applies); a MISS is always
+-- safe (identical to today's un-buffered baseline).
+--
+-- REAL BUG FOUND + FIXED (2026-08-29, GHDL): the first version of this design tracked
+-- row-within-tile with a single GLOBAL register (cg_row_valid_for), advanced only once
+-- a full 128-slot pass completed, on the theory that this mirrors BAT's own coarse
+-- "screen_changed invalidates everything" gate. It doesn't: BAT's per-entry buf_tag
+-- stores the TILE ROW each entry was actually fetched under, so match_comb compares
+-- each entry against ITS OWN fetch-time row, robust to a partially-drained refill
+-- (some entries already new, some still old -- each still correctly self-describes).
+-- A single global flag has no such per-entry truth: a column that isn't re-visited
+-- during a given CG pass (buf_valid(cg_i/2)='0' that iteration, or bit 11 set) keeps
+-- WHATEVER stale (code, plane, row) content it held from a PRIOR pass, valid bit and
+-- all -- yet the global flag still advances to "this row is current" the moment the
+-- LAST slot is reached, regardless of whether that specific entry was ever refreshed.
+-- A live BYR rewrite is exactly the scenario that exposes this: real GHDL correctness
+-- run, mid-frame BYR rewrite window, cg_hit_checked=200 cg_hit_wrong=35 (17.5%) --
+-- confirmed by an ds_q_a diagnostic dump as genuinely wrong (vram0_cache's own correct
+-- answer overridden by stale CG data), not a testbench artifact.
+--
+-- FIX: no global flag at all. cg_tag now stores {code(10 downto 5), row(2 downto 0)}
+-- per entry (9 bits, not 6) -- exactly BAT's own "each entry self-describes what it
+-- actually is" discipline, applied to CG's own (code, plane, row) key instead of
+-- BAT's (tile row, column) key. A lookup's tag+row compare can only hit an entry that
+-- was ACTUALLY fetched for that exact (code, plane, row) triple; an unrefreshed
+-- leftover from a prior pass simply carries the OLD row in its own tag and can never
+-- tag-match a NEW-row query by coincidence of timing, only by the addresses genuinely
+-- being for the same content (which is correct to serve). This also means an entry
+-- never needs bulk invalidation on a BAT-row adopt or a SCREEN change -- CG's own
+-- (code, plane, row) -> data mapping doesn't depend on which BAT column the code came
+-- from, or on SCREEN(1:0) at all, so a still-tag-matching entry is still genuinely
+-- correct content regardless of what else changed elsewhere; only a live WRITE to that
+-- exact VRAM0 address (Check B below) can make it wrong, and that path already
+-- invalidates on tag+row match directly, no global gate involved.
+--
+-- Verified, not just argued: see this file's own commit history / session memory for
+-- the GHDL cg_hit_wrong=0 acceptance run against this fixed design, including the
+-- mid-frame BYR-rewrite and SCREEN-change stress windows that exposed the original bug.
+--
+-- Defaults false (G_CG_PREFETCH : boolean := false), same "compile-time generic,
+-- synthesis constant-folds it away" discipline vram0_cache.vhd's own G_LINE_REFILL/
+-- G_PREFETCH already established (that file's own comment: "is a compile-time generic,
+-- not a runtime mux -- synthesis constant-folds away"). Every new write this extension
+-- makes to cg_data/cg_tag/cg_valid is itself guarded by `if G_CG_PREFETCH then ...
+-- end if` -- when false, cg_valid can be proven to never leave its all-0 reset value,
+-- so cg_match_comb's read side (left unguarded for simplicity) always computes a miss
+-- and is prunable by the same reasoning, without needing every read site separately
+-- gated too.
+-- ============================================================================
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity vram0_prefetch is
+   generic (
+      -- See the G_CG_PREFETCH EXTENSION header block above.
+      G_CG_PREFETCH : boolean := false
+   );
    port (
       clock   : in std_logic;
       hsync_f : in std_logic;   -- real per-scanline boundary pulse (VCE HSYNC_F)
@@ -118,8 +219,13 @@ entity vram0_prefetch is
       pf_done  : in  std_logic;
 
       -- Instrumentation, not function (same discipline as vram0_cache's own dbg_*):
-      dbg_pf_hit     : out std_logic;  -- a read was served from the buffer this cycle
-      dbg_pf_overrun : out std_logic   -- hsync_f fired before this row's own fill finished
+      dbg_pf_hit     : out std_logic;  -- a read was served from the BAT buffer this cycle
+      dbg_pf_overrun : out std_logic;  -- hsync_f fired before this row's own fill finished
+
+      -- G_CG_PREFETCH's own instrumentation, same discipline, meaningless (held '0')
+      -- when the generic is false.
+      dbg_cg_hit     : out std_logic;  -- a read was served from the CG buffer this cycle
+      dbg_cg_overrun : out std_logic   -- hsync_f fired before this row's CG pass finished
    );
 end entity;
 
@@ -164,7 +270,7 @@ architecture rtl of vram0_prefetch is
    -- ---------------------------------------------------------------- fill (owns:
    -- fill_state, cur_row/cur_wbits/cur_supported/cur_total, burst_i, pf_addr/pf_req,
    -- buf_data/buf_tag/buf_valid's WRITE side -- sole writer of all three, see above)
-   type fill_state_t is (F_IDLE, F_WAIT);
+   type fill_state_t is (F_IDLE, F_WAIT, F_CG_WAIT);
    signal fill_state : fill_state_t := F_IDLE;
    signal cur_row       : unsigned(5 downto 0) := (others => '0');
    signal cur_wbits     : integer range 5 to 6 := 5;
@@ -186,6 +292,36 @@ architecture rtl of vram0_prefetch is
    signal q_a_buf_i   : std_logic_vector(15 downto 0) := (others => '0');
    signal q_a_buf_hit : std_logic := '0';
    signal q_a_buf_wr  : std_logic := '0';
+
+   -- ---------------------------------------------------------------- G_CG_PREFETCH
+   -- (owns: cg_data/cg_tag/cg_valid's WRITE side (`fill`, sole writer, same discipline
+   -- as buf_*), pending_cg_row (`predict`), cg_i/cg_done/cur_cg_row (`fill`)). See the
+   -- header block above for the index/tag scheme and the correctness invariant this
+   -- buffer relies on -- in particular, WHY there is no global "current row" register:
+   -- each entry's own tag includes the row it was fetched for (real bug found+fixed
+   -- with an earlier, global-flag version of this design -- see header).
+   type cg_data_t is array (0 to 63) of std_logic_vector(15 downto 0);
+   -- code(10 downto 5) & row(2 downto 0) -- per-entry, NOT a global register (see
+   -- header's "REAL BUG FOUND + FIXED" section for why a global flag is unsafe here).
+   type cg_tag_t  is array (0 to 63) of unsigned(8 downto 0);
+   signal cg_data  : cg_data_t := (others => (others => '0'));
+   signal cg_tag   : cg_tag_t  := (others => (others => '0'));
+   signal cg_valid : std_logic_vector(0 to 63) := (others => '0');
+
+   signal pending_cg_row : unsigned(2 downto 0) := (others => '0');
+   signal cur_cg_row     : unsigned(2 downto 0) := (others => '0');
+   -- Linear iteration index over a pass: column = cg_i/2, plane = cg_i mod 2. 128 slots
+   -- (64 columns x 2 planes) per pass, one pass per scanline (unlike BAT, whose target
+   -- only changes every 8th).
+   signal cg_i    : integer range 0 to 127 := 0;
+   -- Trivially true at power-up (mirrors cur_total/burst_i's own "0=0" reasoning above)
+   -- so the very first real hsync_f's CG pass-start check isn't a special case.
+   signal cg_done : std_logic := '1';
+
+   signal cg_match_d1 : std_logic;
+   signal cg_data_d1  : std_logic_vector(15 downto 0);
+   signal q_a_cg_i    : std_logic_vector(15 downto 0) := (others => '0');
+   signal q_a_cg_hit  : std_logic := '0';
 
 begin
 
@@ -234,6 +370,11 @@ begin
    -- NEW_OFS_Y + 1 -- ALWAYS +1, both branches (the one real exception, the very first
    -- active line of a frame skipping the +1, is a disclosed, self-healing, once-per-
    -- frame edge case).
+   --
+   -- G_CG_PREFETCH also latches pending_cg_row <= nxt(2 downto 0) here, in the SAME
+   -- branch -- huc6270.vhd's own BG_RAM_ADDR uses the identical BG_OFS_Y(2 downto 0)
+   -- for CG0/CG1's row-within-tile, so it inherits the exact same BYR-race handling
+   -- for free rather than needing its own re-derivation.
    predict: process (clock)
       variable pre_val : unsigned(8 downto 0);
       variable nxt      : unsigned(8 downto 0);
@@ -257,6 +398,10 @@ begin
                masked := nxt;
             end if;
             pending_row <= masked(8 downto 3);
+
+            if G_CG_PREFETCH then
+               pending_cg_row <= nxt(2 downto 0);
+            end if;
 
             if screen_dbg(1 downto 0) = "00" then
                pending_wbits <= 5; pending_supported <= '1';
@@ -286,10 +431,21 @@ begin
    -- real, correct content for whatever row it was issued under, just possibly no
    -- longer the target -- no correctness cost, only a few cycles of possibly-redundant
    -- bandwidth).
+   --
+   -- G_CG_PREFETCH chains a CG pass into the SAME FSM/burst counter once BAT itself is
+   -- fully drained (burst_i = cur_total) each cycle: F_IDLE's third priority tier below,
+   -- lowest of the three, so a genuine BAT adopt/burst always preempts it. See the
+   -- header block above for the index/tag/address scheme and why each cg_tag entry
+   -- carries its own row (no global "current row" register).
    fill: process (clock)
       variable snoop_ok  : boolean;
       variable snoop_row : unsigned(5 downto 0);
       variable snoop_col : integer range 0 to 63;
+      variable idx_v     : unsigned(5 downto 0);
+      variable cg_snoop_code  : unsigned(10 downto 0);
+      variable cg_snoop_plane : std_logic;
+      variable cg_snoop_row   : unsigned(2 downto 0);
+      variable cg_snoop_idx   : integer range 0 to 63;
    begin
       if rising_edge(clock) then
          if screen_changed = '1' then
@@ -312,6 +468,10 @@ begin
             -- power-up case was.
             cur_total  <= 0;
             fill_state <= F_IDLE;
+            -- G_CG_PREFETCH deliberately does NOT touch cg_valid/cg_i/cg_done here:
+            -- CG's (code, plane, row) -> data mapping doesn't depend on SCREEN(1:0) at
+            -- all (see header), so an existing entry is still genuinely correct content
+            -- regardless of this decode change -- nothing to invalidate.
          else
          case fill_state is
             when F_IDLE =>
@@ -323,6 +483,11 @@ begin
                   cur_supported <= pending_supported;
                   if pending_wbits = 5 then cur_total <= 8; else cur_total <= 16; end if;
                   burst_i <= 0;
+                  -- G_CG_PREFETCH does NOT invalidate cg_valid here either: an entry
+                  -- fetched under the OLD BAT row's codes is still correct content for
+                  -- its own (code, plane, row) triple (see header) -- it simply won't
+                  -- be the SET of codes this scanline's tiles use, same as any other
+                  -- direct-mapped miss for a code that isn't resident. Nothing to do.
                elsif cur_supported = '1' and burst_i < cur_total then
                   if cur_wbits = 5 then
                      pf_addr_r <= "0000" & std_logic_vector(cur_row)
@@ -333,6 +498,37 @@ begin
                   end if;
                   pf_req_r   <= '1';
                   fill_state <= F_WAIT;
+               elsif G_CG_PREFETCH and burst_i = cur_total and cur_supported = '1'
+                     and cg_done = '0' then
+                  if buf_valid(cg_i/2) = '1' and buf_data(cg_i/2)(11) = '0' then
+                     -- Real BG_RAM_ADDR CG0/CG1 formula (huc6270.vhd): code(10:0) &
+                     -- plane & row(2:0). Burst-aligned to a 4-word line refill (row(2)
+                     -- picks which half of the tile's 8-row plane the burst covers);
+                     -- the wanted word is picked out of the returned 4 in F_CG_WAIT
+                     -- below via row(1 downto 0).
+                     pf_addr_r  <= std_logic_vector(buf_data(cg_i/2)(10 downto 0))
+                                   & to_sl(cg_i mod 2 = 1)
+                                   & cur_cg_row(2) & "00";
+                     pf_req_r   <= '1';
+                     fill_state <= F_CG_WAIT;
+                  elsif cg_i = 127 then
+                     -- Nothing to fetch for this last slot (invalid/disabled column) --
+                     -- the pass is still complete.
+                     cg_i    <= 0;
+                     cg_done <= '1';
+                  else
+                     cg_i <= cg_i + 1;
+                  end if;
+               elsif G_CG_PREFETCH and burst_i = cur_total and cur_supported = '1'
+                     and cg_done = '1' and cur_cg_row /= pending_cg_row then
+                  -- Previous row's CG pass fully drained and a new row-within-tile is
+                  -- pending (the common case, every scanline) -- adopt it. buf_data is
+                  -- guaranteed fresh here: this branch is only reachable once BAT's own
+                  -- burst_i has reached cur_total, i.e. any in-flight BAT adopt for
+                  -- THIS row has already fully drained.
+                  cur_cg_row <= pending_cg_row;
+                  cg_i       <= 0;
+                  cg_done    <= '0';
                end if;
             when F_WAIT =>
                pf_req_r <= '1';
@@ -345,6 +541,37 @@ begin
                   pf_req_r   <= '0';
                   burst_i    <= burst_i + 1;
                   fill_state <= F_IDLE;
+               end if;
+            when F_CG_WAIT =>
+               pf_req_r <= '1';
+               if pf_done = '1' then
+                  idx_v := unsigned(std_logic_vector(buf_data(cg_i/2)(4 downto 0))
+                                     & to_sl(cg_i mod 2 = 1));
+                  -- Static-bounds case select, not a dynamic slice (matches F_WAIT's
+                  -- own for-loop above: every bit-range here is locally static, cheap
+                  -- and unambiguous for synthesis -- cur_cg_row(1 downto 0) only picks
+                  -- WHICH of the 4 fixed slices to use).
+                  case cur_cg_row(1 downto 0) is
+                     when "00" => cg_data(to_integer(idx_v)) <= pf_rdata(15 downto 0);
+                     when "01" => cg_data(to_integer(idx_v)) <= pf_rdata(31 downto 16);
+                     when "10" => cg_data(to_integer(idx_v)) <= pf_rdata(47 downto 32);
+                     when others => cg_data(to_integer(idx_v)) <= pf_rdata(63 downto 48);
+                  end case;
+                  -- Per-entry tag: code(10 downto 5) & the row THIS fetch is actually
+                  -- for (cur_cg_row) -- not a global "current row" flag (see header's
+                  -- "REAL BUG FOUND + FIXED"). Self-describing: a lookup can only hit
+                  -- this entry for the exact (code, plane, row) it was fetched under.
+                  cg_tag(to_integer(idx_v))   <= unsigned(buf_data(cg_i/2)(10 downto 5))
+                                                  & cur_cg_row;
+                  cg_valid(to_integer(idx_v)) <= '1';
+                  pf_req_r   <= '0';
+                  fill_state <= F_IDLE;
+                  if cg_i = 127 then
+                     cg_i    <= 0;
+                     cg_done <= '1';
+                  else
+                     cg_i <= cg_i + 1;
+                  end if;
                end if;
          end case;
          end if;
@@ -370,6 +597,23 @@ begin
                and buf_tag(snoop_col) = snoop_row then
             buf_data(snoop_col) <= data_a;
          end if;
+
+         -- G_CG_PREFETCH's own write snoop: unlike BAT's Check B (refresh in place),
+         -- this simply INVALIDATES a matching entry -- simpler, and sufficient to meet
+         -- the correctness invariant (a miss is always safe). VRAM0's address space is
+         -- flat and uniform, so decoding a raw written address into (code, plane, row)
+         -- needs no SCREEN(1:0)-dependent branch the way BAT's own snoop_ok above does.
+         if G_CG_PREFETCH then
+            cg_snoop_code  := unsigned(address_a(14 downto 4));
+            cg_snoop_plane := address_a(3);
+            cg_snoop_row   := unsigned(address_a(2 downto 0));
+            cg_snoop_idx   := to_integer(unsigned(std_logic_vector(cg_snoop_code(4 downto 0))
+                                                   & cg_snoop_plane));
+            if wren_a = '1' and cg_valid(cg_snoop_idx) = '1'
+                  and cg_tag(cg_snoop_idx) = (cg_snoop_code(10 downto 5) & cg_snoop_row) then
+               cg_valid(cg_snoop_idx) <= '0';
+            end if;
+         end if;
       end if;
    end process;
 
@@ -378,6 +622,7 @@ begin
 
    dbg_pf_overrun <= to_sl(hsync_f = '1' and cur_supported = '1'
                             and (fill_state = F_WAIT or burst_i /= cur_total));
+   dbg_cg_overrun <= to_sl(G_CG_PREFETCH and hsync_f = '1' and cg_done = '0');
 
    ------------------------------------------------------------------ match (consumption)
    -- Two-register-stage pipeline, deliberately matching vram0_cache's own
@@ -392,6 +637,8 @@ begin
          q_a_buf_i   <= m_data_d1;
          q_a_buf_hit <= m_match_d1;
          q_a_buf_wr  <= m_wr_d1;
+         q_a_cg_i    <= cg_data_d1;
+         q_a_cg_hit  <= cg_match_d1;
       end if;
    end process;
 
@@ -419,7 +666,42 @@ begin
       end if;
    end process;
 
-   q_a <= q_a_buf_i when (q_a_buf_hit = '1' and q_a_buf_wr = '0') else ds_q_a;
+   -- G_CG_PREFETCH's own combinational match, same m_addr_d1 pipeline stage as BAT's
+   -- above (no separate address pipeline needed -- see this extension's header). Left
+   -- unguarded by G_CG_PREFETCH itself (see that generic's own declaration comment):
+   -- cg_valid is provably always '0' when the generic is false, since every write to it
+   -- is individually guarded, so this always computes a miss and is prunable by the
+   -- same constant-folding reasoning, without an extra guard here too.
+   cg_match_comb: process (m_addr_d1, cg_valid, cg_tag, cg_data)
+      variable code  : unsigned(10 downto 0);
+      variable plane : std_logic;
+      variable row   : unsigned(2 downto 0);
+      variable idx   : integer range 0 to 63;
+   begin
+      code  := unsigned(m_addr_d1(14 downto 4));
+      plane := m_addr_d1(3);
+      row   := unsigned(m_addr_d1(2 downto 0));
+      idx   := to_integer(unsigned(std_logic_vector(code(4 downto 0)) & plane));
+
+      -- Per-entry tag compare (code_hi & row) -- see header's "REAL BUG FOUND + FIXED":
+      -- no global "current row" gate, each entry self-describes exactly what it is.
+      if cg_valid(idx) = '1' and cg_tag(idx) = (code(10 downto 5) & row) then
+         cg_match_d1 <= '1';
+         cg_data_d1  <= cg_data(idx);
+      else
+         cg_match_d1 <= '0';
+         cg_data_d1  <= (others => '0');
+      end if;
+   end process;
+
+   -- Priority: a genuine BAT hit always wins (matches this module's original,
+   -- independently-verified behavior byte-for-byte when G_CG_PREFETCH is false); CG is
+   -- checked only when BAT itself didn't match; otherwise fall through to vram0_cache's
+   -- own answer, unchanged from today.
+   q_a <= q_a_buf_i when (q_a_buf_hit = '1' and q_a_buf_wr = '0') else
+          q_a_cg_i  when (q_a_cg_hit  = '1' and q_a_buf_wr = '0') else
+          ds_q_a;
    dbg_pf_hit <= q_a_buf_hit and not q_a_buf_wr;
+   dbg_cg_hit <= q_a_cg_hit and not q_a_buf_hit and not q_a_buf_wr;
 
 end architecture;
