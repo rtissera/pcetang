@@ -146,16 +146,23 @@ architecture rtl of pcetang_nano20k is
       );
    end component;
 
-   component pce2hdmi is
+   -- PCE PORT (2026-08-29): pce2hdmi (on-chip-BRAM capture framebuffer scandoubler)
+   -- swapped for pce2hdmi_sd (2-line ping-pong scandoubler, no capture framebuffer) --
+   -- wired exactly as the already-hardware-proven pcetang_primer25k_cd.vhd/
+   -- pcetang_primer25k.vhd wire it. This board's plain build was already generating
+   -- VIDEOID=>2/CLKFRQ=>27000/SCREEN_WIDTH=>720/SCREEN_HEIGHT=>480 (see the old generic
+   -- map this replaces) -- i.e. already 480p60, same clk_27/clk_135 pair pce2hdmi_sd.sv
+   -- needs -- so this is a real zero-clock-change swap here (confirmed from
+   -- nano20k_pll.vhd: clk_sdram and HDMI's clk_135 are the same net, GW2AR-18C's 2 PLLs
+   -- both already spent, no separate 720p pixel clock ever existed to move away from).
+   component pce2hdmi_sd is
       generic (
-         CAP_WIDTH     : integer := 256;
-         CAP_HEIGHT    : integer := 224;
-         VIDEOID       : integer := 4;
+         MAX_LINE_SAMPLES : integer := 540;
+         VIDEOID       : integer := 2;
          VIDEO_REFRESH : real    := 60.0;
-         CLKFRQ        : integer := 74250;
-         SCREEN_WIDTH  : integer := 1280;
-         SCREEN_HEIGHT : integer := 720;
-         WINDOW_WIDTH  : integer := 960
+         CLKFRQ        : integer := 27000;
+         SCREEN_WIDTH  : integer := 720;
+         SCREEN_HEIGHT : integer := 480
       );
       port (
          clk    : in std_logic;
@@ -178,11 +185,7 @@ architecture rtl of pcetang_nano20k is
          clk_pixel    : in std_logic;
          clk_5x_pixel : in std_logic;
 
-         psg_sl  : in std_logic_vector(15 downto 0);
-         psg_sr  : in std_logic_vector(15 downto 0);
-         cdda_sl : in std_logic_vector(15 downto 0);
-         cdda_sr : in std_logic_vector(15 downto 0);
-         adpcm_s : in std_logic_vector(15 downto 0);
+         psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : in std_logic_vector(15 downto 0);
 
          tmds_clk_n : out std_logic;
          tmds_clk_p : out std_logic;
@@ -432,15 +435,10 @@ begin
 
    -- VIDEO_ID_CODE=2: CEA-861 720x480p, NTSC-region 60 Hz -- matches PCE's native
    -- refresh, see this file's header for why 17/18 (PAL 50 Hz) was wrong despite reusing
-   -- the same 27 MHz-class clock. CAP_WIDTH/HEIGHT kept at Console 60K's proven 256x224
-   -- (this board's BSRAM budget wasn't the blocker Primer 25K's was -- real gw_sh will
-   -- confirm, not assumed).
-   hdmi_out: pce2hdmi
-   generic map (
-      CAP_WIDTH => 256, CAP_HEIGHT => 224,
-      VIDEOID => 2, VIDEO_REFRESH => 60.0, CLKFRQ => 27000,
-      SCREEN_WIDTH => 720, SCREEN_HEIGHT => 480, WINDOW_WIDTH => 720
-   )
+   -- the same 27 MHz-class clock. Same resolution/refresh this board already ran before
+   -- the pce2hdmi->pce2hdmi_sd swap (see component declaration's own comment) -- only
+   -- the video pipeline itself changed, not the output mode.
+   hdmi_out: pce2hdmi_sd
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,
