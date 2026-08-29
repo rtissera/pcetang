@@ -40,14 +40,25 @@
 //  "PCE PORT" at the site:
 //    - Port A carries VRAM0 here (needs writes and real wait-state feedback -- the VDC has
 //      no tolerance for a late response, see NECTang's docs/PORTING.md's "Nano 20K external memory"
-//      design consult). Port B carries cartridge ROM (read-only, already latency-tolerant
-//      via pce_top.vhd's existing ROM_RDY -> WAIT_N path). Arbitration priority swapped so
-//      A (VRAM, zero tolerance) beats B (ROM, tolerant) -- the ZX Next original gave B
-//      priority because ITS port B was the latency-sensitive one (Layer 2 video fetch);
-//      that reasoning still applies here, just to the other port.
+//      design consult). Port B carries cartridge ROM -- read side is latency-tolerant via
+//      pce_top.vhd's existing ROM_RDY -> WAIT_N path; write side (added 2026-08-30, see
+//      RAM_B_WE/RAM_B_DI) is the board-level ROM-load bridge writing a HuCard dump in at
+//      boot, also tolerant (iosys_bl616's own rom_do_valid handshake already waits).
+//      Arbitration priority swapped so A (VRAM, zero tolerance) beats B (ROM, tolerant) --
+//      the ZX Next original gave B priority because ITS port B was the latency-sensitive
+//      one (Layer 2 video fetch); that reasoning still applies here, just to the other port.
 //    - Added RAM_B_WAIT (the original has no completion signal on port B at all -- callers
 //      there implicitly assumed a fixed latency). The board-level adapter that turns
 //      RAM_B_WAIT into pce_top.vhd's ROM_RDY needs a real one now that B can genuinely miss.
+//    - Added RAM_B_WE/RAM_B_DI (2026-08-30): port B was read-only until now (ROM lived
+//      on-chip). Real HuCard ROMs are >=128K -- too big for on-chip BRAM once the rest of
+//      pce_top is already fitted -- so ROM moves to this chip's own SDRAM instead, same
+//      pattern as sdram.sv's port B on the GW5A boards (pcetang_primer25k.vhd's ROM
+//      bridge is the reference this was copied from). No address widening needed: this
+//      board's whole chip is 2 MB (see the address-map note above), VRAM0 (port A) uses
+//      well under 128K of it (real PC Engine VRAM is 64K), so ROM fits in the SAME 2 MB at
+//      a different offset -- unlike the GW5A boards' CD-RAM/ADPCM/Arcade-Card widening,
+//      this stays inside the existing 21-bit address bus entirely.
 //
 //  Part of the PC Engine / SGX / TG16 port to Sipeed Tang boards. GPLv3.
 //
@@ -152,6 +163,15 @@ module sdram32
 
 	input      [20:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
+	// PCE PORT (2026-08-30): port B write support, for the ROM-load bridge -- this
+	// board's on-package chip is only 2 MB total, of which VRAM0 (port A) uses well
+	// under 128K (real PC Engine VRAM is 64K), so ROM lives in the SAME 2 MB at a
+	// different offset (ROM_SDRAM_BASE in pcetang_nano20k.vhd), same pattern as
+	// sdram.sv's port B on the GW5A boards -- no address widening needed here, this
+	// stays inside the existing 21-bit/2MB space. Active-high (not RD_n like port A --
+	// port B never needed a read/write distinction before this).
+	input             RAM_B_WE,
+	input      [7:0]  RAM_B_DI,
 	output reg  [7:0] RAM_B_DO,
 	output reg        RAM_B_WAIT      // PCE PORT: absent in the ZX Next original, see header
 );
@@ -308,6 +328,10 @@ end
 reg [20:0] a_addr_d, b_addr_d;
 reg        a_req_d, a_rd_n_d, b_req_d;
 reg [15:0] a_di_d;
+// PCE PORT (2026-08-30): port B write's own pipeline registers, same treatment as
+// b_addr_d/b_req_d above.
+reg        b_we_d;
+reg  [7:0] b_di_d;
 // PCE PORT (2026-08-28): line-refill's own pipeline register, same treatment as
 // a_addr_d/a_rd_n_d/a_di_d above and for the same reason -- see RAM_A_LINE_REFILL's own
 // port comment.
@@ -321,13 +345,18 @@ always @(posedge clk) begin
 	line_refill_d <= RAM_A_LINE_REFILL;
 	b_addr_d <= RAM_B_ADDR;
 	b_req_d  <= RAM_B_REQ;
+	b_we_d   <= RAM_B_WE;
+	b_di_d   <= RAM_B_DI;
 
 	hit_a <= last_valid[0] && (last_a[0] == RAM_A_ADDR[20:2]);
 	hit_b <= last_valid[1] && (last_a[1] == RAM_B_ADDR[20:2]);
 end
 
 wire fetch_req = (a_rd_n_d || !hit_a);
-wire fetch_req_b = !hit_b;   // PCE PORT: B is read-only, no rd_n term needed
+// PCE PORT (2026-08-30): a write must never take the free-hit path below (it would
+// skip the real SDRAM access and cache the wrong thing) -- b_we_d gates it out here,
+// same role a_rd_n_d already plays for port A's fetch_req.
+wire fetch_req_b = (b_we_d || !hit_b);
 
 // PCE PORT (2026-08-28): line-refill's launch address, masked to the line's own base
 // word0 -- forces BOTH the word-select bit (RAM_A_ADDR[1], byte_a) and word_a's own LSB
@@ -365,14 +394,16 @@ always @(posedge clk) begin
 		RAM_A_WAIT <= 1;
 	end
 
-	if((old_b_req ^ b_req_d) && hit_b) begin
+	if((old_b_req ^ b_req_d) && !fetch_req_b) begin
 		old_b_req <= b_req_d;
 		RAM_B_DO <= last_data[1][(b_addr_d[1:0]*8) +:8];
 	end
-	// PCE PORT: miss branch, mirrors port A's RAM_A_WAIT<=1 above. old_b_req is left
-	// unchanged here (same as the original) so the mismatch persists as the pending-
-	// request flag the STATE_IDLE launch below checks; WAIT clears on completion.
-	else if((old_b_req ^ b_req_d) && !hit_b) begin
+	// PCE PORT: miss/write branch, mirrors port A's RAM_A_WAIT<=1 above. old_b_req is
+	// left unchanged here (same as the original) so the mismatch persists as the
+	// pending-request flag the STATE_IDLE launch below checks; WAIT clears on
+	// completion. fetch_req_b (2026-08-30) forces this branch, never the free-hit one
+	// above, whenever b_we_d is set -- see fetch_req_b's own comment.
+	else if((old_b_req ^ b_req_d) && fetch_req_b) begin
 		RAM_B_WAIT <= 1;
 	end
 
@@ -439,13 +470,25 @@ always @(posedge clk) begin
 			line_refill <= line_refill_d;
 			state     <= STATE_START;
 		end
-		else if((old_b_req ^ b_req_d) && !hit_b) begin
+		else if((old_b_req ^ b_req_d) && fetch_req_b) begin
 			old_b_req <= b_req_d;
 			word_a    <= b_addr_d[20:2];
 			byte_a    <= b_addr_d[1:0];
+			// PCE PORT (2026-08-30): write support -- we/data/dqm_w are the SAME shared
+			// registers port A's launch branch drives; safe to reuse since A and B
+			// launches are mutually exclusive (this whole chain is one else-if), exactly
+			// like ram_req/word_a/byte_a already are. Single-byte write: replicate across
+			// all 4 lanes (matches port A's 16-bit replication for the same reason -- only
+			// the DQM-selected lane(s) actually latch) and mask everything but byte_a's
+			// own lane.
+			we        <= b_we_d;
+			data      <= {4{b_di_d}};
+			dqm_w     <= ~(4'b0001 << b_addr_d[1:0]);
 			ram_req   <= 1;
 			last_a[1] <= b_addr_d[20:2];
-			last_valid[1] <= 1'b1;
+			// A write invalidates the line rather than patching it -- same reasoning as
+			// port A's last_valid[0] <= ~a_rd_n_d above.
+			last_valid[1] <= ~b_we_d;
 			ch1_busy  <= 1;
 			state     <= STATE_START;
 		end
@@ -475,8 +518,15 @@ always @(posedge clk) begin
 		if(ch1_busy) begin
 			ch1_busy     <= 0;
 			RAM_B_WAIT   <= 0;   // PCE PORT
-			RAM_B_DO     <= data_reg[(byte_a*8) +:8];
-			last_data[1] <= data_reg;
+			// PCE PORT (2026-08-30): write case mirrors port A's own `if(we) RAM_A_DO <=
+			// a_di_d` above -- data_reg holds whatever the DQ pins carried during a write
+			// (our own driven data, not meaningful to read back), so RAM_B_DO/last_data[1]
+			// must come from the input, not data_reg, when `we` is set.
+			if(we) RAM_B_DO <= b_di_d;
+			else begin
+				RAM_B_DO     <= data_reg[(byte_a*8) +:8];
+				last_data[1] <= data_reg;
+			end
 		end
 	end
 
