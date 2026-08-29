@@ -366,7 +366,14 @@ begin
    -- mechanism -- sdram32.sv now implements it (see that file's own "line refill" header
    -- note); wired to real signals below, mirroring pcetang_primer25k.vhd's own enablement
    -- of the sdram.sv version.
-   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1)
+   -- PCE PORT (2026-08-29): VRAM0_PREFETCH/VRAM0_CG_PREFETCH => 1, per direct
+   -- instruction, extending vram0_prefetch.vhd's BAT+CG0/CG1 engine (previously
+   -- Primer 25K only) to this board. First time either has been enabled here -- the
+   -- underlying RTL correctness (GHDL cg_hit_wrong=0) is board-agnostic, but this
+   -- board's own real Fmax/BSRAM fit was NOT previously measured with either on. See
+   -- this session's own build log for the real gw_sh result before trusting this.
+   generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1,
+                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1)
    port map (
       RESET      => not reset_n,
       COLD_RESET => not reset_n,

@@ -14,6 +14,7 @@ add_file src/pce/common/mem/cd_fifos.vhd
 add_file src/pce/common/mem/dpram9_dpb_wm01.vhd
 add_file src/pce/common/mem/dpram8x16_dpb_wm01.vhd
 add_file src/pce/common/mem/vram0_cache.vhd
+add_file src/pce/common/mem/vram0_prefetch.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_PKG.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/AddSubBCD.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_ALU.vhd
