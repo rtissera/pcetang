@@ -12,6 +12,12 @@ add_file src/pce/common/mem/cd_fifos.vhd
 add_file src/pce/common/mem/dpram9_dpb_wm01.vhd
 add_file src/pce/common/mem/dpram8x16_dpb_wm01.vhd
 add_file src/pce/common/mem/vram0_cache.vhd
+# PCE PORT (2026-08-29): was missing -- pcetang_primer25k_cd.vhd's generic map sets
+# VRAM0_PREFETCH=>1/VRAM0_CG_PREFETCH=>1 but this file never compiled vram0_prefetch.vhd,
+# so PREFETCH0 was silently black-boxed (EX4760, confirmed in a real gw_sh log --
+# see pcetang_status_matrix.md's Primer 25K CD BAT/CG finding). This build's own real
+# BAT+CG numbers have never actually been measured until this fix.
+add_file src/pce/common/mem/vram0_prefetch.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_PKG.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/AddSubBCD.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_ALU.vhd
