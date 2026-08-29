@@ -243,6 +243,14 @@ architecture rtl of pcetang_nano20k is
    signal joy_out : std_logic_vector(1 downto 0);
    signal joy_in  : std_logic_vector(3 downto 0);
 
+   -- PCE PORT (2026-08-29): real audio, was tied off (CDDA_SL/SR, ADPCM_S, PSG_SL/SR
+   -- all => open into pce_top, hdmi_out fed hardcoded zeros) since this file's very
+   -- first commit -- a real, long-standing bug found via this session's own NL0002
+   -- sweep (confirmed dead in the resource report: PSG had zero hits, fully swept).
+   -- Wired exactly as pcetang_primer25k.vhd already does (that board has real audio;
+   -- this one never got the equivalent wiring when it was added there).
+   signal psg_sl, psg_sr, cdda_sl, cdda_sr, adpcm_s : signed(15 downto 0);
+
    signal brm_a  : std_logic_vector(10 downto 0);
    signal brm_di : std_logic_vector(7 downto 0);
    signal brm_do : std_logic_vector(7 downto 0);
@@ -419,7 +427,7 @@ begin
       CD_DATA => (others => '0'), CD_DATA_WR => '0', CD_AUDIO_WR => '0',
       CD_SUBCD_WR => '0', CD_DATA_END => open, CD_DM => '0',
 
-      CDDA_SL => open, CDDA_SR => open, ADPCM_S => open, PSG_SL => open, PSG_SR => open,
+      CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
       BG_EN => '1', SPR_EN => '1', GRID_EN => (others => '0'), CPU_PAUSE_EN => '0',
 
@@ -447,9 +455,9 @@ begin
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
       clk_pixel => clk_27, clk_5x_pixel => clk_135,
-      psg_sl => (others => '0'), psg_sr => (others => '0'),
-      cdda_sl => (others => '0'), cdda_sr => (others => '0'),
-      adpcm_s => (others => '0'),
+      psg_sl => std_logic_vector(psg_sl), psg_sr => std_logic_vector(psg_sr),
+      cdda_sl => std_logic_vector(cdda_sl), cdda_sr => std_logic_vector(cdda_sr),
+      adpcm_s => std_logic_vector(adpcm_s),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
       tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
    );
