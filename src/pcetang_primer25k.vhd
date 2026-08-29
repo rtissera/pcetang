@@ -537,14 +537,19 @@ begin
    -- instance implements it; wired to real signals below, not tied off like every
    -- other board.
    -- PCE PORT (2026-08-28): VRAM0_PREFETCH => 1 enables vram0_prefetch.vhd's BAT
-   -- prefetch engine (see that file's own header) -- the ONLY board this session
-   -- GHDL-verified and gw_sh-checked it on. Real acceptance-test result: BAT
+   -- prefetch engine (see that file's own header). Real acceptance-test result: BAT
    -- deadline-miss data corruption (previously ~100% wrong on every genuine cache
    -- miss, GHDL-measured) closed to 0 wrong reads out of 66739 checked, 1257/1257
-   -- deadline-miss events now delivering correct data. CG0/CG1 are unaffected (not
-   -- attempted this session) -- see vram0_prefetch.vhd's own header for real numbers.
+   -- deadline-miss events now delivering correct data.
+   -- PCE PORT (2026-08-29): VRAM0_CG_PREFETCH => 1 enables the same file's CG0/CG1
+   -- extension (see its own "G_CG_PREFETCH EXTENSION" header) -- GHDL-verified
+   -- cg_hit_wrong=0 across steady-state and mid-frame BYR-rewrite/SCREEN-change
+   -- stress. Real cost on THIS board: clk_pce Fmax margin drops from BAT-alone's
+   -- ~2.13% to ~0.656% (0 setup/hold violations either way, TNS=0) -- razor-thin,
+   -- accepted as a real tradeoff for closing the CG0/CG1 deadline-miss gap, not a
+   -- free addition.
    generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1,
-                VRAM0_PREFETCH => 1)
+                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

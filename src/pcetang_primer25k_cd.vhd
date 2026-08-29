@@ -840,9 +840,14 @@ begin
       clock => clk_pce, address => brm_a, data => brm_di, wren => brm_we, q => brm_do
    );
 
+   -- PCE PORT (2026-08-29): VRAM0_CG_PREFETCH => 1, same as Primer 25K plain -- see
+   -- pcetang_primer25k.vhd's own comment and vram0_prefetch.vhd's header for the
+   -- design/verification. Not yet gw_sh-measured on THIS board specifically before
+   -- this port (CD's SCSI/ADPCM/CD-RAM SDRAM port-C traffic differs from plain's) --
+   -- see this session's own build log for the real result.
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, VRAM0_LINE_REFILL => 1,
-                VRAM0_PREFETCH => 1)
+                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1)
    port map (
       RESET      => not reset_n,
       COLD_RESET => not reset_n,

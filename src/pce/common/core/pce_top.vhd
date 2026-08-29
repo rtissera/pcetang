@@ -59,7 +59,20 @@ entity pce_top is
 		-- generic to that one would have silently turned the (unverified-there)
 		-- prefetch engine on for Nano 20K too. Defaults to 0 (off) -- every board
 		-- must opt in explicitly, same rationale as VRAM0_LINE_REFILL's own.
-		VRAM0_PREFETCH : integer := 0
+		VRAM0_PREFETCH : integer := 0;
+		-- PCE PORT (2026-08-29): vram0_prefetch.vhd's CG0/CG1 tile-pattern prefetch
+		-- extension (see that file's own "G_CG_PREFETCH EXTENSION" header) -- only ever
+		-- meaningful chained onto the BAT engine, and structurally can't apply without
+		-- it: PREFETCH0 (the only place this generic is read) exists only inside
+		-- `gen_vram0_pf: if VRAM0_PREFETCH /= 0 generate` below, so this generic is
+		-- implicitly gated by VRAM0_PREFETCH by construction, not by an explicit AND.
+		-- Kept as its OWN generic, same "must opt in
+		-- explicitly" rationale as VRAM0_PREFETCH's own -- GHDL-verified (real bug
+		-- found+fixed, cg_hit_wrong=0 across steady-state/BYR-rewrite/SCREEN-change
+		-- stress) and gw_sh-clean on Primer 25K (0.656% clk_pce margin when on, tighter
+		-- than the BAT-only baseline but 0 violations) -- not yet measured on every
+		-- board that could carry it. Defaults to 0 (off).
+		VRAM0_CG_PREFETCH : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -537,13 +550,11 @@ begin
 	-- engine (see that file's own header) sits between VDC0's real RAM_A/RAM_DI/RAM_DO/
 	-- RAM_WE and vram0_cache's own address_a/q_a/data_a/wren_a. Split into its own
 	-- nested generate, NOT just an inert-when-off internal mux, so that a board which
-	-- does NOT opt in (VRAM0_PREFETCH left at its default 0 -- Nano 20K, Primer 25K CD,
-	-- as of this port) pays exactly ZERO extra BSRAM/logic for this feature and is
-	-- wired byte-identically to before this port existed (see gen_vram0_pf_none below)
-	-- -- this session only GHDL-verified and gw_sh-checked the prefetch engine on
-	-- Primer 25K plain; unconditionally instantiating vram0_prefetch (and its 64-word
-	-- buffer BRAM) on every EXT_VRAM0/=0 board regardless of opt-in would have silently
-	-- taxed boards this session never measured.
+	-- does NOT opt in (VRAM0_PREFETCH left at its default 0 -- Nano 20K, as of
+	-- 2026-08-29) pays exactly ZERO extra BSRAM/logic for this feature and is wired
+	-- byte-identically to before this port existed (see gen_vram0_pf_none below).
+	-- Primer 25K plain AND Primer 25K CD both opt in as of this port (VRAM0_PREFETCH
+	-- => 1 in each board's own top-level generic map).
 	gen_vram0_pf: if VRAM0_PREFETCH /= 0 generate
 		signal ds_address_a : std_logic_vector(14 downto 0);
 		signal ds_data_a    : std_logic_vector(15 downto 0);
@@ -555,6 +566,7 @@ begin
 		signal pf_done      : std_logic;
 	begin
 		PREFETCH0 : entity work.vram0_prefetch
+		generic map (G_CG_PREFETCH => VRAM0_CG_PREFETCH /= 0)
 		port map (
 			clock      => CLK,
 			hsync_f    => VCE_HSYNC_F,
