@@ -114,7 +114,8 @@ architecture rtl of pcetang_console60k is
          SDRAM_nCS  : out   std_logic;
          SDRAM_CKE  : out   std_logic;
          SDRAM_CLK  : out   std_logic;
-         RAM_A_ADDR : in    std_logic_vector(20 downto 0);
+         -- PCE PORT (2026-08-29): widened 21->25 bits -- see sdram.sv's own header note.
+         RAM_A_ADDR : in    std_logic_vector(24 downto 0);
          RAM_A_REQ  : in    std_logic;
          RAM_A_RD_n : in    std_logic;
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
@@ -122,13 +123,13 @@ architecture rtl of pcetang_console60k is
          RAM_A_WAIT : out   std_logic;
          RAM_A_LINE_REFILL : in    std_logic;
          RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
-         RAM_B_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_B_ADDR : in    std_logic_vector(24 downto 0);
          RAM_B_REQ  : in    std_logic;
          RAM_B_WE   : in    std_logic;
          RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
          RAM_B_WAIT : out   std_logic;
-         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_ADDR : in    std_logic_vector(24 downto 0);
          RAM_C_REQ  : in    std_logic;
          RAM_C_RD_n : in    std_logic;
          RAM_C_DI   : in    std_logic_vector(7 downto 0);
@@ -247,7 +248,9 @@ architecture rtl of pcetang_console60k is
    -- can mirror (128K/256K/384K/512K/768K/1MB); SF2's 2560K bank-switched mapper is NOT
    -- supported (would need a separate rombank register pce_top has no port for) -- same
    -- real limitation as Primer 25K, same reason.
-   constant ROM_SDRAM_BASE  : unsigned(20 downto 0) := to_unsigned(0, 21);
+   -- PCE PORT (2026-08-29): widened 21->25 bits alongside sdram.sv's own port widening --
+   -- no layout change on this board, just matching the now-wider RAM_B_ADDR.
+   constant ROM_SDRAM_BASE  : unsigned(24 downto 0) := to_unsigned(0, 25);
    constant ROM_SDRAM_ABITS : integer := 20;
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
@@ -264,7 +267,7 @@ architecture rtl of pcetang_console60k is
    -- the write bridge on the same SDRAM port B.
    signal core_resetn : std_logic := '0';
 
-   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_addr : std_logic_vector(24 downto 0);
    signal romb_req  : std_logic := '0';
    signal romb_we   : std_logic := '0';
    signal romb_di   : std_logic_vector(7 downto 0);
@@ -276,12 +279,12 @@ architecture rtl of pcetang_console60k is
    signal rd_state       : romb_state_t := RB_IDLE;
    signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal rd_req         : std_logic := '0';
-   signal rd_addr        : std_logic_vector(20 downto 0);
+   signal rd_addr        : std_logic_vector(24 downto 0);
 
    signal wr_state       : romb_state_t := RB_IDLE;
    signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal wr_req         : std_logic := '0';
-   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_addr        : std_logic_vector(24 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
@@ -416,7 +419,7 @@ begin
          case wr_state is
             when RB_IDLE =>
                if rom_do_valid = '1' then
-                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 25));
                   wr_data <= rom_do;
                   wr_req  <= not wr_req;
                   wr_settle_cnt <= (others => '0');
@@ -452,7 +455,7 @@ begin
                rom_rdy_i <= '1';
                if rom_rd_i = '1' then
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
-                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
                   rd_req <= not rd_req;
                   rd_settle_cnt <= (others => '0');

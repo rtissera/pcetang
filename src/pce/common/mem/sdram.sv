@@ -170,7 +170,16 @@ module sdram
 	output            SDRAM_CKE,
 	output            SDRAM_CLK,
 
-	input      [20:0] RAM_A_ADDR,
+	// PCE PORT (2026-08-29): widened 21->25 bits -- real chip capacity confirmed (Winbond
+	// W9825G6KH-6, 256Mbit=32MB, 4 banks -- datasheet + a real board photo match, see
+	// session memory), and this file's own row/column/bank signal widths (a[22:0] +
+	// bank[1:0] = 25 bits) already matched that chip exactly; only the CLIENT PORTS were
+	// narrower, forcing bank and a[22:21] to 0 via implicit zero-extension at every
+	// `{bank,a} <= RAM_x_ADDR` site. This is a real address-space widening, not a cosmetic
+	// one -- every client (VRAM0, ROM, CD-RAM/ADPCM/Arcade-Card) can now genuinely reach
+	// all 32MB, not just bank 0's 2MB. See the opportunistic per-channel cache note at
+	// `last_a`'s own declaration for the one correctness-critical consequence of this.
+	input      [24:0] RAM_A_ADDR,
 	input             RAM_A_REQ,
 	input             RAM_A_RD_n,
 	// PCE PORT (2026-08-27): widened 8->16 bits -- see header's "port A width" note.
@@ -191,7 +200,7 @@ module sdram
 	// caller of this port.
 	output reg [63:0] RAM_A_LINE_DO,
 
-	input      [20:0] RAM_B_ADDR,
+	input      [24:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
 	input             RAM_B_WE  = 1'b0,  // PCE PORT: write side, added for ROM offload, see header
 	input       [7:0] RAM_B_DI  = 8'h0,  // PCE PORT: write data, added for ROM offload, see header
@@ -203,7 +212,7 @@ module sdram
 	// unlike port B, this needed real read+write from day one, so it matches A's shape
 	// more closely than B's toggle-per-request one. Lowest arbitration priority (below
 	// both A and B) -- see header's arbitration note.
-	input      [20:0] RAM_C_ADDR = 21'h0,
+	input      [24:0] RAM_C_ADDR = 25'h0,
 	input             RAM_C_REQ  = 1'b0,
 	input             RAM_C_RD_n = 1'b1,
 	input       [7:0] RAM_C_DI   = 8'h0,
@@ -267,7 +276,17 @@ reg  [1:0] bank;
 reg [15:0] data;
 reg        we;
 reg        ram_req=0;
-reg [21:2] last_a[3];
+// PCE PORT (2026-08-29): widened 20->23 bits (RAM_x_ADDR[24:2]), alongside the client
+// port widening above -- REAL CORRECTNESS HAZARD if missed, not a cosmetic resize: this
+// opportunistic 2-word cache's tag previously covered only RAM_x_ADDR[20:2], i.e. bank
+// and a[22:21] were NEVER part of the comparison (harmless before, since those bits
+// were always 0). Once a client can genuinely address a nonzero bank or a[22:21], two
+// DIFFERENT physical SDRAM words that happen to share the same low 19 bits but differ
+// in bank/upper-address would have aliased in this cache -- a real, silent data
+// corruption bug, not a hypothetical one. The tag now spans the client's FULL real
+// address (minus the low 2 bits, which select byte/word within the cached 32-bit
+// last_data entry, not a distinct cache line).
+reg [24:2] last_a[3];
 // PCE PORT (2026-08-27): one valid bit per channel -- see header's "last_valid[]"
 // note -- instead of an all-ones sentinel stuffed into last_a itself. Defaults to all
 // invalid at reset/power-up, same effective behaviour as the old sentinel (any real
@@ -295,15 +314,24 @@ reg        wide_acc = 1'b0;
 // manufacturing exactly the false-hit hazard the masking exists to prevent.
 reg        line_refill = 1'b0;
 reg [31:0] last_data0_ext = 32'h0;
-wire [20:0] RAM_A_ADDR_LINE_MASKED = {RAM_A_ADDR[20:3], 3'b000};
+// PCE PORT (2026-08-29): widened alongside RAM_A_ADDR (21->25 bits) -- zeroes only the
+// low 3 word-within-line bits, preserves everything else INCLUDING the now-real bank/
+// upper-address bits, so a line refill correctly targets whatever bank/region the
+// caller's real address is in, not implicitly bank 0 (see the `{bank,a} <=` site below,
+// which used to hardwire `2'b00` here for exactly that reason -- no longer needed or
+// correct now that this wire already carries the real bank bits verbatim).
+wire [24:0] RAM_A_ADDR_LINE_MASKED = {RAM_A_ADDR[24:3], 3'b000};
 
-wire       fetch_req = (RAM_A_RD_n || !last_valid[0] || last_a[0] != {1'b0,RAM_A_ADDR[20:2]});
+// PCE PORT (2026-08-29): tag comparisons widened to the full RAM_x_ADDR[24:2] (23 bits,
+// matching last_a's own widened declaration) -- see that signal's comment for why this
+// is a real correctness fix, not just following the port width up.
+wire       fetch_req = (RAM_A_RD_n || !last_valid[0] || last_a[0] != RAM_A_ADDR[24:2]);
 // PCE PORT: a write always forces a real bus cycle -- see header -- so it's OR'd into miss.
-wire       fetch_req_b = RAM_B_WE || !last_valid[1] || (last_a[1] != {1'b0,RAM_B_ADDR[20:2]});
+wire       fetch_req_b = RAM_B_WE || !last_valid[1] || (last_a[1] != RAM_B_ADDR[24:2]);
 // PCE PORT: third client (CD-RAM). Same shape as fetch_req (port A) -- real read+write,
 // small line cache, no forced-miss-on-write -- see header for why this mirrors A rather
 // than B's convention.
-wire       fetch_req_c = (RAM_C_RD_n || !last_valid[2] || last_a[2] != {1'b0,RAM_C_ADDR[20:2]});
+wire       fetch_req_c = (RAM_C_RD_n || !last_valid[2] || last_a[2] != RAM_C_ADDR[24:2]);
 
 // access manager
 always @(posedge clk) begin
@@ -353,7 +381,9 @@ always @(posedge clk) begin
 	// PCE PORT: !RAM_B_WE added -- a write must never be served from the cache, it has to
 	// reach real SDRAM (last_data is not updated by a write, so a "hit" here would just
 	// hand back stale pre-write data on the very next read).
-	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && last_valid[1] && (last_a[1] == {1'b0,RAM_B_ADDR[20:2]})) begin
+	// PCE PORT (2026-08-29): widened alongside last_a/RAM_B_ADDR -- see last_a's own
+	// declaration comment for why this tag must cover the full address, not just [20:2].
+	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && last_valid[1] && (last_a[1] == RAM_B_ADDR[24:2])) begin
 		old_b_req <= RAM_B_REQ;
 		RAM_B_DO <= last_data[1][(RAM_B_ADDR[1:0]*8) +:8];
 	end
@@ -399,7 +429,11 @@ always @(posedge clk) begin
 			// (see header) -- both the launch latch AND last_a[0]'s own tag, so the
 			// low-level 2-word opportunistic cache can never mistag a word0/word1 fetch
 			// as a word2/word3 one (see RAM_A_ADDR_LINE_MASKED's declaration comment).
-			{bank,a} <= RAM_A_LINE_REFILL ? {2'b00, RAM_A_ADDR_LINE_MASKED} : RAM_A_ADDR;
+			// PCE PORT (2026-08-29): no more `2'b00,` bank-force prefix here -- see
+			// RAM_A_ADDR_LINE_MASKED's own comment. It's now full-width and carries the
+			// real bank bits verbatim, so this is a plain width-matched mux, not a
+			// bank-0-hardwiring one.
+			{bank,a} <= RAM_A_LINE_REFILL ? RAM_A_ADDR_LINE_MASKED : RAM_A_ADDR;
 			data <= RAM_A_DI;                  // PCE PORT: real 16-bit word, no replication
 			wide_acc <= 1'b1;                  // PCE PORT: see wide_acc declaration
 			// PCE PORT (2026-08-28): a line refill always performs a REAL SDRAM access,
@@ -408,7 +442,7 @@ always @(posedge clk) begin
 			// cache would return stale/unrelated data for words 2/3. Cheap, safe: real
 			// line-refill callers only ever request this on a genuine miss anyway.
 			ram_req <= RAM_A_LINE_REFILL ? 1'b1 : fetch_req;
-			last_a[0] <= RAM_A_LINE_REFILL ? RAM_A_ADDR_LINE_MASKED[20:2] : RAM_A_ADDR[20:2];
+			last_a[0] <= RAM_A_LINE_REFILL ? RAM_A_ADDR_LINE_MASKED[24:2] : RAM_A_ADDR[24:2];
 			last_valid[0] <= ~RAM_A_RD_n;
 			ch0_busy <= 1;
 			line_refill <= RAM_A_LINE_REFILL;
@@ -421,7 +455,7 @@ always @(posedge clk) begin
 			data <= {RAM_B_DI,RAM_B_DI};        // PCE PORT: write data, only used when RAM_B_WE
 			wide_acc <= 1'b0;                  // PCE PORT: port B stays byte-granular
 			ram_req <= 1;
-			last_a[1] <= RAM_B_ADDR[20:2];
+			last_a[1] <= RAM_B_ADDR[24:2];
 			last_valid[1] <= 1'b1;
 			ch1_busy <= 1;
 			state <= STATE_START;
@@ -436,7 +470,7 @@ always @(posedge clk) begin
 			data <= {RAM_C_DI,RAM_C_DI};
 			wide_acc <= 1'b0;                  // PCE PORT: port C stays byte-granular
 			ram_req <= fetch_req_c;
-			last_a[2] <= RAM_C_ADDR[20:2];
+			last_a[2] <= RAM_C_ADDR[24:2];
 			last_valid[2] <= ~RAM_C_RD_n;
 			ch2_busy <= 1;
 			state <= STATE_START;

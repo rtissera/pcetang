@@ -84,16 +84,15 @@
 -- CD_STAT_GET cost nothing extra. clk_pce 44.559/42.857 MHz (+3.97%, improved from the
 -- pre-SCSI-stub build's +0.55%), clk_sdram 136.228/120 MHz (+13.5%).
 --
--- ARCADE CARD RAM: NOT done, despite being asked for -- real Arcade Card RAM is 2MB
--- (arcade.sv's own RAM_A is 21 bits wide), and this board's entire SDRAM window (every
--- RAM_x_ADDR port on sdram.sv) is ALSO only 21 bits = 2MB total, already spoken for by
--- ROM+CD-RAM above. AC_RAM_A shares CD_RAM_A's bus inside pce_top.vhd (`CD_RAM_A <=
--- '0' & AC_RAM_A when AC_RAM_CS_N='0' else ...`), so CD-RAM's bridge above WOULD carry
--- Arcade Card traffic too if `AC_EN` were set -- but only by aliasing/wrapping its real
--- 2MB range down into CD-RAM's 256KB SDRAM slice, a real correctness bug, not a
--- shortcut. `AC_EN` stays '0'. Real Arcade Card support needs sdram.sv's own address
--- bus widened past 21 bits first -- already flagged as future "Phase 3" work in
--- pcetang_primer25k_cd.vhd's own address-map comment, not started here either.
+-- ARCADE CARD RAM (2026-08-29): DONE for real -- sdram.sv's per-port address bus is now
+-- 25 bits (32MB), not 21 (2MB) -- see that file's own header for the real chip
+-- confirmation (Winbond W9825G6KH-6, 256Mbit, 4 banks) that made this a real port-width
+-- change, not a redesign. AC_RAM_A (arcade.sv, 21 bits = 2MB) now gets its own real,
+-- non-overlapping window at AC_SDRAM_BASE (0x200000, the 2MB boundary) instead of
+-- aliasing into CD-RAM's 256KB slice -- decoded from cd_ram_a's own top bit (see the
+-- CDR_IDLE arbiter's own comment for the exact decode). `AC_EN` is now '1'. Real gw_sh
+-- result for this change: see this file's own build-log commit message (not repeated
+-- here to avoid drift -- check `git log` for the real numbers, not this comment).
 --
 -- Otherwise identical to pcetang_console60k.vhd: ROM loading via iosys_bl616, real
 -- joypad input.
@@ -173,7 +172,8 @@ architecture rtl of pcetang_console60k_cd is
          SDRAM_nCS  : out   std_logic;
          SDRAM_CKE  : out   std_logic;
          SDRAM_CLK  : out   std_logic;
-         RAM_A_ADDR : in    std_logic_vector(20 downto 0);
+         -- PCE PORT (2026-08-29): widened 21->25 bits -- see sdram.sv's own header note.
+         RAM_A_ADDR : in    std_logic_vector(24 downto 0);
          RAM_A_REQ  : in    std_logic;
          RAM_A_RD_n : in    std_logic;
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
@@ -181,13 +181,13 @@ architecture rtl of pcetang_console60k_cd is
          RAM_A_WAIT : out   std_logic;
          RAM_A_LINE_REFILL : in    std_logic;
          RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
-         RAM_B_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_B_ADDR : in    std_logic_vector(24 downto 0);
          RAM_B_REQ  : in    std_logic;
          RAM_B_WE   : in    std_logic;
          RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
          RAM_B_WAIT : out   std_logic;
-         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_ADDR : in    std_logic_vector(24 downto 0);
          RAM_C_REQ  : in    std_logic;
          RAM_C_RD_n : in    std_logic;
          RAM_C_DI   : in    std_logic_vector(7 downto 0);
@@ -305,9 +305,15 @@ architecture rtl of pcetang_console60k_cd is
    -- whole engine minus ROM/CD-RAM already fits), so the split is simpler than Primer
    -- 25K's: ROM at 0x000000 (256KB, exact real syscard3.pce size), CD-RAM at 0x040000
    -- (256KB, cd.vhd's own RAM_SEL window, confirmed from source same as Primer 25K's).
-   constant ROM_SDRAM_BASE   : unsigned(20 downto 0) := to_unsigned(16#000000#, 21);
+   -- PCE PORT (2026-08-29): all three base constants widened 21->25 bits alongside
+   -- sdram.sv's own port widening -- ROM/CD-RAM layout unchanged (still 0x000000/
+   -- 0x040000, well inside the first 2MB). AC_SDRAM_BASE (below, near AC_EN) is the new
+   -- one: a real, non-overlapping 2MB window for Arcade Card RAM, placed at the 2MB
+   -- boundary -- see that constant's own comment for why this closes the real
+   -- aliasing bug the file's own header used to describe.
+   constant ROM_SDRAM_BASE   : unsigned(24 downto 0) := to_unsigned(16#000000#, 25);
    constant ROM_SDRAM_ABITS  : integer := 18;  -- 256KB, exact real syscard size
-   constant CDRAM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#040000#, 21);
+   constant CDRAM_SDRAM_BASE : unsigned(24 downto 0) := to_unsigned(16#040000#, 25);
 
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
@@ -323,7 +329,7 @@ architecture rtl of pcetang_console60k_cd is
    -- same SDRAM port B.
    signal core_resetn : std_logic := '0';
 
-   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_addr : std_logic_vector(24 downto 0);
    signal romb_req  : std_logic := '0';
    signal romb_we   : std_logic := '0';
    signal romb_di   : std_logic_vector(7 downto 0);
@@ -335,12 +341,12 @@ architecture rtl of pcetang_console60k_cd is
    signal rd_state       : romb_state_t := RB_IDLE;
    signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal rd_req         : std_logic := '0';
-   signal rd_addr        : std_logic_vector(20 downto 0);
+   signal rd_addr        : std_logic_vector(24 downto 0);
 
    signal wr_state       : romb_state_t := RB_IDLE;
    signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal wr_req         : std_logic := '0';
-   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_addr        : std_logic_vector(24 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
 
    -- CD-RAM bridge: pce_top's CD_RAM_A/CD_RAM_DO/CD_RAM_DI/CD_RAM_RD/CD_RAM_WR through
@@ -354,7 +360,7 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_ram_wr    : std_logic;
    signal cd_ram_rdy_i : std_logic := '1';
 
-   signal cdr_addr : std_logic_vector(20 downto 0);
+   signal cdr_addr : std_logic_vector(24 downto 0);
    signal cdr_req  : std_logic := '0';
    signal cdr_rd_n : std_logic := '0';
    signal cdr_di   : std_logic_vector(7 downto 0);
@@ -417,7 +423,19 @@ architecture rtl of pcetang_console60k_cd is
    -- pcetang_primer25k_cd.vhd's identical comment for the real reason (a byte write
    -- spans two consecutive WRITE slots at two different addresses; REQ stays high
    -- across both, so edge-detecting REQ itself would silently drop the second nibble).
-   constant ADPCM_SDRAM_BASE : unsigned(20 downto 0) := to_unsigned(16#080000#, 21);
+   -- PCE PORT (2026-08-29): widened 21->25 bits alongside sdram.sv's own port widening --
+   -- layout unchanged (still 0x080000).
+   constant ADPCM_SDRAM_BASE : unsigned(24 downto 0) := to_unsigned(16#080000#, 25);
+   -- PCE PORT (2026-08-29): real Arcade Card RAM window, finally possible now that
+   -- sdram.sv's address bus reaches past 21 bits (see that file's own header, and the
+   -- session's real hardware/datasheet confirmation of 32MB physical SDRAM behind it --
+   -- W9825G6KH-6, 256Mbit, 4 banks). Placed at the 2MB boundary: existing ROM+CD-RAM+
+   -- ADPCM only span 0x000000-0x09FFFF (640KB), so this is a clean, non-overlapping
+   -- placement with plenty of gap either side, not a tight-fit squeeze. AC_RAM_A
+   -- (arcade.sv) is 21 bits (2MB) -- fits exactly in this one window, unlike before when
+   -- it had to alias into CD-RAM's own 256KB slice (the real bug this file's header used
+   -- to describe under "ARCADE CARD RAM: NOT done").
+   constant AC_SDRAM_BASE    : unsigned(24 downto 0) := to_unsigned(16#200000#, 25);
 
    signal adpcm_ram_a_i     : std_logic_vector(16 downto 0);
    signal adpcm_ram_do_i    : std_logic_vector(3 downto 0);
@@ -542,7 +560,7 @@ begin
          case wr_state is
             when RB_IDLE =>
                if rom_do_valid = '1' then
-                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 25));
                   wr_data <= rom_do;
                   wr_req  <= not wr_req;
                   wr_settle_cnt <= (others => '0');
@@ -578,7 +596,7 @@ begin
                rom_rdy_i <= '1';
                if rom_rd_i = '1' then
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
-                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
                   rd_req <= not rd_req;
                   rd_settle_cnt <= (others => '0');
@@ -641,8 +659,23 @@ begin
             when CDR_IDLE =>
                cdr_req <= '0';
                if cd_pend = '1' or cd_new = '1' then
-                  cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
-                              resize(unsigned(cd_ram_a(17 downto 0)), 21));
+                  -- PCE PORT (2026-08-29): real Arcade Card RAM support. cd_ram_a
+                  -- (pce_top.vhd's own combined CD_RAM_A) already distinguishes the two
+                  -- real devices sharing this bus by its own top bit, per pce_top.vhd's
+                  -- mux: `CD_RAM_A <= '0' & AC_RAM_A when AC_RAM_CS_N='0' else "1000" &
+                  -- CPU_A(17 downto 0)` -- AC's own real address always has bit 21 = 0
+                  -- (it's only 21 bits, zero-extended by one), real CD-RAM/backup-RAM's
+                  -- synthetic offset always has bit 21 = 1 (the "1000" prefix). Route
+                  -- each to its own real, non-overlapping SDRAM window instead of both
+                  -- collapsing onto CD-RAM's 256KB slice (the real aliasing bug this
+                  -- file's header used to describe under "ARCADE CARD RAM: NOT done").
+                  if cd_ram_a(21) = '0' then
+                     cdr_addr <= std_logic_vector(AC_SDRAM_BASE +
+                                 resize(unsigned(cd_ram_a(20 downto 0)), 25));
+                  else
+                     cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
+                                 resize(unsigned(cd_ram_a(17 downto 0)), 25));
+                  end if;
                   cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write
                   cdr_di   <= cd_ram_do;
                   cdr_req  <= '1';
@@ -652,7 +685,7 @@ begin
                   cdr_state <= CDR_SETTLE;
                elsif adpcm_pend = '1' or adpcm_new = '1' then
                   cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
-                              resize(unsigned(adpcm_ram_a_i), 21));
+                              resize(unsigned(adpcm_ram_a_i), 25));
                   cdr_rd_n <= not adpcm_ram_we_i;
                   cdr_di   <= "0000" & adpcm_ram_do_i;  -- one nibble packed per SDRAM byte
                   cdr_req  <= '1';
@@ -829,7 +862,10 @@ begin
       ADPCM_RAM_SLOT_CNT => adpcm_ram_slot_cnt_i,
       ADPCM_RAM_DI => adpcm_ram_di_i, ADPCM_RAM_READY => adpcm_ram_ready_i,
 
-      AC_EN => '0',
+      -- PCE PORT (2026-08-29): '0'->'1' -- real, non-aliasing 2MB SDRAM window now
+      -- exists (AC_SDRAM_BASE, see that constant's own comment) -- see this file's
+      -- header for the updated real gw_sh result.
+      AC_EN => '1',
 
       CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,
       CD_COMM => cd_comm_i, CD_COMM_SEND => cd_comm_send_i,

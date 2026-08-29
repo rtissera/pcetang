@@ -85,7 +85,8 @@ architecture rtl of pcetang_primer25k is
          SDRAM_nCS  : out   std_logic;
          SDRAM_CKE  : out   std_logic;
          SDRAM_CLK  : out   std_logic;
-         RAM_A_ADDR : in    std_logic_vector(20 downto 0);
+         -- PCE PORT (2026-08-29): widened 21->25 bits -- see sdram.sv's own header note.
+         RAM_A_ADDR : in    std_logic_vector(24 downto 0);
          RAM_A_REQ  : in    std_logic;
          RAM_A_RD_n : in    std_logic;
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
@@ -100,13 +101,13 @@ architecture rtl of pcetang_primer25k is
          -- of always tying off unused ports explicitly (see RAM_C_* below).
          RAM_A_LINE_REFILL : in    std_logic;
          RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
-         RAM_B_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_B_ADDR : in    std_logic_vector(24 downto 0);
          RAM_B_REQ  : in    std_logic;
          RAM_B_WE   : in    std_logic;
          RAM_B_DI   : in    std_logic_vector(7 downto 0);
          RAM_B_DO   : out   std_logic_vector(7 downto 0);
          RAM_B_WAIT : out   std_logic;
-         RAM_C_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_C_ADDR : in    std_logic_vector(24 downto 0);
          RAM_C_REQ  : in    std_logic;
          RAM_C_RD_n : in    std_logic;
          RAM_C_DI   : in    std_logic_vector(7 downto 0);
@@ -239,7 +240,10 @@ architecture rtl of pcetang_primer25k is
    -- VRAM0's 64K region (0x000000-0x00FFFF) -- nothing else uses SDRAM on this board.
    -- Same read/write port-B bridge pattern as pcetang_primer25k_cd.vhd's ROM bridge
    -- (that file's the proven reference this was copied from).
-   constant ROM_SDRAM_BASE  : unsigned(20 downto 0) := to_unsigned(16#010000#, 21);
+   -- PCE PORT (2026-08-29): widened 21->25 bits alongside sdram.sv's own port widening --
+   -- no layout change on this board (still 0x010000, well inside the first 2MB), just
+   -- matching sdram.sv's now-wider RAM_B_ADDR so the resize()s below don't truncate.
+   constant ROM_SDRAM_BASE  : unsigned(24 downto 0) := to_unsigned(16#010000#, 25);
    constant ROM_SDRAM_ABITS : integer := 20;
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
@@ -268,7 +272,7 @@ architecture rtl of pcetang_primer25k is
    -- more correct than the old behavior of running against uninitialized SDRAM).
    signal core_resetn : std_logic := '0';
 
-   signal romb_addr : std_logic_vector(20 downto 0);
+   signal romb_addr : std_logic_vector(24 downto 0);
    signal romb_req  : std_logic := '0';
    signal romb_we   : std_logic := '0';
    signal romb_di   : std_logic_vector(7 downto 0);
@@ -280,12 +284,12 @@ architecture rtl of pcetang_primer25k is
    signal rd_state       : romb_state_t := RB_IDLE;
    signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal rd_req         : std_logic := '0';
-   signal rd_addr        : std_logic_vector(20 downto 0);
+   signal rd_addr        : std_logic_vector(24 downto 0);
 
    signal wr_state       : romb_state_t := RB_IDLE;
    signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal wr_req         : std_logic := '0';
-   signal wr_addr        : std_logic_vector(20 downto 0);
+   signal wr_addr        : std_logic_vector(24 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
@@ -348,7 +352,10 @@ begin
       SDRAM_nCS  => O_sdram_cs_n,
       SDRAM_CKE  => O_sdram_cke,
       SDRAM_CLK  => O_sdram_clk,
-      RAM_A_ADDR => vram0_ram_a_addr,
+      -- PCE PORT (2026-08-29): zero-extended, not widened -- VRAM0 stays within the
+      -- first 2MB (bank 0), this widening's scope is ROM/CD-RAM/ADPCM/Arcade-Card, not
+      -- VRAM0 addressing -- see sdram.sv's own port widening note.
+      RAM_A_ADDR => "0000" & vram0_ram_a_addr,
       RAM_A_REQ  => vram0_ram_a_req,
       RAM_A_RD_n => vram0_ram_a_rd_n,
       RAM_A_DI   => vram0_ram_a_di,
@@ -457,7 +464,7 @@ begin
          case wr_state is
             when RB_IDLE =>
                if rom_do_valid = '1' then
-                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 21));
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 25));
                   wr_data <= rom_do;
                   wr_req  <= not wr_req;
                   wr_settle_cnt <= (others => '0');
@@ -494,7 +501,7 @@ begin
                rom_rdy_i <= '1';
                if rom_rd_i = '1' then
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
-                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 21));
+                             resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
                   rd_req <= not rd_req;
                   rd_settle_cnt <= (others => '0');
