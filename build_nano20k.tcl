@@ -68,4 +68,14 @@ set_option -use_i2c_as_gpio 1
 set_option -use_jtag_as_gpio 1
 set_option -bit_compress 1
 
+# Alternate PnR algorithm (2026-08-30): tried to reclaim clk_pce margin after the
+# ROM-to-SDRAM move (+0.280%->+0.019%, see pcetang_status_matrix.md lever 12) without
+# touching RTL. -timing_driven is already Gowin's own default (1, confirmed from
+# SUG100's real Tcl command reference, not the GUI project-option XML which lists a
+# different default) -- no lever there. -place_option/-route_option default to 0
+# (algorithm 0) on every board in this project, never tried otherwise. Pure
+# PnR-algorithm change, no netlist edit.
+set_option -place_option 2
+set_option -route_option 1
+
 run all
