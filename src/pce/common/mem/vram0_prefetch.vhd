@@ -225,7 +225,35 @@ entity vram0_prefetch is
       -- G_CG_PREFETCH's own instrumentation, same discipline, meaningless (held '0')
       -- when the generic is false.
       dbg_cg_hit     : out std_logic;  -- a read was served from the CG buffer this cycle
-      dbg_cg_overrun : out std_logic   -- hsync_f fired before this row's CG pass finished
+      dbg_cg_overrun : out std_logic;  -- hsync_f fired before this row's CG pass finished
+
+      -- FEASIBILITY-CHECK PORT (2026-08-30, sim/vram0/tb_sgx_contention.vhd's shared-
+      -- engine model only -- see that file's own header): when '1', F_IDLE will not
+      -- START a new BAT or CG burst this cycle (the two `elsif` branches below that
+      -- assert pf_req_r/enter F_WAIT or F_CG_WAIT are gated on hold='0'). An
+      -- already-in-flight F_WAIT/F_CG_WAIT burst is NEVER interrupted -- ownership is
+      -- only ever handed over at a natural idle boundary, non-preemptive, same
+      -- discipline as sdram.sv's own port arbiter. Defaults '0': every existing
+      -- caller (every shipped VDC0 instance on 3 boards) leaves this unwired and gets
+      -- byte-identical behavior to a version of this file without the port at all --
+      -- same "compile-time default preserves existing behavior" discipline as
+      -- G_LINE_REFILL/G_PREFETCH/G_CG_PREFETCH above. dbg_pf_overrun/dbg_cg_overrun
+      -- need no changes to work correctly under hold: both are combinational off
+      -- burst_i/cur_total/cg_done, which correctly stay non-advanced for as long as
+      -- hold withholds a new burst start, regardless of the reason.
+      hold : in std_logic := '0';
+
+      -- FEASIBILITY-CHECK PORT (2026-08-30), same shared-engine model, other
+      -- direction: '1' exactly when this instance's F_IDLE would START a new BAT or
+      -- CG burst THIS cycle if hold were '0' -- the same two conditions `hold` gates
+      -- above, mirrored here as a real output instead of read back via a GHDL
+      -- external name (GHDL 4.1.0's mcode elaborator was found to crash with more
+      -- than one integer-typed external-name probe into one design -- confirmed by
+      -- isolation, not a modeling choice -- a real output port sidesteps it
+      -- entirely and is cleaner besides). Same instrumentation discipline as every
+      -- other dbg_* port: meaningless/unused by any real board caller, real only to
+      -- the testbench's own arbiter.
+      dbg_wants_burst : out std_logic
    );
 end entity;
 
@@ -488,7 +516,7 @@ begin
                   -- its own (code, plane, row) triple (see header) -- it simply won't
                   -- be the SET of codes this scanline's tiles use, same as any other
                   -- direct-mapped miss for a code that isn't resident. Nothing to do.
-               elsif cur_supported = '1' and burst_i < cur_total then
+               elsif hold = '0' and cur_supported = '1' and burst_i < cur_total then
                   if cur_wbits = 5 then
                      pf_addr_r <= "0000" & std_logic_vector(cur_row)
                                   & std_logic_vector(to_unsigned(burst_i*4, 5));
@@ -498,7 +526,7 @@ begin
                   end if;
                   pf_req_r   <= '1';
                   fill_state <= F_WAIT;
-               elsif G_CG_PREFETCH and burst_i = cur_total and cur_supported = '1'
+               elsif hold = '0' and G_CG_PREFETCH and burst_i = cur_total and cur_supported = '1'
                      and cg_done = '0' then
                   if buf_valid(cg_i/2) = '1' and buf_data(cg_i/2)(11) = '0' then
                      -- Real BG_RAM_ADDR CG0/CG1 formula (huc6270.vhd): code(10:0) &
@@ -623,6 +651,12 @@ begin
    dbg_pf_overrun <= to_sl(hsync_f = '1' and cur_supported = '1'
                             and (fill_state = F_WAIT or burst_i /= cur_total));
    dbg_cg_overrun <= to_sl(G_CG_PREFETCH and hsync_f = '1' and cg_done = '0');
+
+   -- Exact mirror of the two `hold='0' and ...` conditions in `fill`'s F_IDLE case
+   -- above -- see `dbg_wants_burst`'s own port comment.
+   dbg_wants_burst <= to_sl((cur_supported = '1' and burst_i < cur_total)
+                             or (G_CG_PREFETCH and burst_i = cur_total
+                                 and cur_supported = '1' and cg_done = '0'));
 
    ------------------------------------------------------------------ match (consumption)
    -- Two-register-stage pipeline, deliberately matching vram0_cache's own

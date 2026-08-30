@@ -137,7 +137,27 @@ entity tb_top is
       -- contention -- must reproduce the documented tb_cg_check.vhd solo numbers
       -- (pf_overrun_total=1 cg_overrun_total=12) exactly before any G_TWO_VDC=true
       -- result is trusted as real contention rather than a harness artifact.
-      G_TWO_VDC     : boolean := true
+      G_TWO_VDC     : boolean := true;
+      -- SHARED-ENGINE FEASIBILITY CHECK (2026-08-30, see pcetang_status_matrix.md
+      -- lever 15 #5 -- the user's own idea): when true, chains A/B's `pf`/`pf2`
+      -- instances no longer run fully independently -- an `arb` process (below)
+      -- grants ONE physical fill-engine "token" at a time (A>B priority on a tie,
+      -- matching the project's real refresh>A>B>C convention), gating each
+      -- instance's new `hold` port so only the token holder may START a new BAT or
+      -- CG burst; an already-in-flight burst is never preempted (non-preemptive,
+      -- same discipline as sdram.sv's own port arbiter). This models a real design
+      -- where ONE vram0_prefetch-class engine's FSM/burst-counter/handshake logic
+      -- (the real ~3286 LUT cost measured per-instance) is shared between both
+      -- VDCs instead of duplicated -- vram0_cache stays fully separate per VDC
+      -- either way (real hardware needs both buffers live and answering every
+      -- dwell concurrently, see the idea's own scoping note in memory for why the
+      -- BUFFER itself can't be shared, only the fill engine). Defaults false:
+      -- every existing G_TWO_VDC=true run (`91abfc3`'s own accepted result) is
+      -- reproduced byte-for-byte since `hold_a`/`hold_b` tie to '0' and vram0_
+      -- prefetch's own `hold` port defaults '0' regardless -- a fidelity gate
+      -- before trusting any G_SHARED_ENGINE=true result, same discipline
+      -- G_TWO_VDC itself was given against the solo baseline.
+      G_SHARED_ENGINE : boolean := false
    );
 end entity;
 
@@ -205,6 +225,17 @@ architecture sim of tb_top is
 	signal dbg_cg_done_e  : std_logic;
 	signal dbg_cur_cg_row_e       : unsigned(2 downto 0);
 	signal dbg_pending_cg_row_e   : unsigned(2 downto 0);
+
+	-- SHARED-ENGINE arbiter (G_SHARED_ENGINE only, see entity generic's own comment).
+	-- wants_a/wants_b wire directly from `pf`/`pf2`'s own new `dbg_wants_burst`
+	-- output port (real port, not a GHDL external-name probe -- GHDL 4.1.0's mcode
+	-- elaborator was found to crash with more than one integer-typed external name
+	-- into one design, confirmed by isolation; see that port's own comment in
+	-- vram0_prefetch.vhd). busy_x/hold_x are this testbench's own signals, computed
+	-- by the concurrent assignments below.
+	signal wants_a, wants_b : std_logic;
+	signal busy_a, busy_b   : std_logic;
+	signal hold_a, hold_b   : std_logic;
 	signal dbg_cg_i_e             : integer range 0 to 127;
 
 	-- STRESS windows (G_STRESS only, see entity generic comment / drv process).
@@ -544,7 +575,9 @@ begin
 			dbg_pf_hit     => dbg_pf_hit,
 			dbg_pf_overrun => dbg_pf_overrun,
 			dbg_cg_hit     => dbg_cg_hit,
-			dbg_cg_overrun => dbg_cg_overrun
+			dbg_cg_overrun => dbg_cg_overrun,
+			hold            => hold_a,
+			dbg_wants_burst => wants_a
 		);
 
 	-------------------------------------------------------------------- DUT: vram0_cache
@@ -653,7 +686,9 @@ begin
 			dbg_pf_hit     => dbg_pf_hit_b,
 			dbg_pf_overrun => dbg_pf_overrun_b,
 			dbg_cg_hit     => dbg_cg_hit_b,
-			dbg_cg_overrun => dbg_cg_overrun_b
+			dbg_cg_overrun => dbg_cg_overrun_b,
+			hold            => hold_b,
+			dbg_wants_burst => wants_b
 		);
 
 	cache2 : entity work.vram0_cache
@@ -721,6 +756,25 @@ begin
 	-- the load-bearing observable, not the tag storage format.
 	dbg_pending_cg_row_e <= << signal .tb_top.pf.pending_cg_row : unsigned(2 downto 0) >>;
 	dbg_cg_i_e      <= << signal .tb_top.pf.cg_i      : integer range 0 to 127 >>;
+
+	-- wants_a/wants_b wire directly from pf/pf2's own dbg_wants_burst output port
+	-- (see port map below). busy_x: true once a burst is actually running
+	-- (`pf_req`/`pf_req_b` stay asserted for the whole F_WAIT/F_CG_WAIT round trip,
+	-- already true today).
+	busy_a <= pf_req;
+	busy_b <= pf_req_b;
+
+	-- arb: one token, non-preemptive, A>B priority on a simultaneous idle-cycle
+	-- want (matches sdram.sv's own refresh>A>B>C convention). Only consulted when
+	-- G_SHARED_ENGINE -- both hold_x tie '0' otherwise, reproducing the fully
+	-- independent-engines baseline exactly (see entity generic's own comment).
+	hold_a <= '0' when not G_SHARED_ENGINE else
+	          '1' when busy_b = '1' else
+	          '0';
+	hold_b <= '0' when not G_SHARED_ENGINE else
+	          '1' when busy_a = '1' else
+	          '1' when (busy_a = '0' and wants_a = '1' and busy_b = '0') else
+	          '0';
 
 	-- debug-only probes (diagnostic, not part of the measurement itself)
 	dbg_rc_cnt   <= << signal .tb_top.vdc1.RC_CNT       : unsigned(9 downto 0) >>;
