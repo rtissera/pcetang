@@ -73,4 +73,11 @@ set_option -use_i2c_as_gpio 1
 set_option -use_jtag_as_gpio 1
 set_option -bit_compress 1
 
+# Alternate PnR algorithm (2026-08-30): same lever that recovered Nano 20K plain's
+# clk_pce margin (+0.019%->+1.85%, see pcetang_status_matrix.md lever 13) for free --
+# place_option/route_option default to 0 (compile-speed/congestion) on every board in
+# this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
+set_option -place_option 2
+set_option -route_option 1
+
 run all
