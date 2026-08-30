@@ -217,7 +217,23 @@ module sdram
 	input             RAM_C_RD_n = 1'b1,
 	input       [7:0] RAM_C_DI   = 8'h0,
 	output reg  [7:0] RAM_C_DO,
-	output reg        RAM_C_WAIT
+	output reg        RAM_C_WAIT,
+
+	// PCE PORT (2026-08-30): real 16-bit + line-refill additions for a SECOND external-
+	// VRAM client (VRAM1/SGX) sharing this same lowest-priority port -- see the SGX
+	// contention feasibility record in session memory. Port C's own fetch already reads a
+	// full 16-bit word from SDRAM (data_reg, same 2-word opportunistic cache as port A) --
+	// only the output mux threw half away for CD-RAM's own real byte interface. These new,
+	// DEFAULTED ports let a wide caller (RAM_C_WIDE=1) get the full word/line without
+	// touching a single bit of CD-RAM's existing 8-bit RAM_C_DI/RAM_C_DO path -- a board
+	// that never asserts RAM_C_WIDE (every existing CD-RAM caller) is byte-identical to
+	// before this port existed. RAM_C_WIDE is expected held constant per board (VRAM1 and
+	// CD-RAM never coexist on the same board today), not toggled per-transaction.
+	input             RAM_C_WIDE = 1'b0,
+	input      [15:0] RAM_C_DI16 = 16'h0,
+	output reg [15:0] RAM_C_DO16,
+	input             RAM_C_LINE_REFILL = 1'b0,
+	output reg [63:0] RAM_C_LINE_DO
 );
 
 assign SDRAM_nCS = 0;
@@ -313,6 +329,14 @@ reg        wide_acc = 1'b0;
 // unmasked would tag a word0/word1-pair fetch as if it were the word2/word3 pair,
 // manufacturing exactly the false-hit hazard the masking exists to prevent.
 reg        line_refill = 1'b0;
+// PCE PORT (2026-08-30): which channel's own launch set `line_refill` this transaction --
+// A (0) or C (1). `last_data0_ext`/the STATE_CONT2/READY2/LAST_LR sequencing below is
+// already fully channel-agnostic (keyed only on `line_refill`/`ram_req`/`we`/`state`/
+// `mode`, never on `bank`/`a`) -- this flag is the ONE piece that was A-specific: routing
+// the completed 4-word answer to RAM_A_LINE_DO vs RAM_C_LINE_DO, and clearing the right
+// WAIT. Meaningless when `line_refill` itself is 0. Only A's and C's own launch branches
+// ever set it (to 0 and 1 respectively); B's launch never uses line_refill at all.
+reg        lr_is_c = 1'b0;
 reg [31:0] last_data0_ext = 32'h0;
 // PCE PORT (2026-08-29): widened alongside RAM_A_ADDR (21->25 bits) -- zeroes only the
 // low 3 word-within-line bits, preserves everything else INCLUDING the now-real bank/
@@ -321,6 +345,10 @@ reg [31:0] last_data0_ext = 32'h0;
 // which used to hardwire `2'b00` here for exactly that reason -- no longer needed or
 // correct now that this wire already carries the real bank bits verbatim).
 wire [24:0] RAM_A_ADDR_LINE_MASKED = {RAM_A_ADDR[24:3], 3'b000};
+// PCE PORT (2026-08-30): same masking, port C's own wide line-refill client -- see
+// RAM_C_LINE_REFILL's own port comment and RAM_A_ADDR_LINE_MASKED's comment above for why
+// this must mask both the launch address AND last_a[2]'s own tag.
+wire [24:0] RAM_C_ADDR_LINE_MASKED = {RAM_C_ADDR[24:3], 3'b000};
 
 // PCE PORT (2026-08-29): tag comparisons widened to the full RAM_x_ADDR[24:2] (23 bits,
 // matching last_a's own widened declaration) -- see that signal's comment for why this
@@ -395,9 +423,16 @@ always @(posedge clk) begin
 	end
 
 	// PCE PORT: third client (CD-RAM), mirrors RAM_A_WAIT's edge-detect exactly.
+	// PCE PORT (2026-08-30): RAM_C_WIDE forces the free-hit fast path off entirely, same
+	// as port A's own real fix -- see RAM_A_WAIT's declaration-site comment above for the
+	// exact deadlock this prevents (a 16-bit refill's 2nd byte always tag-hits the 1st
+	// byte's just-set tag; a wide caller's own sequencer blocks unconditionally on WAIT='1'
+	// with no other way to advance, so WAIT must never stay low on a wide access). CD-RAM
+	// (RAM_C_WIDE=0, the default) is completely unaffected -- byte-identical fast path.
 	old_c_req <= RAM_C_REQ;
 	if(~old_c_req & RAM_C_REQ) begin
-		if(fetch_req_c) RAM_C_WAIT <= 1;
+		if(RAM_C_WIDE) RAM_C_WAIT <= 1;
+		else if(fetch_req_c) RAM_C_WAIT <= 1;
 		else RAM_C_DO <= last_data[2][(RAM_C_ADDR[1:0]*8) +:8];
 	end
 
@@ -413,6 +448,11 @@ always @(posedge clk) begin
 		// reach STATE_CONT2/READY2/LAST_LR at all unless this is '1', so this reset is
 		// what makes those states provably unreachable outside a real line refill).
 		line_refill <= 1'b0;
+		// PCE PORT (2026-08-30): reset alongside line_refill -- meaningless whenever
+		// line_refill is 0 (the IDLE default), but resetting it here means only C's own
+		// launch (the one case that needs '1') has to touch it at all; A's launch relies
+		// on this default, same as it already relies on ch0_busy/etc's own IDLE reset.
+		lr_is_c <= 1'b0;
 
 		// PCE PORT (2026-08-27): refresh checked FIRST, ahead of all three clients --
 		// see header's refresh-first note for the real starvation bug this avoids.
@@ -466,13 +506,21 @@ always @(posedge clk) begin
 		// fetch (B). Refresh now preempts all three -- see header's refresh-first note.
 		else if((~old_c_req && RAM_C_REQ && fetch_req_c) || RAM_C_WAIT) begin
 			we <= RAM_C_RD_n;
-			{bank,a} <= RAM_C_ADDR;
-			data <= {RAM_C_DI,RAM_C_DI};
-			wide_acc <= 1'b0;                  // PCE PORT: port C stays byte-granular
-			ram_req <= fetch_req_c;
-			last_a[2] <= RAM_C_ADDR[24:2];
+			// PCE PORT (2026-08-30): RAM_C_WIDE/RAM_C_LINE_REFILL additions -- mirrors
+			// port A's own launch branch exactly (RAM_C_ADDR_LINE_MASKED, wide_acc,
+			// line_refill, ram_req's real-access-vs-fake-round-trip choice). `lr_is_c`
+			// records this launch was C's, for STATE_LAST_LR's completion routing below.
+			// CD-RAM (RAM_C_WIDE=0, RAM_C_LINE_REFILL=0, both default) takes the exact
+			// same values the old byte-granular code always used -- byte-identical.
+			{bank,a} <= RAM_C_LINE_REFILL ? RAM_C_ADDR_LINE_MASKED : RAM_C_ADDR;
+			data <= RAM_C_WIDE ? RAM_C_DI16 : {RAM_C_DI,RAM_C_DI};
+			wide_acc <= RAM_C_WIDE;
+			ram_req <= RAM_C_LINE_REFILL ? 1'b1 : fetch_req_c;
+			last_a[2] <= RAM_C_LINE_REFILL ? RAM_C_ADDR_LINE_MASKED[24:2] : RAM_C_ADDR[24:2];
 			last_valid[2] <= ~RAM_C_RD_n;
 			ch2_busy <= 1;
+			line_refill <= RAM_C_LINE_REFILL;
+			lr_is_c <= 1'b1;
 			state <= STATE_START;
 		end
 	end
@@ -521,18 +569,30 @@ always @(posedge clk) begin
 		// PCE PORT: third client (CD-RAM), mirrors ch0_busy exactly -- real read+write
 		// with a small line cache, same as port A (see header for why this doesn't use
 		// port B's write-invalidates convention).
+		// PCE PORT (2026-08-30): RAM_C_WIDE branch added throughout, mirroring ch0_busy's
+		// own wide-vs-byte split exactly (RAM_C_DO16 <= full word, no a[0]/a[1:0] byte
+		// select) -- CD-RAM's own RAM_C_WIDE=0 path is completely unchanged, same
+		// expressions as before this port existed. `if(!line_refill)` on RAM_C_WAIT
+		// mirrors ch0_busy's own line-refill guard -- words 2/3 of a wide line refill
+		// haven't landed yet; it clears instead at STATE_LAST_LR below.
 		if(ch2_busy) begin
 			ch2_busy <= 0;
-			RAM_C_WAIT <= 0;
+			if(!line_refill) RAM_C_WAIT <= 0;
 			if(ram_req) begin
-				if(we) RAM_C_DO <= data[7:0];
-				else begin
-					RAM_C_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
+				if(we) begin
+					if(wide_acc) RAM_C_DO16 <= data;
+					else RAM_C_DO <= data[7:0];
+				end else begin
+					if(wide_acc) RAM_C_DO16 <= data_reg;
+					else RAM_C_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
 					last_data[2][(a[1] ? 16 : 0) +:16] <= data_reg;
 					store <= {1'b1,2'b10,~a[1]};
 				end
 			end
-			else RAM_C_DO <= last_data[2][(a[1:0]*8) +:8];
+			else begin
+				if(wide_acc) RAM_C_DO16 <= last_data[2][(a[1] ? 16 : 0) +:16];
+				else RAM_C_DO <= last_data[2][(a[1:0]*8) +:8];
+			end
 		end
 	end
 
@@ -553,9 +613,22 @@ always @(posedge clk) begin
 		last_data0_ext[15:0] <= data_reg;    // word2
 		store_lr <= 1'b1;
 	end
+	// PCE PORT (2026-08-30): routed by `lr_is_c` -- everything upstream of this point
+	// (STATE_CONT2's 2nd READ reissue, last_data0_ext's word2/word3 capture) is already
+	// channel-agnostic, keyed only on `line_refill`/state/mode, never on which port
+	// launched it. This is the one place that was A-specific: which real destination
+	// (RAM_A_LINE_DO/last_data[0] vs RAM_C_LINE_DO/last_data[2]) gets the completed line,
+	// and which WAIT clears. CD-RAM never sets RAM_C_LINE_REFILL (defaults 0), so
+	// line_refill can only be 1 here via A's own request or a real VRAM1/wide-C request --
+	// lr_is_c disambiguates the two.
 	if(line_refill && state == STATE_LAST_LR) begin
-		RAM_A_WAIT    <= 1'b0;
-		RAM_A_LINE_DO <= {last_data0_ext, last_data[0]};
+		if(lr_is_c) begin
+			RAM_C_WAIT    <= 1'b0;
+			RAM_C_LINE_DO <= {last_data0_ext, last_data[2]};
+		end else begin
+			RAM_A_WAIT    <= 1'b0;
+			RAM_A_LINE_DO <= {last_data0_ext, last_data[0]};
+		end
 	end
 
 	if(mode != MODE_NORMAL || state != STATE_IDLE || reset) begin

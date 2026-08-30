@@ -72,7 +72,40 @@ entity pce_top is
 		-- stress) and gw_sh-clean on Primer 25K (0.656% clk_pce margin when on, tighter
 		-- than the BAT-only baseline but 0 violations) -- not yet measured on every
 		-- board that could carry it. Defaults to 0 (off).
-		VRAM0_CG_PREFETCH : integer := 0
+		VRAM0_CG_PREFETCH : integer := 0;
+
+		-- PCE PORT (2026-08-30): VRAM1/SGX's own EXT_VRAM0 equivalent -- see that
+		-- generic's own comment above for the shared rationale (a board whose engine
+		-- doesn't fit VRAM1 on-chip alongside VDC0/VRAM0/CD/Arcade-Card routes VDC1's
+		-- own VRAM through an external SDRAM controller's port C instead, via
+		-- vram0_cache.vhd -- the SAME entity VRAM0 uses, reused as-is: its interface
+		-- (address_a/data_a/wren_a/q_a, ram_a_*) has nothing VDC0-specific in it).
+		-- GHDL-verified feasible via a real two-VDC bus-contention testbench
+		-- (sim/vram0/tb_sgx_contention.vhd) before this generic existed -- see session
+		-- memory for the real numbers. Only meaningful when LITE=0 (SGX enabled) --
+		-- gen_vram1_ext below sits inside generate_SGX, so this generic is a no-op on
+		-- any LITE=1 board regardless of its own value, same relationship
+		-- VRAM0_PREFETCH has to gen_vram0_pf. Defaults to 0 (on-chip dpram, donor
+		-- behaviour) so every existing SGX board (Console 60K CD) is unaffected.
+		EXT_VRAM1 : integer := 0;
+		-- Same real 4-word line-refill mechanism as VRAM0_LINE_REFILL, VDC1's own copy.
+		-- Only meaningful when EXT_VRAM1 /= 0 AND the board's own sdram.sv instance
+		-- implements it on port C (RAM_C_LINE_REFILL -- see sdram.sv's own header).
+		VRAM1_LINE_REFILL : integer := 0;
+		-- Same real BAT prefetch engine as VRAM0_PREFETCH, VDC1's own copy (PREFETCH1
+		-- below, a second instance of the same vram0_prefetch entity). Required for
+		-- correctness, not just performance, on any board that enables EXT_VRAM1 with
+		-- VDC1 actively rendering in real time -- without it, VDC1 is exposed to the
+		-- exact same deadline-miss corruption class VDC0 had before its own BAT fix
+		-- (see vram0_prefetch.vhd's header). Kept as its own opt-in generic anyway,
+		-- matching VRAM0_PREFETCH's own precedent, rather than tying it to EXT_VRAM1
+		-- directly -- lets a first bring-up pass verify basic wiring/fit before
+		-- trusting the prefetch engine's own real-time behaviour on a second VDC.
+		VRAM1_PREFETCH : integer := 0;
+		-- Same real CG0/CG1 tile-pattern extension as VRAM0_CG_PREFETCH, VDC1's own
+		-- copy. Same structural gating as that generic (only meaningful inside
+		-- gen_vram1_pf below, which itself only exists when VRAM1_PREFETCH /= 0).
+		VRAM1_CG_PREFETCH : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -102,6 +135,24 @@ entity pce_top is
 		-- below).
 		VRAM0_RAM_A_LINE_REFILL : out std_logic;
 		VRAM0_RAM_A_LINE_DO     : in  std_logic_vector(63 downto 0) := (others => '0');
+
+		-- PCE PORT (2026-08-30): VDC1's own copy of every VRAM0_RAM_A_* port above --
+		-- see EXT_VRAM1's own generic comment. Unused/left open on every board that
+		-- doesn't set EXT_VRAM1 (including every LITE=1 board, where gen_vram1_ext
+		-- doesn't exist at all).
+		VRAM1_RAM_A_ADDR : out std_logic_vector(20 downto 0);
+		VRAM1_RAM_A_REQ  : out std_logic;
+		VRAM1_RAM_A_RD_N : out std_logic;
+		VRAM1_RAM_A_DI   : out std_logic_vector(15 downto 0);
+		VRAM1_RAM_A_DO   : in  std_logic_vector(15 downto 0) := (others => '0');
+		VRAM1_RAM_A_WAIT : in  std_logic := '0';
+		VRAM1_RAM_A_LINE_REFILL : out std_logic;
+		VRAM1_RAM_A_LINE_DO     : in  std_logic_vector(63 downto 0) := (others => '0');
+
+		-- VDC1's own copy of DBG_DEADLINE_MISS/DBG_FIFO_OVERFLOW -- '0' always unless
+		-- EXT_VRAM1 /= 0 (no gen_vram1_ext instance to drive them otherwise).
+		DBG_DEADLINE_MISS_1 : out std_logic;
+		DBG_FIFO_OVERFLOW_1 : out std_logic;
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -257,6 +308,12 @@ signal VDC0_COLNO		: std_logic_vector(8 downto 0);
 signal VDC0_SCREEN_DBG : std_logic_vector(2 downto 0);
 signal VDC0_OFS_Y_DBG  : std_logic_vector(8 downto 0);
 signal VDC0_BYR_DBG    : std_logic_vector(8 downto 0);
+-- PCE PORT (2026-08-30): VDC1's own copy, for gen_vram1_ext/PREFETCH1 -- see EXT_VRAM1's
+-- own generic comment. Harmless dead logic on any board where gen_vram1_ext doesn't
+-- exist (LITE=1, or LITE=0 with EXT_VRAM1=0), same as VDC0_SCREEN_DBG's own note above.
+signal VDC1_SCREEN_DBG : std_logic_vector(2 downto 0);
+signal VDC1_OFS_Y_DBG  : std_logic_vector(8 downto 0);
+signal VDC1_BYR_DBG    : std_logic_vector(8 downto 0);
 signal VDC1_DO			: std_logic_vector(15 downto 0);		-- only lower 8 bits are used in 8-bit mode
 alias  VDC1_DO_LO		: std_logic_vector(7 downto 0) is VDC1_DO(7 downto 0);
 signal VDC1_BUSY_N	: std_logic;
@@ -684,31 +741,150 @@ generate_SGX: if (LITE = 0) generate begin
 		VSYNC_R	=> VCE_VSYNC_R,
 		VD			=> VDC1_COLNO,
 		--GRID		=> VDC1_GRID,
-		
+
 		SP64     => SP64,
-		
+
 		RAM_A		=> VRAM1_A,
 		RAM_DI	=> VRAM1_DI,
 		RAM_DO	=> VRAM1_DO,
 		RAM_WE	=> VRAM1_WE,
 
 		BG_EN		=> BG_EN,
-		SPR_EN	=> SPR_EN
+		SPR_EN	=> SPR_EN,
+
+		SCREEN_DBG => VDC1_SCREEN_DBG,
+		OFS_Y_DBG  => VDC1_OFS_Y_DBG,
+		BYR_DBG    => VDC1_BYR_DBG
 	);
 
-	VRAM1 : entity work.dpram generic map (addr_width => 15, data_width => 16, disable_value => '0')
-	port map (
-		clock		=> CLK,
-		address_a=> VRAM1_A(14 downto 0),
-		data_a	=> VRAM1_DO,
-		cs_a		=> not VRAM1_A(15),
-		wren_a	=> VRAM1_WE and not VRAM1_A(15),
-		q_a		=> VRAM1_DI,
+	-- EXT_VRAM1 = 0: donor behaviour, byte-identical, including the CLR_A/CLR_WE
+	-- cold-reset clear-sweep on port B -- see EXT_VRAM1's own generic comment and
+	-- gen_vram0_ext's identical structure above.
+	gen_vram1_onchip: if EXT_VRAM1 = 0 generate
+	begin
+		VRAM1 : entity work.dpram generic map (addr_width => 15, data_width => 16, disable_value => '0')
+		port map (
+			clock		=> CLK,
+			address_a=> VRAM1_A(14 downto 0),
+			data_a	=> VRAM1_DO,
+			cs_a		=> not VRAM1_A(15),
+			wren_a	=> VRAM1_WE and not VRAM1_A(15),
+			q_a		=> VRAM1_DI,
 
-		address_b=> CLR_A,
-		data_b	=> (others => '0'),
-		wren_b	=> CLR_WE
-	);
+			address_b=> CLR_A,
+			data_b	=> (others => '0'),
+			wren_b	=> CLR_WE
+		);
+		DBG_DEADLINE_MISS_1 <= '0';
+		DBG_FIFO_OVERFLOW_1 <= '0';
+		VRAM1_RAM_A_LINE_REFILL <= '0';
+	end generate;
+
+	-- EXT_VRAM1 /= 0 (Primer 25K SGX): src/common/mem/vram0_cache.vhd instead -- the
+	-- SAME entity VRAM0 uses, a second real instance, backed by sdram.sv's port C via
+	-- the board top's own real 16-bit/line-refill additions (see sdram.sv's
+	-- RAM_C_WIDE/RAM_C_LINE_REFILL header comment). Mirrors gen_vram0_ext's own
+	-- structure exactly -- see that generate's comments for the wren_a chip-select
+	-- gating and the "no CLR_A/CLR_WE equivalent" scope decision, both apply here too.
+	gen_vram1_ext: if EXT_VRAM1 /= 0 generate
+	begin
+
+		-- Mirrors gen_vram0_pf's own split exactly -- see that generate's comment for
+		-- why this is a nested generate rather than an inert-when-off internal mux.
+		gen_vram1_pf: if VRAM1_PREFETCH /= 0 generate
+			signal ds_address_a : std_logic_vector(14 downto 0);
+			signal ds_data_a    : std_logic_vector(15 downto 0);
+			signal ds_wren_a    : std_logic;
+			signal ds_q_a       : std_logic_vector(15 downto 0);
+			signal pf_addr      : std_logic_vector(14 downto 0);
+			signal pf_req       : std_logic;
+			signal pf_rdata     : std_logic_vector(63 downto 0);
+			signal pf_done      : std_logic;
+		begin
+			PREFETCH1 : entity work.vram0_prefetch
+			generic map (G_CG_PREFETCH => VRAM1_CG_PREFETCH /= 0)
+			port map (
+				clock      => CLK,
+				hsync_f    => VCE_HSYNC_F,
+				screen_dbg => VDC1_SCREEN_DBG,
+				ofs_y_dbg  => VDC1_OFS_Y_DBG,
+				byr_dbg    => VDC1_BYR_DBG,
+
+				address_a  => VRAM1_A(14 downto 0),
+				data_a     => VRAM1_DO,
+				wren_a     => VRAM1_WE and not VRAM1_A(15),
+				q_a        => VRAM1_DI,
+
+				ds_address_a => ds_address_a,
+				ds_data_a    => ds_data_a,
+				ds_wren_a    => ds_wren_a,
+				ds_q_a       => ds_q_a,
+
+				pf_addr  => pf_addr,
+				pf_req   => pf_req,
+				pf_rdata => pf_rdata,
+				pf_done  => pf_done,
+
+				dbg_pf_hit     => open,
+				dbg_pf_overrun => open
+			);
+
+			VRAM1 : entity work.vram0_cache
+			generic map (
+				G_LINE_REFILL => VRAM1_LINE_REFILL /= 0,
+				G_PREFETCH    => true
+			)
+			port map (
+				clock      => CLK,
+				dck_ce     => VDC_CLKEN,
+				address_a  => ds_address_a,
+				data_a     => ds_data_a,
+				wren_a     => ds_wren_a,
+				q_a        => ds_q_a,
+				pf_addr    => pf_addr,
+				pf_req     => pf_req,
+				pf_rdata   => pf_rdata,
+				pf_done    => pf_done,
+				ram_a_addr => VRAM1_RAM_A_ADDR,
+				ram_a_req  => VRAM1_RAM_A_REQ,
+				ram_a_rd_n => VRAM1_RAM_A_RD_N,
+				ram_a_di   => VRAM1_RAM_A_DI,
+				ram_a_do   => VRAM1_RAM_A_DO,
+				ram_a_wait => VRAM1_RAM_A_WAIT,
+				ram_a_line_refill => VRAM1_RAM_A_LINE_REFILL,
+				ram_a_line_do     => VRAM1_RAM_A_LINE_DO,
+				dbg_deadline_miss => DBG_DEADLINE_MISS_1,
+				dbg_fifo_overflow => DBG_FIFO_OVERFLOW_1
+			);
+		end generate;
+
+		-- VRAM1_PREFETCH = 0: byte-identical to a version that never had PREFETCH1 --
+		-- see gen_vram0_pf_none's own comment.
+		gen_vram1_pf_none: if VRAM1_PREFETCH = 0 generate
+		begin
+			VRAM1 : entity work.vram0_cache
+			generic map (G_LINE_REFILL => VRAM1_LINE_REFILL /= 0)
+			port map (
+				clock      => CLK,
+				dck_ce     => VDC_CLKEN,
+				address_a  => VRAM1_A(14 downto 0),
+				data_a     => VRAM1_DO,
+				wren_a     => VRAM1_WE and not VRAM1_A(15),
+				q_a        => VRAM1_DI,
+				ram_a_addr => VRAM1_RAM_A_ADDR,
+				ram_a_req  => VRAM1_RAM_A_REQ,
+				ram_a_rd_n => VRAM1_RAM_A_RD_N,
+				ram_a_di   => VRAM1_RAM_A_DI,
+				ram_a_do   => VRAM1_RAM_A_DO,
+				ram_a_wait => VRAM1_RAM_A_WAIT,
+				ram_a_line_refill => VRAM1_RAM_A_LINE_REFILL,
+				ram_a_line_do     => VRAM1_RAM_A_LINE_DO,
+				dbg_deadline_miss => DBG_DEADLINE_MISS_1,
+				dbg_fifo_overflow => DBG_FIFO_OVERFLOW_1
+			);
+		end generate;
+
+	end generate;
 
 	VPC : entity work.huc6202
 	port map(
@@ -760,9 +936,20 @@ generate_NOSGX: if (LITE /= 0) generate begin
 	VDC1_DO <= (others => '1');
 	VPC_DO <= (others => '1');
 	VDC_COLNO <= VDC0_COLNO;
-	
+
 	BORDER <= VDC0_BORDER;
 	GRID <= VDC0_GRID;
+
+	-- PCE PORT (2026-08-30): gen_vram1_ext/gen_vram1_onchip both live entirely inside
+	-- generate_SGX, which doesn't exist at all here (LITE=1) -- these outputs need a
+	-- driver on this path too, same rationale as VDC1_BUSY_N/VDC1_IRQ_N/etc above.
+	VRAM1_RAM_A_ADDR <= (others => '0');
+	VRAM1_RAM_A_REQ  <= '0';
+	VRAM1_RAM_A_RD_N <= '1';
+	VRAM1_RAM_A_DI   <= (others => '0');
+	VRAM1_RAM_A_LINE_REFILL <= '0';
+	DBG_DEADLINE_MISS_1 <= '0';
+	DBG_FIFO_OVERFLOW_1 <= '0';
 
 end generate;
 

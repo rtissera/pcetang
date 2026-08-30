@@ -170,7 +170,16 @@ architecture rtl of pcetang_primer25k_cd is
          RAM_C_RD_n : in    std_logic;
          RAM_C_DI   : in    std_logic_vector(7 downto 0);
          RAM_C_DO   : out   std_logic_vector(7 downto 0);
-         RAM_C_WAIT : out   std_logic
+         RAM_C_WAIT : out   std_logic;
+         -- PCE PORT (2026-08-30): real 16-bit + line-refill additions for a wide port-C
+         -- client (VRAM1/SGX, not used on this board) -- see sdram.sv's own header. Tied
+         -- off explicitly below, same mixed-language-boundary rationale as every other
+         -- RAM_C_*/RAM_A_LINE_REFILL tie-off in this file (real EX4232 error otherwise).
+         RAM_C_WIDE : in    std_logic;
+         RAM_C_DI16 : in    std_logic_vector(15 downto 0);
+         RAM_C_DO16 : out   std_logic_vector(15 downto 0);
+         RAM_C_LINE_REFILL : in    std_logic;
+         RAM_C_LINE_DO     : out   std_logic_vector(63 downto 0)
       );
    end component;
 
@@ -557,7 +566,12 @@ begin
       RAM_C_RD_n => cdr_rd_n,
       RAM_C_DI   => cdr_di,
       RAM_C_DO   => cdr_do,
-      RAM_C_WAIT => cdr_wait
+      RAM_C_WAIT => cdr_wait,
+      RAM_C_WIDE => '0',
+      RAM_C_DI16 => (others => '0'),
+      RAM_C_DO16 => open,
+      RAM_C_LINE_REFILL => '0',
+      RAM_C_LINE_DO     => open
    );
 
    -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read bridge
