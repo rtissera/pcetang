@@ -86,7 +86,10 @@ architecture rtl of pcetang_nano20k is
          SDRAM_nCS  : out   std_logic;
          SDRAM_CKE  : out   std_logic;
          SDRAM_CLK  : out   std_logic;
-         RAM_A_ADDR : in    std_logic_vector(20 downto 0);
+         -- PCE PORT (2026-08-30): widened 21->23 bits, real bank register -- see
+         -- sdram32.sv's own header. This board (plain, no CD) never leaves bank 0, so
+         -- this is a pure zero-extension at the port map below, no functional change.
+         RAM_A_ADDR : in    std_logic_vector(22 downto 0);
          RAM_A_REQ  : in    std_logic;
          RAM_A_RD_n : in    std_logic;
          RAM_A_DI   : in    std_logic_vector(15 downto 0);
@@ -97,7 +100,7 @@ architecture rtl of pcetang_nano20k is
          -- "line refill" header note.
          RAM_A_LINE_REFILL : in    std_logic := '0';
          RAM_A_LINE_DO     : out   std_logic_vector(63 downto 0);
-         RAM_B_ADDR : in    std_logic_vector(20 downto 0);
+         RAM_B_ADDR : in    std_logic_vector(22 downto 0);
          RAM_B_REQ  : in    std_logic;
          -- PCE PORT (2026-08-30): port B write support, for the ROM-to-SDRAM load
          -- bridge below -- see sdram32.sv's own header note.
@@ -343,7 +346,10 @@ begin
       SDRAM_nCS  => O_sdram_cs_n,
       SDRAM_CKE  => O_sdram_cke,
       SDRAM_CLK  => O_sdram_clk,
-      RAM_A_ADDR => vram0_ram_a_addr,
+      -- Zero-extended, not widened -- VRAM0/ROM both stay entirely within bank 0 on this
+      -- board (no CD-RAM/ADPCM/Arcade-Card here), same convention as the GW5A boards'
+      -- own port-A/B zero-extension after their address widening.
+      RAM_A_ADDR => "00" & vram0_ram_a_addr,
       RAM_A_REQ  => vram0_ram_a_req,
       RAM_A_RD_n => vram0_ram_a_rd_n,
       RAM_A_DI   => vram0_ram_a_di,
@@ -351,7 +357,7 @@ begin
       RAM_A_WAIT => vram0_ram_a_wait,
       RAM_A_LINE_REFILL => vram0_ram_a_line_refill,
       RAM_A_LINE_DO     => vram0_ram_a_line_do,
-      RAM_B_ADDR => romb_addr,
+      RAM_B_ADDR => "00" & romb_addr,
       RAM_B_REQ  => romb_req,
       RAM_B_WE   => romb_we,
       RAM_B_DI   => romb_di,

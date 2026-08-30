@@ -18,10 +18,12 @@
 //    - The original smuggled the byte selects through SDRAM_A[12:11]. An 11-bit address
 //      bus has no spare lines, so DQM is driven explicitly.
 //
-//  Address map, for the 2 MB the Next needs out of the 8 MB die:
+//  Address map, for the 2 MB the Next needs out of the 8 MB die (bank always 0 in the
+//  original ZX Next port and in every PCE-port board until 2026-08-30 -- see the port
+//  declarations' own widening note for when/why that stopped being true here):
 //    byte address [20:0] -> word [18:0] = addr[20:2]
-//    column = word[7:0]   row = word[18:8]   bank = 0
-//    2048 rows x 256 columns x 4 bytes = 2 MB in bank 0.
+//    column = word[7:0]   row = word[18:8]   bank = addr[22:21] (was fixed 0)
+//    2048 rows x 256 columns x 4 bytes x 4 banks = 8 MB total.
 //
 //  Verified on a Tang Nano 20K at 140 MHz by (in the ZX Next port) src/boards/
 //  tang_nano20k/bringup/nano20k_diag: 256 sequential byte writes read back byte-exact,
@@ -54,11 +56,19 @@
 //      on-chip). Real HuCard ROMs are >=128K -- too big for on-chip BRAM once the rest of
 //      pce_top is already fitted -- so ROM moves to this chip's own SDRAM instead, same
 //      pattern as sdram.sv's port B on the GW5A boards (pcetang_primer25k.vhd's ROM
-//      bridge is the reference this was copied from). No address widening needed: this
-//      board's whole chip is 2 MB (see the address-map note above), VRAM0 (port A) uses
-//      well under 128K of it (real PC Engine VRAM is 64K), so ROM fits in the SAME 2 MB at
-//      a different offset -- unlike the GW5A boards' CD-RAM/ADPCM/Arcade-Card widening,
-//      this stays inside the existing 21-bit address bus entirely.
+//      bridge is the reference this was copied from). ROM alone fit inside the original
+//      21-bit/2MB bus (VRAM0 uses well under 128K of it, real PC Engine VRAM is 64K) --
+//      no widening needed for ROM specifically.
+//    - Widened 21->23 bits, real bank register added (2026-08-30, see the port
+//      declarations' own note): CD-RAM/ADPCM RAM/Arcade Card RAM (pcetang_nano20k_cd.vhd)
+//      need real capacity beyond ROM+VRAM0's combined footprint inside bank 0 alone. This
+//      is the SAME class of touch that regressed plain Nano 20K's BAT+CG margin once
+//      before (see pcetang_nano20k_cd_attempt.md) -- retried here specifically because
+//      the alternate PnR algorithm (place_option 2/route_option 1, see
+//      pcetang_status_matrix.md lever 13) recovered real margin project-wide since that
+//      regression was found, on a device with otherwise near-zero slack. Real regression
+//      re-check on the plain board is mandatory before trusting this, not optional --
+//      see that same memory note for the standing rule this retry is testing against.
 //
 //  Part of the PC Engine / SGX / TG16 port to Sipeed Tang boards. GPLv3.
 //
@@ -138,7 +148,13 @@ module sdram32
 	output            SDRAM_CKE,
 	output            SDRAM_CLK,
 
-	input      [20:0] RAM_A_ADDR,
+	// PCE PORT (2026-08-30): widened 21->23 bits, real bank register -- this board's
+	// physical die is 8MB (4 banks x 2MB, see the address-map note above), of which the
+	// original ZX Next port only ever addressed bank 0. CD-RAM/ADPCM RAM/Arcade Card RAM
+	// (pcetang_nano20k_cd.vhd) need real capacity beyond the 2MB the RAM_B write-support
+	// change above still fit inside. RAM_A (VRAM0) stays zero-extended into the wider bus
+	// at the board level -- VRAM0 never leaves bank 0, same as before.
+	input      [22:0] RAM_A_ADDR,
 	input             RAM_A_REQ,
 	input             RAM_A_RD_n,
 	// PCE PORT (2026-08-27): widened 8->16 bits, mirroring sdram.sv's port A width fix --
@@ -161,7 +177,7 @@ module sdram32
 	// caller of this port.
 	output reg [63:0] RAM_A_LINE_DO,
 
-	input      [20:0] RAM_B_ADDR,
+	input      [22:0] RAM_B_ADDR,
 	input             RAM_B_REQ,
 	// PCE PORT (2026-08-30): port B write support, for the ROM-load bridge -- this
 	// board's on-package chip is only 2 MB total, of which VRAM0 (port A) uses well
@@ -256,11 +272,22 @@ localparam STATE_LAST_LR = STATE_READY2 + 3'd3;
 reg  [3:0] state;
 reg [18:0] word_a;                    // word address of the access in flight
 reg  [1:0] byte_a;                    // byte within that word
+// PCE PORT (2026-08-30): real bank register, addr[22:21] -- see the port declarations'
+// own header note. Kept SEPARATE from word_a rather than widening it: word_a's own
+// [18:0] is exactly addr[20:2], the row/col-relevant bits, UNCHANGED math from before
+// this widening -- only the new top 2 bits go anywhere new. row/col extraction below is
+// untouched.
+reg  [1:0] bank;
 reg [31:0] data;                      // write data, byte replicated across all lanes
 reg  [3:0] dqm_w;                     // byte enable for writes
 reg        we;
 reg        ram_req = 0;
 reg [18:0] last_a[2];                 // cached word address per channel
+// PCE PORT (2026-08-30): per-channel bank tag, alongside last_a -- a real correctness
+// requirement of the bank widening, not decorative: without it, two different banks'
+// same row/col would alias into the same cache line (same aliasing bug class sdram.sv's
+// own 25-bit widen fixed on the GW5A boards -- see that file's last_a[3] note).
+reg  [1:0] last_bank[2];
 reg  [1:0] last_valid = 2'b00;        // and whether that cache line means anything
 reg  [8:0] rfsh_cnt;
 
@@ -325,7 +352,7 @@ end
 //
 // Aligning them costs one 140.4 MHz cycle of latency per access, 7.12 ns, inside a 35.6 ns
 // CPU cycle.
-reg [20:0] a_addr_d, b_addr_d;
+reg [22:0] a_addr_d, b_addr_d;
 reg        a_req_d, a_rd_n_d, b_req_d;
 reg [15:0] a_di_d;
 // PCE PORT (2026-08-30): port B write's own pipeline registers, same treatment as
@@ -348,8 +375,8 @@ always @(posedge clk) begin
 	b_we_d   <= RAM_B_WE;
 	b_di_d   <= RAM_B_DI;
 
-	hit_a <= last_valid[0] && (last_a[0] == RAM_A_ADDR[20:2]);
-	hit_b <= last_valid[1] && (last_a[1] == RAM_B_ADDR[20:2]);
+	hit_a <= last_valid[0] && (last_a[0] == RAM_A_ADDR[20:2]) && (last_bank[0] == RAM_A_ADDR[22:21]);
+	hit_b <= last_valid[1] && (last_a[1] == RAM_B_ADDR[20:2]) && (last_bank[1] == RAM_B_ADDR[22:21]);
 end
 
 wire fetch_req = (a_rd_n_d || !hit_a);
@@ -363,7 +390,7 @@ wire fetch_req_b = (b_we_d || !hit_b);
 // (RAM_A_ADDR[2]) to 0. Same masking formula as sdram.sv's RAM_A_ADDR_LINE_MASKED, since
 // both controllers share vram0_cache.vhd's `RAM_A_ADDR = seq_addr*2` convention
 // (confirmed at vram0_cache.vhd:749, not assumed).
-wire [20:0] a_addr_d_line_masked = {a_addr_d[20:3], 3'b000};
+wire [22:0] a_addr_d_line_masked = {a_addr_d[22:3], 3'b000};
 
 // access manager
 always @(posedge clk) begin
@@ -451,6 +478,8 @@ always @(posedge clk) begin
 			// as a word2/word3 one.
 			word_a    <= line_refill_d ? a_addr_d_line_masked[20:2] : a_addr_d[20:2];
 			byte_a    <= line_refill_d ? 2'b00 : a_addr_d[1:0];
+			// PCE PORT (2026-08-30): real bank -- see the reg declaration's own comment.
+			bank      <= line_refill_d ? a_addr_d_line_masked[22:21] : a_addr_d[22:21];
 			// PCE PORT (2026-08-27): port A is a real 16-bit word now (see RAM_A_DI/DO
 			// width note) -- writes both bytes of the addressed half, not one byte of
 			// four. a_addr_d[0] is always 0 (word-aligned from vram0_cache.vhd); [1]
@@ -465,6 +494,7 @@ always @(posedge clk) begin
 			// A write invalidates the line rather than trying to patch it: the byte went
 			// to the chip, and the cached copy would otherwise go stale.
 			last_a[0]     <= line_refill_d ? a_addr_d_line_masked[20:2] : a_addr_d[20:2];
+			last_bank[0]  <= line_refill_d ? a_addr_d_line_masked[22:21] : a_addr_d[22:21];
 			last_valid[0] <= ~a_rd_n_d;
 			ch0_busy  <= 1;
 			line_refill <= line_refill_d;
@@ -474,6 +504,7 @@ always @(posedge clk) begin
 			old_b_req <= b_req_d;
 			word_a    <= b_addr_d[20:2];
 			byte_a    <= b_addr_d[1:0];
+			bank      <= b_addr_d[22:21];
 			// PCE PORT (2026-08-30): write support -- we/data/dqm_w are the SAME shared
 			// registers port A's launch branch drives; safe to reuse since A and B
 			// launches are mutually exclusive (this whole chain is one else-if), exactly
@@ -485,7 +516,8 @@ always @(posedge clk) begin
 			data      <= {4{b_di_d}};
 			dqm_w     <= ~(4'b0001 << b_addr_d[1:0]);
 			ram_req   <= 1;
-			last_a[1] <= b_addr_d[20:2];
+			last_a[1]    <= b_addr_d[20:2];
+			last_bank[1] <= b_addr_d[22:21];
 			// A write invalidates the line rather than patching it -- same reasoning as
 			// port A's last_valid[0] <= ~a_rd_n_d above.
 			last_valid[1] <= ~b_we_d;
@@ -577,7 +609,9 @@ wire line_refill_2nd_read = line_refill && ram_req && !we && mode == MODE_NORMAL
 
 // command and address generation
 always @(posedge clk) begin
-	if(state == STATE_START) SDRAM_BA <= 2'b00;   // the Next's 2 MB live in bank 0
+	// PCE PORT (2026-08-30): real bank, was hardcoded 2'b00 -- see the port declaration's
+	// own widening note.
+	if(state == STATE_START) SDRAM_BA <= bank;
 
 	casex({ram_req,we,mode,state})
 		{2'b1X, MODE_NORMAL, STATE_START}: {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_ACTIVE;
