@@ -1,23 +1,27 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 
--- RETRY 2026-08-30 (real, not reference-only): the FIRST attempt at this file (see
--- pcetang_nano20k_cd_attempt.md) hit two real walls: touching sdram32.sv at all broke
--- plain Nano 20K's BAT+CG margin via placement noise, and the CD build itself hit a hard
--- BSRAM ceiling (46/46) plus a real -9.7% clk_pce timing miss even with BAT/CG disabled.
--- Retried now because two things changed since: (1) the alternate PnR algorithm
--- (place_option 2/route_option 1, see pcetang_status_matrix.md lever 13) recovered real
--- margin project-wide on every board it's been tried on, including this one's plain
--- build after ITS OWN sdram32.sv touch (ROM-to-SDRAM, +0.019%->+1.85%); (2) ROM also
--- moved off on-chip BRAM onto SDRAM here (see the ROM section below), freeing the same
--- ~13 real BSRAM blocks the plain board freed, on top of whatever this file's own
--- CD-RAM/ADPCM/Arcade-Card offload already needed. Real regression re-check on the plain
--- board (not just this file) is mandatory before trusting either result -- see this
--- session's own build log, not assumed fixed by the reasoning above alone.
+-- pcetang Phase 1: Tang Nano 20K, TangCore-integrated (iosys_bl616: ROM load, joypad,
+-- OSD), full PCE+PCE-CD combo (NO_CD=>0), EXT_VRAM0=>1 (Nano 20K's whole engine does
+-- not fit on-chip). SOLE Nano 20K build as of 2026-08-30 -- the plain, HuCard-only
+-- variant (pcetang_nano20k.vhd/build_nano20k.tcl) is retired now that this file has
+-- real feature parity plus CD, mirroring Console 60K's own plain->combo unification
+-- (`2108d6b`). ROM, CD-RAM, ADPCM RAM, and Arcade Card RAM are all offloaded to the
+-- on-package SDRAM (sdram32.sv), scandoubler HDMI (pce2hdmi_sd.sv, same -11-BSRAM-block
+-- swap already banked on Primer 25K plain, commit 0db5950).
 --
--- pcetang Nano 20K CD attempt: TangCore-integrated (iosys_bl616), NO_CD=>0, EXT_VRAM0=>1
--- (Nano 20K's whole engine does not fit on-chip), CD-RAM/ADPCM RAM/Arcade Card RAM all
--- offloaded to the on-package SDRAM (sdram32.sv), scandoubler HDMI (pce2hdmi_sd.sv,
--- same -11-BSRAM-block swap already banked on Primer 25K plain, commit 0db5950).
+-- Real history, not reference-only: the FIRST attempt at this file (see
+-- pcetang_nano20k_cd_attempt.md) hit two real walls -- touching sdram32.sv at all broke
+-- plain Nano 20K's BAT+CG margin via placement noise, and the CD build itself hit a hard
+-- BSRAM ceiling (46/46) plus a real -9.7% clk_pce timing miss even with BAT/CG disabled
+-- -- and was reverted. Retried successfully 2026-08-30 (`0c3aec0`) once two things
+-- changed: the alternate PnR algorithm (place_option 2/route_option 1, see
+-- pcetang_status_matrix.md lever 13) recovered real margin project-wide, and ROM also
+-- moved off on-chip BRAM onto SDRAM (own owner in the port-B arbiter below), freeing the
+-- same ~13 real BSRAM blocks the plain board's own ROM move freed. BAT+CG0/CG1 enabled
+-- and fits too (`afe0b90`), closing the same VRAM0 deadline-miss gap the plain board had
+-- (on-package SDRAM has the same real ACTIVE/CAS/precharge latency class as off-chip
+-- SDRAM -- confirmed by this exact bug already existing on Nano 20K plain pre-dating
+-- either CD attempt, not assumed).
 --
 -- REAL, NAMED SCOPE (2026-08-29): sdram32.sv widened 21->23 bits (2MB->8MB, real chip
 -- confirmed 8MB die from that file's own header, an existing ZX Next port fact, not
@@ -38,7 +42,7 @@
 --     board).
 --   - SGX/VRAM1: out of scope -- see the Nano 20K CD/SGX feasibility note in
 --     pcetang_status_matrix.md (SGX fails on BSRAM+CLS even before this board's own
---     razor-thin clk_pce margin is considered). LITE=>1, SGX=>'0', unchanged from plain.
+--     margin is considered). LITE=>1, SGX=>'0'.
 --   - CDDA_FIFO/CDSUBC_FIFO: kept dead-stubbed (CD_AUDIO_WR/CD_SUBCD_WR => '0'), per
 --     direct user instruction -- same state as every other board today. 128Kbit/4Kbit,
 --     unpriced, deferred.
@@ -51,17 +55,14 @@
 --     Mednafen-checked sense data) even though no syscard can load yet -- costs nothing
 --     extra to wire now, and makes a future ROM-offload addition immediately usable.
 --
--- Video: pce2hdmi.sv on plain Nano 20K already runs VIDEOID=>2/CLKFRQ=>27000/
--- SCREEN_WIDTH=>720/SCREEN_HEIGHT=>480 (see pcetang_nano20k.vhd's own header/generic
--- map) -- i.e. already 480p60, same clk_27/clk_135 pair pce2hdmi_sd.sv needs. This swap
--- is therefore a real zero-clock-change, ~pure-BSRAM-win substitution on this board
--- specifically (confirmed by reading src/pce/common/pll/nano20k_pll.vhd directly:
--- clk_sdram <= clk_135_i, the SAME net as HDMI's clk_135 -- GW2AR-18C has exactly 2 PLL
--- resources, both spent, no separate 720p pixel clock ever existed here to move away
--- from the way Console 60K's plain/CD swap had to).
+-- Video: `pce2hdmi_sd.sv` runs VIDEOID=>2/CLKFRQ=>27000/SCREEN_WIDTH=>720/
+-- SCREEN_HEIGHT=>480 -- 480p60, using the SAME clk_27/clk_135 pair the retired plain
+-- board already generated (confirmed by reading src/pce/common/pll/nano20k_pll.vhd
+-- directly: clk_sdram <= clk_135_i, the SAME net as HDMI's clk_135 -- GW2AR-18C has
+-- exactly 2 PLL resources, both spent, no separate 720p pixel clock ever existed here
+-- to move away from the way Console 60K's plain/CD swap had to).
 --
--- NOT VERIFIED ON HARDWARE. NOT YET gw_sh-VERIFIED either -- see this session's own
--- build log for the first real result.
+-- NOT VERIFIED ON HARDWARE.
 
 library ieee;
 use ieee.std_logic_1164.all;
