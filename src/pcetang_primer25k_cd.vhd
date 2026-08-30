@@ -1,8 +1,14 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 
--- pcetang Phase 2 CD attempt, Tang Primer 25K, TangCore-integrated (iosys_bl616: ROM
+-- pcetang Phase 2 CD, Tang Primer 25K, TangCore-integrated (iosys_bl616: ROM
 -- load, joypad, OSD via pce2hdmi_sd's scandoubler), NO_CD=>0, EXT_VRAM0=>1 (required --
--- Primer 25K's whole engine does not fit on-chip).
+-- Primer 25K's whole engine does not fit on-chip). SOLE Primer 25K build as of
+-- 2026-08-30 -- the plain, HuCard-only variant (pcetang_primer25k.vhd/
+-- build_primer25k.tcl) is retired, same shape as Console 60K's and Nano 20K's own
+-- plain->combo unification: a real PCE-CD unit boots plain HuCards fine with no CD
+-- inserted, this build's port list and pin file (pcetang_primer25k.cst, which stays,
+-- genuinely shared) are identical to the plain board's, and the real resource cost of
+-- keeping CD is +1 BSRAM block for a full functional superset.
 --
 -- PRIOR REAL STATUS (superseded by the change below): FAILED, ERROR (RP0006) LUT overflow
 -- (60649/23040 default, 49449/23040 with a direct-GowinSynthesis `-ram_rw_check 0`
