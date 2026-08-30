@@ -42,14 +42,11 @@
 --   - CDDA_FIFO/CDSUBC_FIFO: kept dead-stubbed (CD_AUDIO_WR/CD_SUBCD_WR => '0'), per
 --     direct user instruction -- same state as every other board today. 128Kbit/4Kbit,
 --     unpriced, deferred.
---   - BAT+CG0/CG1 prefetch (VRAM0_PREFETCH/VRAM0_CG_PREFETCH): OFF on this build, unlike
---     plain Nano 20K. A first attempt with both on saturated the device (100% CLS, 100%
---     BSRAM, 223 unplaced registers) before real place-and-route even completed. This
---     also surfaced a real, separate, pre-existing bug worth its own report: Primer 25K
---     CD's generic map sets VRAM0_PREFETCH=>1 but build_primer25k_cd.tcl never compiles
---     vram0_prefetch.vhd, so that board's BAT/CG has likely been silently black-boxed
---     (EX4760) the whole time -- its "cheap CD+BAT" numbers are not real precedent. See
---     pcetang_status_matrix.md.
+--   - BAT+CG0/CG1 prefetch (VRAM0_PREFETCH/VRAM0_CG_PREFETCH): ON (2026-08-30), retried
+--     after being off in the first attempt (saturated the device then: 100% CLS, 100%
+--     BSRAM, 223 unplaced registers, before real place-and-route even completed). See
+--     the `core: entity work.pce_top` generic map's own comment below for why this is
+--     being retried now and what real precedent it rests on.
 --   - SCSI target stub: copied verbatim from Primer 25K CD (same spec-verified design,
 --     Mednafen-checked sense data) even though no syscard can load yet -- costs nothing
 --     extra to wire now, and makes a future ROM-offload addition immediately usable.
@@ -703,23 +700,26 @@ begin
       end if;
    end process;
 
-   -- PCE PORT (2026-08-29): VRAM0_PREFETCH/VRAM0_CG_PREFETCH left at 0 (BAT+CG0/CG1
-   -- disabled) on this build, not enabled. Real reason: this board's first CD attempt
-   -- combined with them saturated the device (100% CLS, 100% BSRAM, 223 unplaced
-   -- registers) before the CD-RAM/ADPCM/Arcade-Card bridge itself was even the limiting
-   -- factor. Also: no board has actually ever built CD together with a REAL BAT+CG
-   -- prefetch -- Primer 25K CD's own generic map sets VRAM0_PREFETCH=>1 but its build
-   -- script never compiles vram0_prefetch.vhd, so PREFETCH0 is silently black-boxed
-   -- there (same EX4760 class of bug the plain Nano 20K build had once, found on a
-   -- different file -- see build_nano20k.tcl's own history). That board's "cheap CD+BAT"
-   -- numbers are therefore not real precedent for combining the two; don't repeat the
-   -- mistake here by setting the generic without the file. VRAM0_LINE_REFILL stays on --
-   -- implemented directly in vram0_cache.vhd/sdram32.sv, not vram0_prefetch.vhd, so it
-   -- survives dropping that file from this build (confirmed from pce_top.vhd's own
-   -- gen_vram0_pf_none branch, not assumed).
+   -- PCE PORT (2026-08-30): VRAM0_PREFETCH/VRAM0_CG_PREFETCH => 1 (BAT+CG0/CG1 enabled),
+   -- retried after being OFF since this file's first attempt. Real reason it was off
+   -- before: this board's first CD attempt combined with them saturated the device
+   -- (100% CLS, 100% BSRAM, 223 unplaced registers) before the CD-RAM/ADPCM/Arcade-Card
+   -- bridge itself was even the limiting factor -- but that measurement predates ROM
+   -- also moving to SDRAM (frees ~13 BSRAM blocks, see pcetang_status_matrix.md lever
+   -- 14) and the alternate PnR algorithm (place_option 2/route_option 1, lever 13),
+   -- both of which changed this board's real resource/margin picture since. Also no
+   -- longer true that no board has ever run CD with a REAL BAT+CG: Primer 25K CD's own
+   -- black-boxed-prefetch bug (VRAM0_PREFETCH=>1 but vram0_prefetch.vhd never compiled)
+   -- is FIXED as of `6c547d2` -- that board's real combined CD+BAT+CG numbers
+   -- (clk_pce +0.331%, later +14.2% post-PnR-flag) are genuine precedent now, not a
+   -- false one. build_nano20k_cd.tcl now compiles vram0_prefetch.vhd -- see that file's
+   -- own history for why setting this generic without it would silently black-box the
+   -- feature instead of enabling it (the exact bug just described). VRAM0_LINE_REFILL
+   -- stays on regardless -- implemented directly in vram0_cache.vhd/sdram32.sv, not
+   -- vram0_prefetch.vhd, so it was never affected either way.
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, VRAM0_LINE_REFILL => 1,
-                VRAM0_PREFETCH => 0, VRAM0_CG_PREFETCH => 0)
+                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

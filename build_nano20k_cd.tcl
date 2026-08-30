@@ -20,9 +20,11 @@ add_file src/pce/common/mem/cd_fifos.vhd
 add_file src/pce/common/mem/dpram9_dpb_wm01.vhd
 add_file src/pce/common/mem/dpram8x16_dpb_wm01.vhd
 add_file src/pce/common/mem/vram0_cache.vhd
-# NOT vram0_prefetch.vhd -- VRAM0_PREFETCH=>0 on this build (see pcetang_nano20k_cd.vhd's
-# own comment for why BAT+CG is deliberately off here, and the real Primer 25K CD bug
-# this avoids repeating).
+# vram0_prefetch.vhd (2026-08-30): BAT+CG0/CG1 retried on this build -- see
+# pcetang_nano20k_cd.vhd's own generic-map comment. Omitting this file while the
+# generic map enables it is the exact class of bug that silently black-boxed Primer
+# 25K CD's own BAT+CG for a whole session (EX4760) -- don't repeat it here.
+add_file src/pce/common/mem/vram0_prefetch.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_PKG.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/AddSubBCD.vhd
 add_file src/pce/tg16-mister-rtl/HUC6280/HUC6280_ALU.vhd
