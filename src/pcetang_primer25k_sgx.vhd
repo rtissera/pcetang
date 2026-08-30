@@ -8,8 +8,9 @@
 -- additions -- RAM_C_WIDE/RAM_C_LINE_REFILL, see that file's own header), not CD-RAM's
 -- old 8-bit byte interface.
 --
--- DEAD END, gw_sh-CONFIRMED (2026-08-30, see pcetang_status_matrix.md lever 15 for
--- the full record). Two-VDC bus-contention feasibility WAS real (GHDL-verified via
+-- BOTH RESOURCE AXES OVER BUDGET AS BUILT (2026-08-30, see pcetang_status_matrix.md
+-- lever 15 for the full record) -- NOT a closed dead end, real priced levers open.
+-- Two-VDC bus-contention feasibility WAS real (GHDL-verified via
 -- sim/vram0/tb_sgx_contention.vhd, no material regression to either VDC's deadline-
 -- miss/overrun rate) -- the blocker is device resource capacity, not timing:
 --   * VRAM1_PREFETCH/VRAM1_CG_PREFETCH=>1 (the only shippable config -- VDC1 needs
@@ -17,18 +18,24 @@
 --     ERROR (RP0006), logic 24089/23040 LUT+ALU (+1049 over).
 --   * Same config probed with prefetch=>0 (NOT shippable, kept only to isolate the
 --     axis): ERROR (PA2017), BSRAM 59/56 (+3 over).
--- The original scoping arithmetic (VRAM1-on-chip=32 BSRAM borrowed from Console 60K
--- CD's own resource report, vs. an assumed +13 surplus after offload) was wrong: that
--- 32 was never re-measured on THIS device family (GW5A vs Console 60K CD's GW5AT),
--- and Primer 25K plain's own baseline already sits at 35/56 BSRAM (63%) before any
--- second-VDC stack is added at all -- fixed costs (RAM/MCODE/VT = 31 blocks alone)
--- leave far less real headroom than the cross-device estimate implied. No
--- configuration of this board fits GW5A-25A on either resource axis. Left in the tree
--- as a documented negative result, not a live target -- do not resume work on this
--- file without a real new capacity lever (dropping some other module, or a smaller
--- second-VDC memory design) to point to first.
+-- Root cause fully traced (not a cross-device estimate anymore): base `RAM`
+-- (WorkRAM, pce_top.vhd's `RAM_A(14 downto 13) <= CPU_A(14 downto 13) when SGX='1'
+-- else "00"`) costs 4 BSRAM on the plain board (Gowin proves the upper 24KB
+-- unreachable and strips it) but 16 on this board (SGX='1' makes the full 32KB
+-- reachable -- real SuperGrafx hardware, not removable) -- a +12 BSRAM cost from
+-- enabling SGX ALONE, nothing to do with VRAM1, never priced in the original scoping.
+-- That +12 alone covers the whole +3 BSRAM overage with room to spare IF offloaded to
+-- SDRAM (same pattern already shipped for ROM/CD-RAM/VRAM elsewhere in this repo --
+-- harder here: CPU critical-path memory, no prefetch/cache tolerance like VRAM has).
+-- Logic axis (+1049 LUT, from PREFETCH1 alone) is a separate, still-unaddressed
+-- problem -- priced candidates: VDC1 cache 4-way->2-way (saves LUT+BSRAM together),
+-- PSG `VT` wavetable's 6 BSRAM blocks look like inference waste for ~192 entries
+-- (BSRAM-side only, doesn't touch LUT). Do not resume work on this file without
+-- picking one of these and re-measuring for real -- do not re-declare this dead
+-- without a fresh gw_sh result, and do not re-declare it fixed without one either.
 --
--- NOT VERIFIED ON HARDWARE. gw_sh-VERIFIED FAILING (both axes, see above).
+-- NOT VERIFIED ON HARDWARE. gw_sh-VERIFIED OVER BUDGET as built, both axes (see
+-- above) -- open levers priced, not yet attempted.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -538,12 +545,14 @@ begin
    -- VDC, not just a performance add-on, same reasoning VRAM0_PREFETCH/
    -- VRAM0_CG_PREFETCH already carry on every EXT_VRAM0 board in this project.
    core: entity work.pce_top
-   -- DEAD END (2026-08-30, gw_sh-confirmed both ways -- see pcetang_status_matrix.md
+   -- OVER BUDGET AS BUILT, both axes (2026-08-30 -- see pcetang_status_matrix.md
    -- lever 15): =>1/=>1 (shippable config, BAT+CG correctness needed) hits RP0006,
    -- logic 24089/23040 (+1049 over). Probed =>0/=>0 (not shippable, no correctness
    -- fix -- kept only for the historical record) to isolate the axis: still hits
-   -- PA2017, BSRAM 59/56 (+3 over). No configuration of this board fits GW5A-25A.
-   -- Left at =>1/=>1 here since that's the only config anyone should ever build.
+   -- PA2017, BSRAM 59/56 (+3 over) -- root cause traced to WorkRAM's own +12 BSRAM
+   -- SGX-triggered cost (see file header), not VRAM1. Real, priced levers open on
+   -- both axes -- not a closed dead end. Left at =>1/=>1 here since that's the only
+   -- config anyone should ever build.
    generic map (LITE => 0, EXT_VRAM0 => 1, NO_CD => 1, VRAM0_LINE_REFILL => 1,
                 VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1,
                 EXT_VRAM1 => 1, VRAM1_LINE_REFILL => 1,
