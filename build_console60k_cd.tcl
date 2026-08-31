@@ -89,4 +89,14 @@ set_option -route_option 0
 # CDDA) -- board-specific, do not "fix" by reverting to 1 without re-testing for the
 # hang. See pcetang_status_matrix.md lever 18.
 
+# 2026-08-31d/e real margin-recovery attempts against the current real critical path
+# (ALUCtrl_0_s23/DO[6], HuC6280 microcode, fanning out to many register clock-enables,
+# near-zero logic, almost pure fanout/routing delay) -- ALL TRIED, ALL REAL NO-OPS,
+# reverted:
+#   -timing_driven 1 + -correct_hold_violation 0  -> bit-identical (42.858MHz, 0/0)
+#   -route_maxfan 8                                -> bit-identical (42.858MHz, 0/0)
+# Baseline (no extra flags) is the best real result found: 42.858MHz, +0.002% margin,
+# 0/0 violations. Real, razor-thin, deterministic. See pcetang_status_matrix.md lever 24
+# and advisor consult 2026-08-31e for the full record.
+
 run all

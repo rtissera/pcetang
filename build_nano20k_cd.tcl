@@ -89,6 +89,16 @@ set_option -route_option 1
 # 42.276MHz, same 9 endpoints) -- the failing source, `MI.ALUCtrl_0_s17/DO[1]`, is a HuC6280
 # microcode-ROM output bit, not a simple flip-flop fanning into combinational logic, so
 # Gowin's fanout-triggered replication heuristic doesn't apply to it. Reverted; see
-# pcetang_status_matrix.md lever 23 for the real diagnosis and what's still open.
+# pcetang_status_matrix.md lever 23 for the real diagnosis and what's still open (that
+# FAIL is now superseded by lever 24 -- this board real-PASSes, but razor-thin, +0.046%).
+
+# 2026-08-31d/e real margin-recovery attempts against the current real critical path
+# (RESET_N fanning out to many PREFETCH0 BRAM clock-enables, near-zero logic, almost
+# pure fanout/routing delay) -- ALL TRIED, ALL REAL NO-OPS OR WORSE, reverted:
+#   -timing_driven 1 + -correct_hold_violation 0  -> bit-identical (43.220MHz, 0/0)
+#   -route_maxfan 8                                -> WORSE (43.204MHz, margin ~5x thinner)
+# Baseline (no extra flags) is the best real result found: 43.220MHz, +0.046% margin,
+# 0/0 violations. Real, thin, but the best of what's been tried -- see
+# pcetang_status_matrix.md lever 24 and advisor consult 2026-08-31e for the full record.
 
 run all
