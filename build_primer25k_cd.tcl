@@ -78,14 +78,17 @@ set_option -bit_compress 1
 # clk_pce margin (+0.019%->+1.85%, see pcetang_status_matrix.md lever 13) for free --
 # place_option/route_option default to 0 (compile-speed/congestion) on every board in
 # this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
-set_option -place_option 2
-set_option -route_option 1
-# 2026-08-31 real finding: the CD/TOC/audio-command bundle (see cd_bridge.vhd) pushed
-# Logic utilization to 90% and this board real-FAILS to route under BOTH PnR algorithms
-# -- route_option 1 (this setting): 2321 unrouted nets. route_option 0 (tried once,
-# matching the Console 60K CD precedent for the identical failure signature -- did NOT
-# transfer here): 23073 unrouted nets + a real "DesRoute failed" error, decisively worse.
-# Reverted to 1 (the smaller failure) and stopped there -- a real capacity problem, not a
-# PnR-setting problem; see pcetang_cd_scsi_plan.md for the real numbers and next steps.
+set_option -place_option 1
+set_option -route_option 0
+# 2026-08-31c real fix, CONFIRMED: place_option 1 = "routability priority" (per Gowin's
+# own rtlplaceoptions.xml -- place_option 2, the prior setting, is "timing priority").
+# The real failure signature here was unrouted nets (2321, then 1652 after a real LUT
+# trim to cd_bridge.vhd, both deterministic across repeated runs), not a timing miss --
+# Nano 20K routed clean at 89% Logic while Primer 25K failed at 88%, so raw utilization
+# was never the real discriminator. Routability-priority placement (paired with
+# route_option 0, congestion-based routing) closes it outright: real gw_sh PASS, 0/0
+# setup/hold violations, clk_pce +4.18% margin (44.647MHz vs. the 42.857MHz constraint) --
+# a comfortable, clean margin, not razor-thin like Console 60K/Nano 20K CD's own real
+# passes on this same feature bundle. See pcetang_cd_scsi_plan.md.
 
 run all
