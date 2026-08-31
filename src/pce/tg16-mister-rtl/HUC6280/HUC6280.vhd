@@ -5,7 +5,12 @@ library work;
 use work.HUC6280_PKG.all;
 
 entity HUC6280 is
-	port( 
+	generic (
+		-- Pass-through to the inner PSG's own VT_PATH_A generic -- see psg.vhd's
+		-- entity header for the real rationale. Default 1 (Path A on).
+		VT_PATH_A : integer := 1
+	);
+	port(
 		CLK		: in std_logic;
 		RST_N		: in std_logic;
 		WAIT_N	: in std_logic;
@@ -287,7 +292,9 @@ begin
 	
 	-- PSG
 	PSG_SEL <= '1' when CPU_A(20 downto 13) = x"FF" and CPU_A(12 downto 10) = "010" else '0'; -- PSG : $0800 - $0BFF
-	PSG : entity work.psg port map (
+	PSG : entity work.psg
+	generic map ( VT_PATH_A => VT_PATH_A )
+	port map (
 		CLK		=> CLK,
 		CLKEN		=> IO_CE,	-- 7.16 Mhz clock
 		RESET_N	=> RST_N,

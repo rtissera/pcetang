@@ -139,7 +139,17 @@ entity CDDA_FIFO is
 end entity;
 
 architecture rtl of CDDA_FIFO is
-	constant ADDR_W : integer := 12;   -- 4096 entries, matches donor LPM_NUMWORDS
+	-- MEASUREMENT ONLY (2026-08-30) -- shrunk 12->11 (4096->2048 entries, ~93ms->~46ms
+	-- of jitter tolerance at 44.1kHz stereo) to measure the real BSRAM cost of a
+	-- smaller depth on Console 60K CD (the tightest board, PA2017 at full depth: 121/118,
+	-- +8 blocks, over by 3). Real donor-inherited value was 4096 (LPM_NUMWORDS, sized for
+	-- a different reference platform's own I/O latency, never revisited for this
+	-- project's real BL616/RP2350 UART link) -- see this project's own status matrix
+	-- for the real UART-bandwidth analysis this shrink question is coupled to (2Mbaud/
+	-- 8N1 = 200kB/s vs CD-DA's 176.4kB/s raw need, only 13.4% margin BEFORE any
+	-- concurrent traffic). Not yet a committed design decision -- do not revert without
+	-- being asked, but do not treat this depth as final either.
+	constant ADDR_W : integer := 11;   -- 2048 entries, was 12/4096
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	signal mem_q : std_logic_vector(31 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;
@@ -200,7 +210,12 @@ entity CDSUBC_FIFO is
 end entity;
 
 architecture rtl of CDSUBC_FIFO is
-	constant ADDR_W : integer := 9;    -- 512 entries, donor LPM_NUMWORDS=490 rounded up
+	-- MEASUREMENT ONLY (2026-08-30) -- shrunk 9->8 (512->256 entries) alongside
+	-- CDDA_FIFO's own shrink, per the same real BSRAM-headroom question. This FIFO is
+	-- 8-bit wide (4Kbit at 512 deep) -- NOT a real driver of the BSRAM problem
+	-- (CDDA_FIFO's 32-bit width is the entire measured +8-block cost) -- shrunk here
+	-- for consistency, not because it was itself a resource concern.
+	constant ADDR_W : integer := 8;    -- 256 entries, was 9/512 (donor LPM_NUMWORDS=490)
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	signal mem_q : std_logic_vector(7 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;

@@ -78,6 +78,14 @@ set_option -bit_compress 1
 # place_option/route_option default to 0 (compile-speed/congestion) on every board in
 # this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
 set_option -place_option 2
-set_option -route_option 1
+set_option -route_option 0
+# route_option forced 0 (2026-08-30), NOT project-standard 1 -- CONFIRMED real fix for
+# a 2h19m routing-phase-0 hang with the CDDA-shrink revival live on this board (96%+
+# BSRAM baseline, tightest in project). route_option 1 (timing-priority routing) is a
+# real congestion trigger here; route_option 0 (default, congestion-based) completes
+# full PnR clean in ~2min, 0 setup/hold violations. Real cost: clk_pce margin dropped
+# from the pre-CDDA +6.21% (with route_option 1) to +0.84% (with route_option 0 +
+# CDDA) -- board-specific, do not "fix" by reverting to 1 without re-testing for the
+# hang. See pcetang_status_matrix.md lever 18.
 
 run all

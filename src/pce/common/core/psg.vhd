@@ -22,6 +22,24 @@ use IEEE.STD_LOGIC_UNSIGNED.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
 entity psg is
+	generic (
+		-- VT_PATH_A (2026-08-31, real lever 20 follow-up): selects between the
+		-- real closed-form VT replacement (Path A, default -- see VT_COEF's own
+		-- header comment below for the full derivation) and the original 4096x24
+		-- BRAM (`entity work.dpram`, ~6 Gowin BSRAM blocks, bit-identical to the
+		-- real donor `HUC6280/voltab.mif`). Per-board opt-OUT, not opt-in: Path A
+		-- is a real, verified win on 2 of 3 boards (Console 60K CD, Primer 25K
+		-- CD -- both real -6 BSRAM blocks, bounded real timing cost, 0/0
+		-- violations). Nano 20K CD needs VT_PATH_A=>0 -- real gw_sh isolation
+		-- (2026-08-31) proved SF2' widening alone and PSG Path A alone both pass
+		-- clean and even improve margin individually on that board, but their
+		-- COMBINATION real-fails timing (64 setup violations) -- a genuine
+		-- interaction effect, not a flaw in either change, consistent with this
+		-- board's well-documented placement-noise fragility (see
+		-- pcetang_status_matrix.md lever 19). Dropping back to the old BRAM path
+		-- there (instead of dropping SF2') was the direct user choice.
+		VT_PATH_A : integer := 1
+	);
 	port (
 		CLK 	: in std_logic;
 		CLKEN	: in std_logic;
@@ -104,6 +122,55 @@ signal MIX_CNT	: std_logic_vector(2 downto 0);
 
 signal LDATA_FF	: std_logic_vector(23 downto 0);
 signal RDATA_FF	: std_logic_vector(23 downto 0);
+
+-- PSG VT REPLACEMENT (2026-08-31, real lever 20, Path A -- see project memory
+-- pcetang_status_matrix.md for the full derivation, cross-checks against MAME's
+-- c6280.cpp and Mednafen's pce_psg.cpp, and the numeric extraction from this
+-- repo's own real HUC6280/voltab.mif). The original `VT` was a 4096x24 BRAM
+-- (`entity work.dpram`, ~6 Gowin BSRAM blocks) holding a real HuC6280 hardware
+-- volume-attenuation table. Verified (all 4096 real entries checked, not
+-- sampled) that every entry equals a per-idx fixed-point coefficient D(idx)
+-- times the real linear term (2*GL_OUT-31), rounded -- a real closed-form
+-- multiply, not an idiosyncratic table. VT_COEF below holds the EXACT D(idx)
+-- constants extracted from this repo's own real voltab.mif (least-squares fit,
+-- 6 fractional bits -- verified 0 outliers beyond +-1 LSB across all 2816 real
+-- idx/GL_OUT combinations at this precision), not a fresh re-derivation from a
+-- generic textbook formula.
+--
+-- REAL, DELIBERATE, PERMANENT INCONSISTENCY (tracked as "Path A" in memory):
+-- output differs from the real donor ROM by at most +-1 in this 24-bit two's-
+-- complement value (-138dB relative, inaudible, channels are further mixed
+-- downstream) -- NOT bit-identical to voltab.mif or real HuC6280 silicon. See
+-- pcetang_status_matrix.md lever 20 before assuming any PSG audio discrepancy
+-- is a new bug. A literal bit-exact alternative ("Path B", a real +-1
+-- correction table for the 520/2816 entries this misses) was scoped but not
+-- built -- see that same memory entry.
+type vt_coef_t is array (0 to 127) of signed(22 downto 0);
+constant VT_COEF : vt_coef_t := (
+      0 => to_signed(2886401, 23), 1 => to_signed(2456724, 23), 2 => to_signed(2091012, 23), 3 => to_signed(1779739, 23),
+      4 => to_signed(1514803, 23), 5 => to_signed(1289307, 23), 6 => to_signed(1097378, 23), 7 => to_signed(934020, 23),
+      8 => to_signed(794979, 23), 9 => to_signed(676637, 23), 10 => to_signed(575911, 23), 11 => to_signed(490180, 23),
+      12 => to_signed(417211, 23), 13 => to_signed(355102, 23), 14 => to_signed(302242, 23), 15 => to_signed(257249, 23),
+      16 => to_signed(218954, 23), 17 => to_signed(186360, 23), 18 => to_signed(158618, 23), 19 => to_signed(135006, 23),
+      20 => to_signed(114908, 23), 21 => to_signed(97802, 23), 22 => to_signed(83243, 23), 23 => to_signed(70851, 23),
+      24 => to_signed(60304, 23), 25 => to_signed(51328, 23), 26 => to_signed(43686, 23), 27 => to_signed(37184, 23),
+      28 => to_signed(31646, 23), 29 => to_signed(26936, 23), 30 => to_signed(22926, 23), 31 => to_signed(19513, 23),
+      32 => to_signed(16608, 23), 33 => to_signed(14136, 23), 34 => to_signed(12032, 23), 35 => to_signed(10240, 23),
+      36 => to_signed(8715, 23), 37 => to_signed(7418, 23), 38 => to_signed(6314, 23), 39 => to_signed(5373, 23),
+      40 => to_signed(4573, 23), 41 => to_signed(3892, 23), 42 => to_signed(3313, 23), 43 => to_signed(2819, 23),
+      44 => to_signed(2398, 23), 45 => to_signed(2042, 23), 46 => to_signed(1738, 23), 47 => to_signed(1479, 23),
+      48 => to_signed(1258, 23), 49 => to_signed(1071, 23), 50 => to_signed(911, 23), 51 => to_signed(776, 23),
+      52 => to_signed(659, 23), 53 => to_signed(561, 23), 54 => to_signed(478, 23), 55 => to_signed(406, 23),
+      56 => to_signed(346, 23), 57 => to_signed(294, 23), 58 => to_signed(250, 23), 59 => to_signed(212, 23),
+      60 => to_signed(181, 23), 61 => to_signed(154, 23), 62 => to_signed(130, 23), 63 => to_signed(111, 23),
+      64 => to_signed(94, 23), 65 => to_signed(80, 23), 66 => to_signed(68, 23), 67 => to_signed(57, 23),
+      68 => to_signed(49, 23), 69 => to_signed(42, 23), 70 => to_signed(35, 23), 71 => to_signed(30, 23),
+      72 => to_signed(25, 23), 73 => to_signed(21, 23), 74 => to_signed(18, 23), 75 => to_signed(14, 23),
+      76 => to_signed(12, 23), 77 => to_signed(10, 23), 78 => to_signed(8, 23), 79 => to_signed(7, 23),
+      80 => to_signed(6, 23), 81 => to_signed(5, 23), 82 => to_signed(4, 23), 83 => to_signed(3, 23),
+      84 => to_signed(2, 23), 85 => to_signed(2, 23), 86 => to_signed(1, 23), 87 => to_signed(1, 23),
+      others => (others => '0')
+   );
 
 begin
 
@@ -315,12 +382,46 @@ begin
 end process;
 
 -- Channels mixing
+-- PSG VT REPLACEMENT (2026-08-31, real lever 20): VT_PATH_A generic (see its
+-- own header comment in the entity declaration) selects one of these two
+-- mutually exclusive implementations. Both share the same 1-cycle address-to-
+-- data latency (VT_ADDR set combinationally by the MIX state machine below,
+-- VT_DATA registered one cycle later) -- the state machine's own
+-- MIX_LREAD/MIX_RREAD wait states assume this latency regardless of which
+-- generate branch is active.
+gen_vt_path_a: if VT_PATH_A /= 0 generate
+process( CLK )
+	variable vt_idx  : integer range 0 to 127;
+	variable vt_gl   : integer range 0 to 31;
+	variable vt_m    : signed(6 downto 0);
+	variable vt_prod : signed(29 downto 0);
+begin
+	if rising_edge( CLK ) then
+		vt_idx  := to_integer(unsigned(VT_ADDR(6 downto 0)));
+		vt_gl   := to_integer(unsigned(VT_ADDR(11 downto 7)));
+		vt_m    := to_signed(2*vt_gl - 31, 7);
+		vt_prod := VT_COEF(vt_idx) * vt_m;
+		-- Round-half-up via bias-then-arithmetic-shift (real, synthesizable,
+		-- verified in Python against all 2816 real table entries to match
+		-- exactly, max error +-1 -- same scheme used to derive VT_COEF itself).
+		VT_DATA <= std_logic_vector(resize(shift_right(vt_prod + 32, 6), 24));
+	end if;
+end process;
+end generate;
+
+gen_vt_path_b: if VT_PATH_A = 0 generate
+-- Original donor implementation (real, unmodified 4096x24 BRAM, ~6 Gowin
+-- BSRAM blocks, bit-identical to HUC6280/voltab.mif) -- used on boards where
+-- VT_PATH_A's real arithmetic replacement was proven to interact badly with
+-- another board-specific change (see VT_PATH_A's own header comment, and
+-- pcetang_status_matrix.md lever 19/20 for the real isolation record).
 VT : entity work.dpram generic map (12,24,"HUC6280/voltab.mif")
 port map (
 	clock		=> CLK,
 	address_a=> VT_ADDR,
 	q_a		=> VT_DATA
 );
+end generate;
 
 process( CLK )
 begin

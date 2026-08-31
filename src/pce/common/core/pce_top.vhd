@@ -105,7 +105,15 @@ entity pce_top is
 		-- Same real CG0/CG1 tile-pattern extension as VRAM0_CG_PREFETCH, VDC1's own
 		-- copy. Same structural gating as that generic (only meaningful inside
 		-- gen_vram1_pf below, which itself only exists when VRAM1_PREFETCH /= 0).
-		VRAM1_CG_PREFETCH : integer := 0
+		VRAM1_CG_PREFETCH : integer := 0;
+		-- Pass-through to psg.vhd's own VT_PATH_A generic (via HUC6280.vhd) --
+		-- see that file's entity header for the real rationale. Default 1
+		-- (Path A on, real closed-form VT, -6 BSRAM blocks vs the donor's BRAM
+		-- table). Nano 20K CD is the one real, verified exception -- set to 0
+		-- there (see pcetang_status_matrix.md lever 19/20's real isolation
+		-- record: SF2' widening and PSG Path A each pass clean alone on that
+		-- board, but their combination real-fails timing).
+		VT_PATH_A : integer := 1
 	);
 	port(
 		RESET			: in  std_logic;
@@ -446,6 +454,7 @@ generate_NOCHEAT: if (LITE /= 0) generate begin
 end generate;
 
 CPU : entity work.HUC6280
+generic map ( VT_PATH_A => VT_PATH_A )
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,

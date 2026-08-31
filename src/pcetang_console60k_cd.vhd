@@ -312,16 +312,30 @@ architecture rtl of pcetang_console60k_cd is
    --
    -- No VRAM0-on-SDRAM co-tenant here (EXT_VRAM0=>0, stays on-chip -- Console 60K's
    -- whole engine minus ROM/CD-RAM already fits), so the split is simpler than Primer
-   -- 25K's: ROM at 0x000000 (256KB, exact real syscard3.pce size), CD-RAM at 0x040000
-   -- (256KB, cd.vhd's own RAM_SEL window, confirmed from source same as Primer 25K's).
+   -- 25K's: CD-RAM at 0x040000 (256KB, cd.vhd's own RAM_SEL window, confirmed from
+   -- source same as Primer 25K's).
    -- PCE PORT (2026-08-29): all three base constants widened 21->25 bits alongside
-   -- sdram.sv's own port widening -- ROM/CD-RAM layout unchanged (still 0x000000/
-   -- 0x040000, well inside the first 2MB). AC_SDRAM_BASE (below, near AC_EN) is the new
-   -- one: a real, non-overlapping 2MB window for Arcade Card RAM, placed at the 2MB
-   -- boundary -- see that constant's own comment for why this closes the real
-   -- aliasing bug the file's own header used to describe.
-   constant ROM_SDRAM_BASE   : unsigned(24 downto 0) := to_unsigned(16#000000#, 25);
-   constant ROM_SDRAM_ABITS  : integer := 18;  -- 256KB, exact real syscard size
+   -- sdram.sv's own port widening. AC_SDRAM_BASE (below, near AC_EN) is a real,
+   -- non-overlapping 2MB window for Arcade Card RAM, placed at the 2MB boundary --
+   -- see that constant's own comment for why this closes the real aliasing bug the
+   -- file's own header used to describe.
+   -- ROM dynamic-size port (2026-08-30, real lever 17 fix, was hardcoded 256K syscard-
+   -- only): moved from 0x000000 to the free gap after ADPCM_SDRAM_BASE's own 128KB
+   -- region, widened 256KB->1MB -- same real HuCard capacity Nano 20K CD already
+   -- supports (128K-1MB dynamic bucket rounding, see rom_sz_r below).
+   --
+   -- MOVED + WIDENED AGAIN 2026-08-30 (real lever 19 fix): Street Fighter II' Champion
+   -- Edition is a genuine 2560KB HuCard using pce_top.vhd's own already-real bank-switch
+   -- mapper (rombank, rom_sz=X"280" -- verified real, latches on writes to ROM offset
+   -- 0x1FF0, matches real SF2' cartridge hardware, zero RTL change needed there). The
+   -- 1MB window/counter from lever 17 couldn't even COUNT past 1MB. Moved past Arcade
+   -- Card RAM's own 2MB window (0x0A0000's old gap was too small for 4MB) -- this chip
+   -- is the same real 32MB Winbond as Primer 25K CD's, trivial capacity margin here.
+   -- **Real risk, flagged not hidden**: this board had ZERO free timing margin left
+   -- after lever 17 (clk_pce +0.236%, clk_sdram +0.017%) -- this change needs a real
+   -- gw_sh re-run before being trusted, may not fit even though the RTL is correct.
+   constant ROM_SDRAM_BASE   : unsigned(24 downto 0) := to_unsigned(16#400000#, 25);
+   constant ROM_SDRAM_ABITS  : integer := 22;  -- 4MB, real SF2' ceiling (dynamic, see rom_sz_r)
    constant CDRAM_SDRAM_BASE : unsigned(24 downto 0) := to_unsigned(16#040000#, 25);
 
    signal rom_a       : std_logic_vector(21 downto 0);
@@ -330,6 +344,7 @@ architecture rtl of pcetang_console60k_cd is
    signal rom_rd_i    : std_logic;
    signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
+   signal rom_sz_r    : std_logic_vector(11 downto 0) := x"040";
 
    -- Core reset gated on rom_loading (same fix as pcetang_console60k.vhd's
    -- core_resetn) -- held in reset through the whole ROM load, released exactly on
@@ -396,6 +411,16 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_data_i     : std_logic_vector(7 downto 0) := (others => '0');
    signal cd_data_wr_i  : std_logic := '0';
    signal cd_data_end_i : std_logic;
+
+   -- MEASUREMENT ONLY (2026-08-30), NOT A REAL FEATURE -- do not build on this.
+   -- Real toggling signal to force CD_AUDIO_WR non-constant below, so Gowin cannot
+   -- prove CDDA_FIFO's write path dead and sweep it away (it currently is, see
+   -- pcetang_status_matrix.md's CDDA audio row -- CD_AUDIO_WR='0' everywhere).
+   -- Purpose: measure this device's REAL BSRAM/LUT cost of a live CDDA_FIFO before
+   -- committing to any real BL616/RP2350 PCM-streaming design or FIFO-depth choice
+   -- -- same discipline as this session's WorkRAM cross-device lesson, don't guess.
+   -- Leave in place until a real decision is made; do not revert without being asked.
+   signal meas_cdda_toggle : std_logic := '0';
 
    constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
 
@@ -549,6 +574,32 @@ begin
             rom_wr_addr <= (others => '0');
          elsif rom_do_valid = '1' then
             rom_wr_addr <= rom_wr_addr + 1;
+         end if;
+
+         -- Real HuCard dynamic bucket rounding (2026-08-30), same pattern as
+         -- pcetang_nano20k_cd.vhd -- finalize ROM_SZ from the real loaded byte count
+         -- exactly on the loading-done edge, while the core is still held in
+         -- core_resetn's reset (see above), so pce_top never sees a mid-load ROM_SZ.
+         if rom_loading(0) = '0' and rom_loading_r = '1' then
+            if rom_wr_addr <= 131072 then
+               rom_sz_r <= x"020"; -- 128K
+            elsif rom_wr_addr <= 262144 then
+               rom_sz_r <= x"040"; -- 256K
+            elsif rom_wr_addr <= 393216 then
+               rom_sz_r <= x"060"; -- 384K
+            elsif rom_wr_addr <= 524288 then
+               rom_sz_r <= x"080"; -- 512K
+            elsif rom_wr_addr <= 786432 then
+               rom_sz_r <= x"0C0"; -- 768K
+            elsif rom_wr_addr <= 1048576 then
+               rom_sz_r <= x"000"; -- 1MB, straight mapping
+            else
+               -- Real SF2' bank-switch mapper (2026-08-30, lever 19): no known real
+               -- commercial HuCard exists between 1MB and Street Fighter II' Champion
+               -- Edition's own 2560KB -- anything bigger than the straight-mapping 1MB
+               -- tier is real SF2', not a guess.
+               rom_sz_r <= x"280"; -- >1MB, real SF2' bank-switched mapping
+            end if;
          end if;
       end if;
    end process;
@@ -855,7 +906,7 @@ begin
       ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
       ROM_DO    => rom_do_i,
-      ROM_SZ    => x"040",         -- 256K real syscard decode, see ROM_SDRAM_BASE above
+      ROM_SZ    => rom_sz_r,       -- dynamic 128K-1MB real HuCard bucket, see rom_sz_r above
       ROM_POP   => '0',
       ROM_CLKEN => open,
 
@@ -884,8 +935,19 @@ begin
       CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,
       CD_COMM => cd_comm_i, CD_COMM_SEND => cd_comm_send_i,
       CD_DOUT_REQ => '0', CD_DOUT => open, CD_DOUT_SEND => open,
+      -- CD_REGION (2026-08-30, verified real, not a guess): checked against the real
+      -- MiSTer TurboGrafx16.sv upstream -- CD_REGION isn't a fixed hardware constant,
+      -- it's a real runtime OSD option (`cd_region <= cd_out[17]`, driven by HPS/menu
+      -- config there), reset to '0' on every core reset/cart-download. This project has
+      -- no OSD/config-menu path yet to expose that toggle, so '0' is kept -- it matches
+      -- the real upstream reset default exactly, not an arbitrary/unverified choice.
+      -- Which physical region (JP vs US syscard) numeric value 0 vs 1 corresponds to is
+      -- NOT verified here (cd.vhd's own C5/C6/C7 byte patterns weren't cross-checked
+      -- against a real BIOS trace) -- treat this as "correct default", not "confirmed
+      -- region-locked to X". Real follow-up, not yet scoped: a runtime switch once any
+      -- config-menu mechanism exists on this project.
       CD_REGION => '0', CD_RESET => open,
-      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => '0',
+      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => meas_cdda_toggle,
       CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => '0',
 
       CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
@@ -923,5 +985,13 @@ begin
 
    leds_n(0) <= not (pll_lock and hdmi_pll_lock);
    leds_n(1) <= not rom_loading(0);
+
+   -- MEASUREMENT ONLY -- see meas_cdda_toggle's own declaration comment above.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         meas_cdda_toggle <= not meas_cdda_toggle;
+      end if;
+   end process;
 
 end architecture;
