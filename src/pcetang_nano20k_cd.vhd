@@ -182,6 +182,10 @@ architecture rtl of pcetang_nano20k_cd is
          core_config : out std_logic_vector(31 downto 0);
 
          cd_mounted           : out std_logic;
+         toc_wr               : out std_logic;
+         toc_track            : out std_logic_vector(7 downto 0);
+         toc_control          : out std_logic_vector(7 downto 0);
+         toc_lba              : out std_logic_vector(23 downto 0);
          cd_sector_data       : out std_logic_vector(7 downto 0);
          cd_sector_data_valid : out std_logic;
          cd_sector_data_last  : out std_logic;
@@ -378,6 +382,10 @@ architecture rtl of pcetang_nano20k_cd is
    -- Real sector-source signals (2026-08-31) between iosys_bl616's new UART commands and
    -- cd_bridge's generic sector interface -- see pcetang_cd_scsi_plan.md.
    signal cd_mounted_i           : std_logic;
+   signal toc_wr_i               : std_logic;
+   signal toc_track_i            : std_logic_vector(7 downto 0);
+   signal toc_control_i          : std_logic_vector(7 downto 0);
+   signal toc_lba_i              : std_logic_vector(23 downto 0);
    signal cd_sector_data_i       : std_logic_vector(7 downto 0);
    signal cd_sector_data_valid_i : std_logic;
    signal cd_sector_data_last_i  : std_logic;
@@ -491,7 +499,9 @@ begin
       kbd_data => open, kbd_data_valid => open,
       core_config => core_config_r,
 
-      cd_mounted => cd_mounted_i, cd_sector_data => cd_sector_data_i,
+      cd_mounted => cd_mounted_i,
+      toc_wr => toc_wr_i, toc_track => toc_track_i, toc_control => toc_control_i, toc_lba => toc_lba_i,
+      cd_sector_data => cd_sector_data_i,
       cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
       cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
 
@@ -735,12 +745,8 @@ begin
       end if;
    end process;
 
-   -- Real SCSI target -- see header for why this can't be exercised for real yet.
-   -- DISC_MOUNTED/SECTOR_* left at their real default ('0'/unconnected) -- no MCU-side
-   -- mount/TOC/sector protocol exists yet (see pcetang_cd_scsi_plan.md), so this reproduces
-   -- the prior stub's exact "no disc" behavior for every command except READ(6), which
-   -- would simply never complete -- real, inert, not a regression (READ(6) never worked
-   -- against the old stub either).
+   -- Real SCSI target, wired to the real MCU-side mount/TOC/sector protocol via
+   -- iosys_bl616.v (see pcetang_cd_scsi_plan.md for the full wire-protocol design).
    cd_bridge_inst: entity work.cd_bridge
    port map (
       CLK          => clk_pce,
@@ -755,6 +761,10 @@ begin
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,
+      TOC_WR            => toc_wr_i,
+      TOC_TRACK         => toc_track_i,
+      TOC_CONTROL       => toc_control_i,
+      TOC_LBA           => toc_lba_i,
       SECTOR_REQ        => cd_sector_req_i,
       SECTOR_LBA        => cd_sector_lba_i,
       SECTOR_DATA       => cd_sector_data_i,

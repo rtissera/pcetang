@@ -56,12 +56,12 @@
 -- static mux like the ROM bridge. See `sdram.sv`'s header for the arbitration priority
 -- (A > B > C > refresh) and a flagged, not-yet-measured refresh-starvation risk.
 --
--- CD_BRIDGE (2026-08-31): the real SCSI target is now `cd_bridge.vhd` (shared across all
--- 3 boards) -- see that file's own header for the full command decode/protocol trace
--- (TEST UNIT READY, REQUEST SENSE, and a real READ(6) data path, verified against
--- Mednafen's pce_fast/pcecd_drive.cpp). No MCU-side mount/TOC/sector protocol exists yet
--- (see pcetang_cd_scsi_plan.md), so DISC_MOUNTED stays '0' here and READ(6) is real but
--- inert until that lands. What IS real: `gw_sh` confirms this closes timing and fits,
+-- CD_BRIDGE (2026-08-31, extended 2026-08-31b): the real SCSI target is `cd_bridge.vhd`
+-- (shared across all 3 boards), wired to the real MCU-side mount/TOC/sector protocol via
+-- iosys_bl616.v -- see that file's own header for the full command decode/protocol trace
+-- (TEST UNIT READY, REQUEST SENSE, a real READ(6) data path with TOC-bounded LBA checking,
+-- and the 5 real PCE audio/subcode SCSI ops, all verified against Mednafen's
+-- pce_fast/pcecd_drive.cpp). What IS real: `gw_sh` confirms this closes timing and fits,
 -- which is the first checkable fact about it.
 --
 -- AUDIO (2026-08-27): PSG_SL/PSG_SR/CDDA_SL/CDDA_SR/ADPCM_S wired real (previously
@@ -220,6 +220,10 @@ architecture rtl of pcetang_primer25k_cd is
          core_config : out std_logic_vector(31 downto 0);
 
          cd_mounted           : out std_logic;
+         toc_wr               : out std_logic;
+         toc_track            : out std_logic_vector(7 downto 0);
+         toc_control          : out std_logic_vector(7 downto 0);
+         toc_lba              : out std_logic_vector(23 downto 0);
          cd_sector_data       : out std_logic_vector(7 downto 0);
          cd_sector_data_valid : out std_logic;
          cd_sector_data_last  : out std_logic;
@@ -466,6 +470,10 @@ architecture rtl of pcetang_primer25k_cd is
    -- Real sector-source signals (2026-08-31) between iosys_bl616's new UART commands and
    -- cd_bridge's generic sector interface -- see pcetang_cd_scsi_plan.md.
    signal cd_mounted_i           : std_logic;
+   signal toc_wr_i               : std_logic;
+   signal toc_track_i            : std_logic_vector(7 downto 0);
+   signal toc_control_i          : std_logic_vector(7 downto 0);
+   signal toc_lba_i              : std_logic_vector(23 downto 0);
    signal cd_sector_data_i       : std_logic_vector(7 downto 0);
    signal cd_sector_data_valid_i : std_logic;
    signal cd_sector_data_last_i  : std_logic;
@@ -612,7 +620,9 @@ begin
       kbd_data => open, kbd_data_valid => open,
       core_config => core_config_r,
 
-      cd_mounted => cd_mounted_i, cd_sector_data => cd_sector_data_i,
+      cd_mounted => cd_mounted_i,
+      toc_wr => toc_wr_i, toc_track => toc_track_i, toc_control => toc_control_i, toc_lba => toc_lba_i,
+      cd_sector_data => cd_sector_data_i,
       cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
       cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
 
@@ -900,9 +910,8 @@ begin
       end if;
    end process;
 
-   -- Real SCSI target -- see cd_bridge.vhd's own header for the full command decode/
-   -- protocol trace. DISC_MOUNTED/SECTOR_* left at their real default -- no MCU-side
-   -- mount/TOC/sector protocol exists yet (see pcetang_cd_scsi_plan.md).
+   -- Real SCSI target, wired to the real MCU-side mount/TOC/sector protocol via
+   -- iosys_bl616.v (see pcetang_cd_scsi_plan.md for the full wire-protocol design).
    cd_bridge_inst: entity work.cd_bridge
    port map (
       CLK          => clk_pce,
@@ -917,6 +926,10 @@ begin
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,
+      TOC_WR            => toc_wr_i,
+      TOC_TRACK         => toc_track_i,
+      TOC_CONTROL       => toc_control_i,
+      TOC_LBA           => toc_lba_i,
       SECTOR_REQ        => cd_sector_req_i,
       SECTOR_LBA        => cd_sector_lba_i,
       SECTOR_DATA       => cd_sector_data_i,

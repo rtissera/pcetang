@@ -61,6 +61,10 @@ module iosys_bl616 #(
     // this (this module's own `clk` port is already `clk_pce` on all 3 real CD boards,
     // confirmed by reading each board top's own instantiation) -- no CDC needed.
     output reg        cd_mounted,
+    output reg        toc_wr,
+    output reg [7:0]  toc_track,
+    output reg [7:0]  toc_control,
+    output reg [23:0] toc_lba,
     output reg [7:0]  cd_sector_data,
     output reg        cd_sector_data_valid,
     output reg        cd_sector_data_last,
@@ -201,6 +205,10 @@ reg fdd_read_start, fdd_read_finish, fdd_write_finish;
 // 0x0d <string>              debug printf. core ignores this.
 // 0x0e mount[7:0]            real (2026-08-31, see pcetang_cd_scsi_plan.md): CD-ROM mount
 //                            status, 0=no disc, 1=mounted -- drives cd_mounted
+// 0x0f track[7:0] control[7:0] lba[23:16] lba[15:8] lba[7:0]
+//                            real (2026-08-31): one real TOC entry (track=100 is the real
+//                            lead-out sentinel), sent once per track before 0x0e mount=1 --
+//                            forwarded as a single-cycle toc_wr pulse to cd_bridge.vhd
 // 0x10 chunk[7:0] <1024B>    real (2026-08-31): one 1024-byte half of a real 2048-byte
 //                            Mode-1 CD sector, chunk 0 or 1, sent in response to this
 //                            core's own 0x06 request below -- forwarded byte-by-byte to
@@ -242,6 +250,7 @@ always @(posedge clk) begin
         kbd_data_valid <= 0;
         cd_sector_data_valid <= 0;
         cd_sector_data_last <= 0;
+        toc_wr <= 0;
 
         case (recv_state)
 
@@ -349,6 +358,19 @@ always @(posedge clk) begin
                     'he: begin                      // real CD-ROM mount status
                         cd_mounted <= rx_data[0];
                         recv_state <= RECV_IDLE;    // single byte command
+                    end
+                    'hf: begin                      // real TOC entry
+                        case (data_cnt)
+                            0: toc_track <= rx_data;
+                            1: toc_control <= rx_data;
+                            2: toc_lba[23:16] <= rx_data;
+                            3: toc_lba[15:8] <= rx_data;
+                            4: begin
+                                toc_lba[7:0] <= rx_data;
+                                toc_wr <= 1;
+                            end
+                            default: ;
+                        endcase
                     end
                     'h10: begin                     // real CD sector data chunk
                         if (data_cnt == 0) begin

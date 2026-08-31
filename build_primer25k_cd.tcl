@@ -80,5 +80,12 @@ set_option -bit_compress 1
 # this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
 set_option -place_option 2
 set_option -route_option 1
+# 2026-08-31 real finding: the CD/TOC/audio-command bundle (see cd_bridge.vhd) pushed
+# Logic utilization to 90% and this board real-FAILS to route under BOTH PnR algorithms
+# -- route_option 1 (this setting): 2321 unrouted nets. route_option 0 (tried once,
+# matching the Console 60K CD precedent for the identical failure signature -- did NOT
+# transfer here): 23073 unrouted nets + a real "DesRoute failed" error, decisively worse.
+# Reverted to 1 (the smaller failure) and stopped there -- a real capacity problem, not a
+# PnR-setting problem; see pcetang_cd_scsi_plan.md for the real numbers and next steps.
 
 run all
