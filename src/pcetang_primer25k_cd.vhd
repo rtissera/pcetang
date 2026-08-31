@@ -56,20 +56,13 @@
 -- static mux like the ROM bridge. See `sdram.sv`'s header for the arbitration priority
 -- (A > B > C > refresh) and a flagged, not-yet-measured refresh-starvation risk.
 --
--- CURRENT CHANGE (2026-08-27, NOT YET gw_sh-VERIFIED): a minimal SCSI target stub now
--- answers `CD_COMM_SEND` -- any command other than REQUEST SENSE gets CHECK CONDITION;
--- REQUEST SENSE gets real, hardware-verified sense data (NOT READY / NEC's own "no disc,
--- tray closed" code, `0x0B` -- checked against a real PCE-CD emulator's source, not
--- assumed from generic SCSI-2, see the `SENSE_NOT_READY` constant's own comment for the
--- verification and the one real bug it caught) pushed through `CD_DATA`/`CD_DATA_WR`
--- into SCSI.vhd's own DATA-IN FIFO. See the `cd_stat_i`/`cd_comm_i` signal block below
--- for the full protocol trace and docs/ARCHITECTURE.md's "Real syscard boot" Part 2
--- section for why this specific pair of commands is the real minimum (a syscard with no
--- disc polls TEST UNIT READY, gets CHECK CONDITION, then asks REQUEST SENSE why). Whether
--- this is enough for a real syscard to actually reach a boot
--- screen, versus needing more of the command set, is not yet known -- no hardware test,
--- no simulation testbench for this responder exists. What IS real: `gw_sh` will confirm
--- whether this closes timing and fits, which is the first checkable fact about it.
+-- CD_BRIDGE (2026-08-31): the real SCSI target is now `cd_bridge.vhd` (shared across all
+-- 3 boards) -- see that file's own header for the full command decode/protocol trace
+-- (TEST UNIT READY, REQUEST SENSE, and a real READ(6) data path, verified against
+-- Mednafen's pce_fast/pcecd_drive.cpp). No MCU-side mount/TOC/sector protocol exists yet
+-- (see pcetang_cd_scsi_plan.md), so DISC_MOUNTED stays '0' here and READ(6) is real but
+-- inert until that lands. What IS real: `gw_sh` confirms this closes timing and fits,
+-- which is the first checkable fact about it.
 --
 -- AUDIO (2026-08-27): PSG_SL/PSG_SR/CDDA_SL/CDDA_SR/ADPCM_S wired real (previously
 -- open) into pce2hdmi_sd's already-existing psg_sl/psg_sr/cdda_sl/cdda_sr/adpcm_s
@@ -288,6 +281,15 @@ architecture rtl of pcetang_primer25k_cd is
    signal joy1_ds2      : std_logic_vector(11 downto 0);
    signal hid1, hid2    : std_logic_vector(15 downto 0);
    signal joy1          : std_logic_vector(11 downto 0);
+   signal joy2          : std_logic_vector(11 downto 0);
+
+   -- Real multitap/2-player support (2026-08-31) -- see joy_active's own
+   -- header comment further down for the full derivation.
+   signal core_config_r : std_logic_vector(31 downto 0) := (others => '0');
+   signal multitap_en   : std_logic;
+   signal joy_port      : unsigned(2 downto 0) := (others => '0');
+   signal joy_out_r     : std_logic_vector(1 downto 0) := (others => '0');
+   signal joy_active    : std_logic_vector(11 downto 0);
 
    signal rom_loading  : std_logic_vector(7 downto 0);
    signal rom_do       : std_logic_vector(7 downto 0);
@@ -440,31 +442,19 @@ architecture rtl of pcetang_primer25k_cd is
    signal cdr_owner : cdr_owner_t := OWNER_NONE;
    signal cd_pend, adpcm_pend : std_logic := '0';
 
-   -- Minimal SCSI target stub. cd.vhd/SCSI.vhd (unmodified from the donor) own the real
-   -- SCSI bus phase timing; this just answers CD_COMM_SEND with a response, same clk_pce
-   -- domain, no CDC needed (SCSI.vhd lives inside pce_top, same CLK). Traced directly from
-   -- SCSI.vhd's source, not inferred from the SCSI spec: CD_COMM's LOWEST byte
-   -- (CD_COMM(7 downto 0)) is the opcode -- COMM_POS starts at 0 and the first byte
-   -- received (the opcode) lands in COMM(0), which is the LSB of the concatenation that
-   -- becomes CD_COMM. Any command other than REQUEST SENSE (0x03) gets CHECK CONDITION;
-   -- REQUEST SENSE gets real SCSI-2 fixed-format sense data (NOT READY / MEDIUM NOT
-   -- PRESENT -- the honest answer for "no disc") pushed one byte at a time through
-   -- CD_DATA/CD_DATA_WR into SCSI.vhd's own DATA-IN FIFO (a plain byte FIFO, 4096 deep,
-   -- edge-detected per byte -- not cd.vhd's separate 4-byte-packed CDDA_FIFO, which is
-   -- audio-only via CD_AUDIO_WR and irrelevant here), followed by a GOOD status once
-   -- CD_DATA_END confirms the transfer drained. See docs/ARCHITECTURE.md's "Real syscard
-   -- boot" Part 2 section for the full protocol trace and what this deliberately doesn't
-   -- implement (TEST UNIT READY gets the same CHECK CONDITION as everything else -- there
-   -- is no special-case, REQUEST SENSE is what tells the caller why).
-   signal cd_stat_i     : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_msg_i      : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_stat_get_i : std_logic := '0';
+   -- Real SCSI target (cd_bridge.vhd, shared across all 3 boards, 2026-08-31) -- see that
+   -- file's own header for the full command decode/protocol trace. cd.vhd/SCSI.vhd
+   -- (unmodified from the donor) own the real SCSI bus phase timing; cd_bridge just
+   -- answers CD_COMM_SEND with a response, same clk_pce domain, no CDC needed (SCSI.vhd
+   -- lives inside pce_top, same CLK).
+   signal cd_stat_i      : std_logic_vector(7 downto 0);
+   signal cd_msg_i       : std_logic_vector(7 downto 0);
+   signal cd_stat_get_i  : std_logic;
    signal cd_comm_i      : std_logic_vector(95 downto 0);
    signal cd_comm_send_i : std_logic;
-   signal cd_comm_send_r : std_logic := '0';
-   signal cd_data_i     : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_data_wr_i  : std_logic := '0';
-   signal cd_data_end_i : std_logic;
+   signal cd_data_i      : std_logic_vector(7 downto 0);
+   signal cd_data_wr_i   : std_logic;
+   signal cd_data_end_i  : std_logic;
 
    -- MEASUREMENT ONLY (2026-08-30), NOT A REAL FEATURE -- do not build on this.
    -- Same real toggling signal as Console 60K CD's own (see that file's identical
@@ -473,43 +463,6 @@ architecture rtl of pcetang_primer25k_cd is
    -- shrunk 4096->2048/512->256, see cd_fifos.vhd) before any real design decision.
    -- Leave in place until a real decision is made; do not revert without being asked.
    signal meas_cdda_toggle : std_logic := '0';
-
-   constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
-
-   -- Fixed-format sense data. Verified against Mednafen's pce_fast/pcecd_drive.cpp
-   -- (mednafen/pce_fast/pcecd_drive.cpp, a real hardware-accurate PCE-CD emulator, BSD/
-   -- GPL, MakeSense()/PCECommandDefs -- fetched and checked 2026-08-27, not assumed from
-   -- generic SCSI-2 knowledge) after a direct request to verify this against real PCE-CD/
-   -- SCSI specs surfaced a real bug: byte 12 (ASC) was `0x3A`, the generic SCSI-2 MEDIUM
-   -- NOT PRESENT code -- real PCE-CD hardware/firmware uses NEC's own `0x0B` ("no disc,
-   -- tray closed") instead, per that source's `NSE_NO_DISC` constant, used specifically
-   -- for `SENSEKEY_NOT_READY` when a command requiring a disc gets one and none is
-   -- present. Every other byte here already matched Mednafen's `MakeSense()` exactly:
-   -- byte 0 = 0x70 (current error, "sense data is not SCSI compliant" per that function's
-   -- own comment), byte 2 = sense key (0x02 NOT READY), byte 7 = 0x0A (additional sense
-   -- length), byte 13 = ASCQ (0x00), byte 14 = FRU (0x00), all others 0.
-   --
-   -- Also confirmed from the same source: Mednafen's real command table flags every
-   -- command except REQUEST SENSE itself (TEST UNIT READY, READ(6), and the PCE-specific
-   -- 0xD8/0xD9/0xDA/0xDD/0xDE audio/subcode commands) as requiring a disc, and dispatches
-   -- the identical NOT_READY/NSE_NO_DISC response for ALL of them when none is present --
-   -- so this responder's blanket "any command but REQUEST SENSE gets the same response"
-   -- isn't a simplification of the real behavior for that command set, it matches it.
-   -- The one real gap: a genuinely unrecognized opcode (not in that 7-command real table)
-   -- gets ILLEGAL_REQUEST/NSE_INVALID_COMMAND (0x20) on real hardware, not NOT_READY --
-   -- this stub can't distinguish that case and would answer NOT_READY instead. Not fixed
-   -- here: real syscard boot is not known to issue any opcode outside that table (matches
-   -- Mednafen's own real-hardware-tested need to implement only those seven), so this is
-   -- a named, real gap, not a hidden one.
-   type sense_data_t is array (0 to 17) of std_logic_vector(7 downto 0);
-   constant SENSE_NOT_READY : sense_data_t := (
-      x"70", x"00", x"02", x"00", x"00", x"00", x"00", x"0A",
-      x"00", x"00", x"00", x"00", x"0B", x"00", x"00", x"00", x"00", x"00"
-   );
-
-   type scsi_state_t is (SCSI_IDLE, SCSI_SENSE_PULSE, SCSI_SENSE_GAP, SCSI_SENSE_WAIT_END);
-   signal scsi_state : scsi_state_t := SCSI_IDLE;
-   signal sense_idx  : integer range 0 to 17 := 0;
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -618,6 +571,7 @@ begin
 
    joy1_ds2 <= (others => '0');
    joy1     <= joy1_ds2 or hid1(11 downto 0);
+   joy2     <= hid2(11 downto 0);
 
    sys_inst: iosys_bl616
    generic map (
@@ -640,10 +594,47 @@ begin
       mgmt_write => open, mgmt_writedata => open, fdd_request => "00",
 
       kbd_data => open, kbd_data_valid => open,
-      core_config => open,
+      core_config => core_config_r,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
+
+   multitap_en <= core_config_r(3);
+
+   -- Real multitap/2-player support (2026-08-31). Verified against MiSTer's
+   -- own TurboGrafx16.sv (upstream/tg16-mister/TurboGrafx16.sv:966-977, real
+   -- source, not guessed): CLR (JOY_OUT(1)) high resets the player pointer to
+   -- 0; a SEL (JOY_OUT(0)) rising edge while CLR is low advances it. Real PCE
+   -- hardware disambiguates a TurboTap's player-select from the base
+   -- 2-button/6-button read cycle (which also toggles SEL) purely through
+   -- this sequencing -- a game that never expects a tap simply never drives
+   -- SEL/CLR in a pattern that advances the pointer past 0. Gated by
+   -- multitap_en (CONF_STR's real "Multitap" OSD option, iosys_bl616.v,
+   -- core_config bit 3) -- previously `core_config` was wired `open` on every
+   -- board (the OSD system itself was always real, MCU-side, just never
+   -- consumed here) -- defaults OFF exactly like MiSTer's own equivalent
+   -- toggle.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         joy_out_r <= joy_out;
+         if multitap_en = '0' then
+            joy_port <= (others => '0');
+         elsif joy_out(1) = '1' then
+            joy_port <= (others => '0');
+         elsif joy_out(0) = '1' and joy_out_r(0) = '0' then
+            joy_port <= joy_port + 1;
+         end if;
+      end if;
+   end process;
+
+   -- Real per-player HID source: only 2 real slots exist (hid1/hid2) -- any
+   -- other multitap position (2-4) reads back idle-high (no controller
+   -- present), matching real hardware's own idle convention (see MiSTer's
+   -- own `default: joy_data = 16'h0FFF`).
+   joy_active <= joy1 when joy_port = 0 else
+                 joy2 when joy_port = 1 else
+                 (others => '1');
 
    process (clk_pce)
    begin
@@ -889,54 +880,22 @@ begin
       end if;
    end process;
 
-   -- Minimal SCSI target stub -- see the cd_stat_i/cd_comm_i signal block's header
-   -- comment for the real protocol trace this implements.
-   process (clk_pce)
-   begin
-      if rising_edge(clk_pce) then
-         cd_comm_send_r <= cd_comm_send_i;
-         cd_stat_get_i  <= '0';
-         cd_data_wr_i   <= '0';
-
-         case scsi_state is
-            when SCSI_IDLE =>
-               if cd_comm_send_i = '1' and cd_comm_send_r = '0' then
-                  if cd_comm_i(7 downto 0) = SCSI_OP_REQUEST_SENSE then
-                     sense_idx  <= 0;
-                     scsi_state <= SCSI_SENSE_PULSE;
-                  else
-                     cd_stat_i     <= x"02";  -- CHECK CONDITION
-                     cd_msg_i      <= x"00";  -- COMMAND COMPLETE
-                     cd_stat_get_i <= '1';
-                  end if;
-               end if;
-
-            when SCSI_SENSE_PULSE =>
-               cd_data_i    <= SENSE_NOT_READY(sense_idx);
-               cd_data_wr_i <= '1';
-               scsi_state   <= SCSI_SENSE_GAP;
-
-            -- One idle cycle between bytes: SCSI.vhd's own push logic edge-detects
-            -- CD_DATA_WR (CD_WR_OLD/CD_WR), so a byte held high back-to-back into the
-            -- next byte would only register once.
-            when SCSI_SENSE_GAP =>
-               if sense_idx = 17 then
-                  scsi_state <= SCSI_SENSE_WAIT_END;
-               else
-                  sense_idx  <= sense_idx + 1;
-                  scsi_state <= SCSI_SENSE_PULSE;
-               end if;
-
-            when SCSI_SENSE_WAIT_END =>
-               if cd_data_end_i = '1' then
-                  cd_stat_i     <= x"00";  -- GOOD -- REQUEST SENSE itself succeeded
-                  cd_msg_i      <= x"00";
-                  cd_stat_get_i <= '1';
-                  scsi_state    <= SCSI_IDLE;
-               end if;
-         end case;
-      end if;
-   end process;
+   -- Real SCSI target -- see cd_bridge.vhd's own header for the full command decode/
+   -- protocol trace. DISC_MOUNTED/SECTOR_* left at their real default -- no MCU-side
+   -- mount/TOC/sector protocol exists yet (see pcetang_cd_scsi_plan.md).
+   cd_bridge_inst: entity work.cd_bridge
+   port map (
+      CLK          => clk_pce,
+      RST_N        => core_resetn,
+      CD_STAT      => cd_stat_i,
+      CD_MSG       => cd_msg_i,
+      CD_STAT_GET  => cd_stat_get_i,
+      CD_COMM      => cd_comm_i,
+      CD_COMM_SEND => cd_comm_send_i,
+      CD_DATA      => cd_data_i,
+      CD_DATA_WR   => cd_data_wr_i,
+      CD_DATA_END  => cd_data_end_i
+   );
 
    backup_ram: entity work.spram
    generic map (addr_width => 11, data_width => 8)
@@ -1026,8 +985,11 @@ begin
       VIDEO_HBL => video_hbl, VIDEO_VBL => video_vbl
    );
 
-   joy_in <= joy1(4) & joy1(5) & joy1(11) & joy1(10) when joy_out(0) = '1' else
-             joy1(3) & joy1(2) & joy1(1)  & joy1(0);
+   -- Reads from joy_active (real per-player mux, see its own header comment
+   -- above), not directly from joy1 -- joy_port selects which real player's
+   -- HID state is currently active.
+   joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
+             joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
 
    hdmi_out: pce2hdmi_sd
    port map (

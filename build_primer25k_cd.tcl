@@ -34,6 +34,7 @@ add_file src/pce/common/core/huc6270.vhd
 add_file src/pce/tg16-mister-rtl/cd/MSM5205.vhd
 add_file src/pce/tg16-mister-rtl/cd/SCSI.vhd
 add_file src/pce/tg16-mister-rtl/cd/cd.vhd
+add_file src/pce/common/core/cd_bridge.vhd
 add_file src/pce/common/core/pce_top.vhd
 
 add_file src/iosys/uart_fixed.v

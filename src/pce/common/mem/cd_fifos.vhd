@@ -71,13 +71,15 @@ architecture rtl of SCSI_FIFO is
 	-- registers + ~204 LUTs, i.e. real CLS fabric (already ~93% utilized project-wide),
 	-- not a free/neutral resource. Still the right fix for the immediate BSRAM-exhaustion
 	-- problem (LUTs were available, BSRAM wasn't), just not for the reason first stated.
-	-- Confirmed safe project-wide:
-	-- Console 60K's CD build stubs this exact same interface identically (CD_STAT_GET
-	-- tied '0'), so this FIFO is still dead there too -- nothing currently depends on the
-	-- old 4096 depth anywhere. Revisit (widen back, and find real BSRAM for it) once a
-	-- real CD sector-streaming design (2048 bytes/sector) is built -- this is a real
-	-- scope-driven shrink, not a permanent design decision.
-	constant ADDR_W : integer := 6;   -- 64 entries -- see comment above, was 12/4096
+	-- WIDENED BACK (2026-08-31): the real CD sector-streaming design (cd_bridge.vhd) this
+	-- comment predicted has arrived -- READ(6) now drains real 2048-byte data sectors
+	-- through this exact FIFO (SCSI.vhd's own DATA-IN path, same one REQUEST SENSE already
+	-- used for its 18 sense bytes). 2048 entries x 8 bits = 1 BSRAM block/board on Gowin
+	-- (same size class as CDDA_FIFO's own 2048x32 = 4 blocks), real, affordable post-PSG-
+	-- Path-A headroom on all 3 boards (see pcetang_status_matrix.md lever 20). Chosen over
+	-- adding UART-side flow control/pacing to the new sector protocol -- simpler, and this
+	-- FIFO now has to absorb a full sector while the CPU drains it a byte at a time.
+	constant ADDR_W : integer := 11;   -- 2048 entries, was 6/64 (2026-08-27 stub-era shrink)
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	signal mem_q : std_logic_vector(7 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;

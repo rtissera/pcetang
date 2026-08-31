@@ -249,6 +249,15 @@ architecture rtl of pcetang_nano20k_cd is
    signal joy1_ds2      : std_logic_vector(11 downto 0);
    signal hid1, hid2    : std_logic_vector(15 downto 0);
    signal joy1          : std_logic_vector(11 downto 0);
+   signal joy2          : std_logic_vector(11 downto 0);
+
+   -- Real multitap/2-player support (2026-08-31) -- see joy_active's own
+   -- header comment further down for the full derivation.
+   signal core_config_r : std_logic_vector(31 downto 0) := (others => '0');
+   signal multitap_en   : std_logic;
+   signal joy_port      : unsigned(2 downto 0) := (others => '0');
+   signal joy_out_r     : std_logic_vector(1 downto 0) := (others => '0');
+   signal joy_active    : std_logic_vector(11 downto 0);
 
    signal rom_loading  : std_logic_vector(7 downto 0);
    signal rom_do       : std_logic_vector(7 downto 0);
@@ -346,19 +355,18 @@ architecture rtl of pcetang_nano20k_cd is
    signal b_state      : b_state_t := B_IDLE;
    signal b_settle_cnt : unsigned(2 downto 0) := (others => '0');
 
-   -- Minimal SCSI target stub -- copied verbatim from Primer 25K CD, see that file for
-   -- the full protocol trace/Mednafen verification. No syscard can load here yet (ROM
-   -- stays on-chip, see header), so this cannot be exercised for real until that changes
-   -- -- wired now anyway so the rest of the plumbing needs no further change later.
-   signal cd_stat_i     : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_msg_i      : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_stat_get_i : std_logic := '0';
+   -- Real SCSI target -- cd_bridge.vhd (shared across all 3 boards, 2026-08-31), replaces
+   -- the old per-board hand-written stub. No syscard can load here yet (ROM stays on-chip,
+   -- see header), so this cannot be exercised for real until that changes -- wired now
+   -- anyway so the rest of the plumbing needs no further change later.
+   signal cd_stat_i      : std_logic_vector(7 downto 0);
+   signal cd_msg_i       : std_logic_vector(7 downto 0);
+   signal cd_stat_get_i  : std_logic;
    signal cd_comm_i      : std_logic_vector(95 downto 0);
    signal cd_comm_send_i : std_logic;
-   signal cd_comm_send_r : std_logic := '0';
-   signal cd_data_i     : std_logic_vector(7 downto 0) := (others => '0');
-   signal cd_data_wr_i  : std_logic := '0';
-   signal cd_data_end_i : std_logic;
+   signal cd_data_i      : std_logic_vector(7 downto 0);
+   signal cd_data_wr_i   : std_logic;
+   signal cd_data_end_i  : std_logic;
 
    -- MEASUREMENT ONLY (2026-08-30), NOT A REAL FEATURE -- do not build on this.
    -- Same real toggling signal as Console 60K CD's own (see that file's identical
@@ -367,18 +375,6 @@ architecture rtl of pcetang_nano20k_cd is
    -- shrunk 4096->2048/512->256, see cd_fifos.vhd) before any real design decision.
    -- Leave in place until a real decision is made; do not revert without being asked.
    signal meas_cdda_toggle : std_logic := '0';
-
-   constant SCSI_OP_REQUEST_SENSE : std_logic_vector(7 downto 0) := x"03";
-
-   type sense_data_t is array (0 to 17) of std_logic_vector(7 downto 0);
-   constant SENSE_NOT_READY : sense_data_t := (
-      x"70", x"00", x"02", x"00", x"00", x"00", x"00", x"0A",
-      x"00", x"00", x"00", x"00", x"0B", x"00", x"00", x"00", x"00", x"00"
-   );
-
-   type scsi_state_t is (SCSI_IDLE, SCSI_SENSE_PULSE, SCSI_SENSE_GAP, SCSI_SENSE_WAIT_END);
-   signal scsi_state : scsi_state_t := SCSI_IDLE;
-   signal sense_idx  : integer range 0 to 17 := 0;
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -454,6 +450,7 @@ begin
 
    joy1_ds2 <= (others => '0');
    joy1     <= joy1_ds2 or hid1(11 downto 0);
+   joy2     <= hid2(11 downto 0);
 
    sys_inst: iosys_bl616
    generic map (
@@ -476,10 +473,47 @@ begin
       mgmt_write => open, mgmt_writedata => open, fdd_request => "00",
 
       kbd_data => open, kbd_data_valid => open,
-      core_config => open,
+      core_config => core_config_r,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
+
+   multitap_en <= core_config_r(3);
+
+   -- Real multitap/2-player support (2026-08-31). Verified against MiSTer's
+   -- own TurboGrafx16.sv (upstream/tg16-mister/TurboGrafx16.sv:966-977, real
+   -- source, not guessed): CLR (JOY_OUT(1)) high resets the player pointer to
+   -- 0; a SEL (JOY_OUT(0)) rising edge while CLR is low advances it. Real PCE
+   -- hardware disambiguates a TurboTap's player-select from the base
+   -- 2-button/6-button read cycle (which also toggles SEL) purely through
+   -- this sequencing -- a game that never expects a tap simply never drives
+   -- SEL/CLR in a pattern that advances the pointer past 0. Gated by
+   -- multitap_en (CONF_STR's real "Multitap" OSD option, iosys_bl616.v,
+   -- core_config bit 3) -- previously `core_config` was wired `open` on every
+   -- board (the OSD system itself was always real, MCU-side, just never
+   -- consumed here) -- defaults OFF exactly like MiSTer's own equivalent
+   -- toggle.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         joy_out_r <= joy_out;
+         if multitap_en = '0' then
+            joy_port <= (others => '0');
+         elsif joy_out(1) = '1' then
+            joy_port <= (others => '0');
+         elsif joy_out(0) = '1' and joy_out_r(0) = '0' then
+            joy_port <= joy_port + 1;
+         end if;
+      end if;
+   end process;
+
+   -- Real per-player HID source: only 2 real slots exist (hid1/hid2) -- any
+   -- other multitap position (2-4) reads back idle-high (no controller
+   -- present), matching real hardware's own idle convention (see MiSTer's
+   -- own `default: joy_data = 16'h0FFF`).
+   joy_active <= joy1 when joy_port = 0 else
+                 joy2 when joy_port = 1 else
+                 (others => '1');
 
    -- ROM load bookkeeping: dynamic ROM_SZ + core_resetn gate, same pattern as
    -- pcetang_nano20k.vhd's own ROM-to-SDRAM bridge -- see that file for the full
@@ -681,50 +715,25 @@ begin
       end if;
    end process;
 
-   -- Minimal SCSI target stub -- see header for why this can't be exercised for real yet.
-   process (clk_pce)
-   begin
-      if rising_edge(clk_pce) then
-         cd_comm_send_r <= cd_comm_send_i;
-         cd_stat_get_i  <= '0';
-         cd_data_wr_i   <= '0';
-
-         case scsi_state is
-            when SCSI_IDLE =>
-               if cd_comm_send_i = '1' and cd_comm_send_r = '0' then
-                  if cd_comm_i(7 downto 0) = SCSI_OP_REQUEST_SENSE then
-                     sense_idx  <= 0;
-                     scsi_state <= SCSI_SENSE_PULSE;
-                  else
-                     cd_stat_i     <= x"02";  -- CHECK CONDITION
-                     cd_msg_i      <= x"00";  -- COMMAND COMPLETE
-                     cd_stat_get_i <= '1';
-                  end if;
-               end if;
-
-            when SCSI_SENSE_PULSE =>
-               cd_data_i    <= SENSE_NOT_READY(sense_idx);
-               cd_data_wr_i <= '1';
-               scsi_state   <= SCSI_SENSE_GAP;
-
-            when SCSI_SENSE_GAP =>
-               if sense_idx = 17 then
-                  scsi_state <= SCSI_SENSE_WAIT_END;
-               else
-                  sense_idx  <= sense_idx + 1;
-                  scsi_state <= SCSI_SENSE_PULSE;
-               end if;
-
-            when SCSI_SENSE_WAIT_END =>
-               if cd_data_end_i = '1' then
-                  cd_stat_i     <= x"00";  -- GOOD
-                  cd_msg_i      <= x"00";
-                  cd_stat_get_i <= '1';
-                  scsi_state    <= SCSI_IDLE;
-               end if;
-         end case;
-      end if;
-   end process;
+   -- Real SCSI target -- see header for why this can't be exercised for real yet.
+   -- DISC_MOUNTED/SECTOR_* left at their real default ('0'/unconnected) -- no MCU-side
+   -- mount/TOC/sector protocol exists yet (see pcetang_cd_scsi_plan.md), so this reproduces
+   -- the prior stub's exact "no disc" behavior for every command except READ(6), which
+   -- would simply never complete -- real, inert, not a regression (READ(6) never worked
+   -- against the old stub either).
+   cd_bridge_inst: entity work.cd_bridge
+   port map (
+      CLK          => clk_pce,
+      RST_N        => core_resetn,
+      CD_STAT      => cd_stat_i,
+      CD_MSG       => cd_msg_i,
+      CD_STAT_GET  => cd_stat_get_i,
+      CD_COMM      => cd_comm_i,
+      CD_COMM_SEND => cd_comm_send_i,
+      CD_DATA      => cd_data_i,
+      CD_DATA_WR   => cd_data_wr_i,
+      CD_DATA_END  => cd_data_end_i
+   );
 
    -- PCE PORT (2026-08-30): VRAM0_PREFETCH/VRAM0_CG_PREFETCH => 1 (BAT+CG0/CG1 enabled),
    -- retried after being OFF since this file's first attempt. Real reason it was off
@@ -823,8 +832,11 @@ begin
       VIDEO_HBL => video_hbl, VIDEO_VBL => video_vbl
    );
 
-   joy_in <= joy1(4) & joy1(5) & joy1(11) & joy1(10) when joy_out(0) = '1' else
-             joy1(3) & joy1(2) & joy1(1)  & joy1(0);
+   -- Reads from joy_active (real per-player mux, see its own header comment
+   -- above), not directly from joy1 -- joy_port selects which real player's
+   -- HID state is currently active.
+   joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
+             joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
 
    hdmi_out: pce2hdmi_sd
    port map (
