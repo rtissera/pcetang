@@ -109,7 +109,19 @@ entity cd_bridge is
 		SECTOR_LBA        : out std_logic_vector(23 downto 0);
 		SECTOR_DATA       : in  std_logic_vector(7 downto 0) := (others => '0');
 		SECTOR_DATA_VALID : in  std_logic := '0';   -- one pulse per byte, 2048 bytes/sector
-		SECTOR_DATA_LAST  : in  std_logic := '0'    -- pulses together with the 2048th byte
+		SECTOR_DATA_LAST  : in  std_logic := '0';   -- pulses together with the 2048th byte
+
+		-- Real CDDA v1 (2026-08-31f): CD_AUDIO_WR/CD_DM feed cd.vhd's own real CDDA_FIFO
+		-- write path directly (same shared CD_DATA byte bus READ(6) already drives --
+		-- never both strobes in the same cycle, see below). This first pass is a real,
+		-- deliberately isolated proof of the write path ONLY -- an internal square-wave
+		-- tone generator, no MCU/sector involvement -- proving CD_AUDIO_WR's routing
+		-- through pce_top/board files, the real 4-byte little-endian L/R packing
+		-- (verified against cd.vhd's own FIFO_D(15:0)=L/FIFO_D(31:16)=R unpack), the
+		-- FIFO write path, and the mix into HDMI audio, before spending any real margin
+		-- on the bigger real MCU-streaming design (see pcetang_cd_scsi_plan.md).
+		CD_AUDIO_WR   : out std_logic;
+		CD_DM         : out std_logic
 	);
 end entity;
 
@@ -196,6 +208,17 @@ architecture rtl of cd_bridge is
 	signal cdda_status   : std_logic_vector(1 downto 0) := CDDA_STOPPED;
 	signal last_sapsp_lba : unsigned(23 downto 0) := (others => '0');
 
+	-- Real CDDA v1 tone generator (see CD_AUDIO_WR's own port comment) -- paced by a
+	-- real CEGen instance at cd.vhd's own byte rate (IN_CLK/OUT_CLK match its existing
+	-- CDDA_CLK_GEN exactly: matching the donor's constants makes this write rate and the
+	-- donor's real FIFO-read rate track each other, even though both are slightly off
+	-- true 44.1kHz on any given board's real clk_pce).
+	signal cdda_ce         : std_logic;
+	signal cdda_byte_idx   : unsigned(1 downto 0) := (others => '0');
+	signal cdda_sample_ctr : unsigned(7 downto 0) := (others => '0');
+	signal cdda_tone_sign  : std_logic := '0';
+	constant CDDA_TONE_AMPLITUDE : signed(15 downto 0) := to_signed(8000, 16);
+
 	-- Real shared LBA->AMSF converter (repeated-subtract, multi-cycle, off the hot path).
 	-- conv_total starts at LBA+150; conv_m_bcd/conv_s_bcd count directly in packed BCD
 	-- (carry-on-9 logic in the subtract loop itself) rather than binary-then-convert --
@@ -255,6 +278,17 @@ begin
 
 	SECTOR_LBA <= std_logic_vector(read_lba);
 
+	-- Real CDDA v1 byte-rate CE, matching cd.vhd's own CDDA_CLK_GEN constants exactly
+	-- (429545/441 there is sample rate; 429545/1764 here is byte rate = 4x that).
+	CDDA_CE_GEN : entity work.CEGen
+	port map (
+		CLK     => CLK,
+		RST_N   => RST_N,
+		IN_CLK  => 429545,
+		OUT_CLK => 1764,
+		CE      => cdda_ce
+	);
+
 	-- Real TOC write + self-resetting extents, independent process (real, simple, no
 	-- interaction with the main command FSM's own state).
 	TOC_CAPTURE : process (CLK, RST_N)
@@ -299,6 +333,7 @@ begin
 		variable sapsp_vec : std_logic_vector(23 downto 0);
 		variable gdi_track : unsigned(7 downto 0);
 		variable amsf_m, amsf_s, amsf_f : unsigned(7 downto 0);
+		variable cdda_sample : signed(15 downto 0);
 	begin
 		if RST_N = '0' then
 			scsi_state    <= SCSI_IDLE;
@@ -323,10 +358,45 @@ begin
 			conv_m_bcd     <= (others => '0');
 			conv_s_bcd     <= (others => '0');
 			conv_f_bcd     <= (others => '0');
+			CD_AUDIO_WR      <= '0';
+			CD_DM            <= '0';
+			cdda_byte_idx    <= (others => '0');
+			cdda_sample_ctr  <= (others => '0');
+			cdda_tone_sign   <= '0';
 		elsif rising_edge(CLK) then
 			CD_STAT_GET <= '0';
 			CD_DATA_WR  <= '0';
 			SECTOR_REQ  <= '0';
+			CD_AUDIO_WR <= '0';
+			CD_DM       <= '0';
+
+			-- Real CDDA v1 tone write -- runs independently of scsi_state, real mutual
+			-- exclusion with READ(6)'s own CD_DATA/CD_DATA_WR comes from CDDA_STATUS
+			-- itself (READ(6) dispatch forces it to STOPPED, see below), not from FSM
+			-- state, so this never collides with the state machine's own CD_DATA writes.
+			if cdda_ce = '1' and cdda_status = CDDA_PLAYING then
+				if cdda_tone_sign = '1' then
+					cdda_sample := CDDA_TONE_AMPLITUDE;
+				else
+					cdda_sample := -CDDA_TONE_AMPLITUDE;
+				end if;
+				case cdda_byte_idx is
+					when "00" => CD_DATA <= std_logic_vector(cdda_sample(7 downto 0));   -- L lsb
+					when "01" => CD_DATA <= std_logic_vector(cdda_sample(15 downto 8));  -- L msb
+					when "10" => CD_DATA <= std_logic_vector(cdda_sample(7 downto 0));   -- R lsb
+					when others => CD_DATA <= std_logic_vector(cdda_sample(15 downto 8)); -- R msb
+				end case;
+				CD_AUDIO_WR   <= '1';
+				cdda_byte_idx <= cdda_byte_idx + 1;
+				if cdda_byte_idx = "11" then
+					if cdda_sample_ctr = 49 then
+						cdda_sample_ctr <= (others => '0');
+						cdda_tone_sign  <= not cdda_tone_sign;
+					else
+						cdda_sample_ctr <= cdda_sample_ctr + 1;
+					end if;
+				end if;
+			end if;
 
 			case scsi_state is
 				when SCSI_IDLE =>
@@ -369,6 +439,13 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
+									-- Real bus-ownership rule (advisor-suggested, matches
+									-- real drive behavior): a data read stops any real audio
+									-- playback in progress -- cd_bridge owns the single
+									-- shared CD_DATA bus, so CD_AUDIO_WR and CD_DATA_WR must
+									-- never both be real candidates in the same cycle. This
+									-- resolves that for free, no explicit interlock needed.
+									cdda_status <= CDDA_STOPPED;
 									-- sa = CDB[1][4:0] & CDB[2] & CDB[3], sc = CDB[4] (0 => 256)
 									-- CDB[n] = CD_COMM(8*n+7 downto 8*n) -- see SCSI.vhd's own
 									-- COMMAND<=COMM(11)&...&COMM(0) concatenation.
@@ -433,6 +510,15 @@ begin
 									end case;
 									last_sapsp_lba <= sapsp_lba;
 									cdda_status    <= CDDA_PLAYING;
+									-- Real re-arm at every playback start -- guards against a
+									-- real byte-count misalignment (e.g. a PAUSE landing
+									-- mid-sample on a prior session) silently swapping L/R or
+									-- shifting bytes on replay. CD_DM pulses cd.vhd's own
+									-- real CD_BYTE_CNT reset for exactly one cycle (see
+									-- cd.vhd's real CDDA process, `if DM = '1' then
+									-- CD_BYTE_CNT <= (others => '0')`).
+									cdda_byte_idx  <= (others => '0');
+									CD_DM          <= '1';
 									pending_key    <= SENSEKEY_NO_SENSE;
 									pending_asc    <= (others => '0');
 									CD_STAT        <= x"00";
@@ -451,7 +537,9 @@ begin
 									if CD_COMM(15 downto 8) = x"00" then  -- cdb[1]=0x00 => stop
 										cdda_status <= CDDA_STOPPED;
 									else
-										cdda_status <= CDDA_PLAYING;
+										cdda_status   <= CDDA_PLAYING;
+										cdda_byte_idx <= (others => '0');  -- real re-arm, see SAPSP
+										CD_DM         <= '1';
 									end if;
 									pending_key <= SENSEKEY_NO_SENSE;
 									pending_asc <= (others => '0');

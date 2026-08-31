@@ -479,14 +479,9 @@ architecture rtl of pcetang_primer25k_cd is
    signal cd_sector_data_last_i  : std_logic;
    signal cd_sector_req_i        : std_logic;
    signal cd_sector_lba_i        : std_logic_vector(23 downto 0);
+   signal cd_audio_wr_i          : std_logic;
+   signal cd_dm_i                : std_logic;
 
-   -- MEASUREMENT ONLY (2026-08-30), NOT A REAL FEATURE -- do not build on this.
-   -- Same real toggling signal as Console 60K CD's own (see that file's identical
-   -- comment) to force CD_AUDIO_WR non-constant so CDDA_FIFO can't be swept dead --
-   -- measuring THIS device's (GW5A) real BSRAM/LUT cost of a live CDDA_FIFO (now
-   -- shrunk 4096->2048/512->256, see cd_fifos.vhd) before any real design decision.
-   -- Leave in place until a real decision is made; do not revert without being asked.
-   signal meas_cdda_toggle : std_logic := '0';
 
    signal video_r, video_g, video_b : std_logic_vector(2 downto 0);
    signal video_ce, video_hs, video_vs, video_hbl, video_vbl : std_logic;
@@ -930,6 +925,8 @@ begin
       TOC_TRACK         => toc_track_i,
       TOC_CONTROL       => toc_control_i,
       TOC_LBA           => toc_lba_i,
+      CD_AUDIO_WR       => cd_audio_wr_i,
+      CD_DM             => cd_dm_i,
       SECTOR_REQ        => cd_sector_req_i,
       SECTOR_LBA        => cd_sector_lba_i,
       SECTOR_DATA       => cd_sector_data_i,
@@ -1011,8 +1008,8 @@ begin
       -- region-locked to X". Real follow-up, not yet scoped: a runtime switch once any
       -- config-menu mechanism exists on this project.
       CD_REGION => '0', CD_RESET => open,
-      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => meas_cdda_toggle,
-      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => '0',
+      CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => cd_audio_wr_i,
+      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => cd_dm_i,
 
       CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
@@ -1057,13 +1054,5 @@ begin
 
    leds_n(0) <= not dbg_deadline_miss_r;
    leds_n(1) <= not dbg_fifo_overflow_r;
-
-   -- MEASUREMENT ONLY -- see meas_cdda_toggle's own declaration comment above.
-   process (clk_pce)
-   begin
-      if rising_edge(clk_pce) then
-         meas_cdda_toggle <= not meas_cdda_toggle;
-      end if;
-   end process;
 
 end architecture;

@@ -71,6 +71,9 @@ architecture sim of tb_cd_bridge is
 	signal sector_data_valid : std_logic := '0';
 	signal sector_data_last  : std_logic := '0';
 
+	signal cd_audio_wr : std_logic;
+	signal cd_dm       : std_logic;
+
 	signal sim_done  : boolean := false;
 	signal errors    : integer := 0;
 
@@ -137,7 +140,9 @@ begin
 		SECTOR_LBA        => sector_lba,
 		SECTOR_DATA       => sector_data,
 		SECTOR_DATA_VALID => sector_data_valid,
-		SECTOR_DATA_LAST  => sector_data_last
+		SECTOR_DATA_LAST  => sector_data_last,
+		CD_AUDIO_WR       => cd_audio_wr,
+		CD_DM             => cd_dm
 	);
 
 	-- Synthetic sector source: on SECTOR_REQ, streams 2048 bytes one per CLK (no gap
@@ -466,6 +471,51 @@ begin
 			check_eq(errors, cd_data, sense_exp(i), "REQUEST SENSE (read out-of-range) byte " & integer'image(i));
 		end loop;
 		wait until rising_edge(clk) and cd_stat_get = '1';
+
+		wait for CLK_PERIOD * 4;
+
+		-- 15. Real CDDA v1 tone write -- SAPSP (raw LBA) starts playback: CD_DM pulses
+		-- exactly one cycle (real CD_BYTE_CNT re-arm), then the real byte-rate CE paces
+		-- 4 real CD_AUDIO_WR pulses forming one sample: L lsb/msb, R lsb/msb, little-
+		-- endian, L=R (mono tone), value = -8000 (tone_sign starts '0') = 0xE0C0.
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(23 downto 16) <= x"00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		-- CD_DM and CD_STAT_GET both pulse on the same real dispatch cycle -- catch
+		-- CD_DM here (this also consumes SAPSP's completion, no separate stat_get wait).
+		wait until rising_edge(clk) and cd_dm = '1';
+		wait until rising_edge(clk);
+		if cd_dm /= '0' then
+			report "FAIL: CD_DM one-cycle pulse (still high next cycle)" severity error;
+			errors <= errors + 1;
+		end if;
+		wait for CLK_PERIOD * 4;
+
+		wait until rising_edge(clk) and cd_audio_wr = '1';
+		check_eq(errors, cd_data, x"C0", "CDDA tone byte 0 (L lsb)");
+		wait until rising_edge(clk) and cd_audio_wr = '1';
+		check_eq(errors, cd_data, x"E0", "CDDA tone byte 1 (L msb)");
+		wait until rising_edge(clk) and cd_audio_wr = '1';
+		check_eq(errors, cd_data, x"C0", "CDDA tone byte 2 (R lsb)");
+		wait until rising_edge(clk) and cd_audio_wr = '1';
+		check_eq(errors, cd_data, x"E0", "CDDA tone byte 3 (R msb)");
+
+		-- READ(6) during playback stops it -- real bus-ownership rule.
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"10";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"01";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 20;  -- longer than one real CE period
+		if cd_audio_wr /= '0' then
+			report "FAIL: CD_AUDIO_WR stays low after READ(6) stops playback" severity error;
+			errors <= errors + 1;
+		end if;
 
 		wait for CLK_PERIOD * 4;
 

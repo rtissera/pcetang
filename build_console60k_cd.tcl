@@ -74,29 +74,29 @@ set_option -use_i2c_as_gpio 1
 set_option -use_jtag_as_gpio 1
 set_option -bit_compress 1
 
-# Alternate PnR algorithm (2026-08-30): same lever that recovered Nano 20K plain's
-# clk_pce margin (+0.019%->+1.85%, see pcetang_status_matrix.md lever 13) for free --
-# place_option/route_option default to 0 (compile-speed/congestion) on every board in
-# this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
-set_option -place_option 2
+# route_option forced 0 (2026-08-30) -- CONFIRMED real fix for a 2h19m routing-phase-0
+# hang with the CDDA-shrink revival live on this board (96%+ BSRAM baseline, tightest
+# in project). route_option 1 (timing-priority routing) is a real congestion trigger
+# here; route_option 0 (default, congestion-based) completes full PnR clean. Do not
+# "fix" by reverting to 1 without re-testing for the hang. See pcetang_status_matrix.md
+# lever 18.
+set_option -place_option 1
 set_option -route_option 0
-# route_option forced 0 (2026-08-30), NOT project-standard 1 -- CONFIRMED real fix for
-# a 2h19m routing-phase-0 hang with the CDDA-shrink revival live on this board (96%+
-# BSRAM baseline, tightest in project). route_option 1 (timing-priority routing) is a
-# real congestion trigger here; route_option 0 (default, congestion-based) completes
-# full PnR clean in ~2min, 0 setup/hold violations. Real cost: clk_pce margin dropped
-# from the pre-CDDA +6.21% (with route_option 1) to +0.84% (with route_option 0 +
-# CDDA) -- board-specific, do not "fix" by reverting to 1 without re-testing for the
-# hang. See pcetang_status_matrix.md lever 18.
+# place_option 1 = "routability priority" (2026-08-31f real fix, CONFIRMED): CDDA v1
+# real audio-writeback wiring (CD_AUDIO_WR/CD_DATA from cd_bridge.vhd into cd.vhd's
+# CDDA_FIFO) pushed the prior place_option 2 ("timing priority") baseline into 2 setup +
+# 1 hold violations, clk_pce 40.723MHz vs 42.857MHz constraint (real -4.98% margin) --
+# same class of fix that recovered Primer 25K CD's routing failure earlier this session.
+# With place_option 1: clk_pce 42.936MHz, real PASS, 0/0 violations, +0.18% margin.
+# Worst path is now core/AC/shift_latch_*_s0/D (Arcade Card shift register), not the
+# CDDA write path itself -- see pcetang_status_matrix.md for the full record.
 
-# 2026-08-31d/e real margin-recovery attempts against the current real critical path
+# 2026-08-31d/e real margin-recovery attempts against the PRE-CDDA critical path
 # (ALUCtrl_0_s23/DO[6], HuC6280 microcode, fanning out to many register clock-enables,
 # near-zero logic, almost pure fanout/routing delay) -- ALL TRIED, ALL REAL NO-OPS,
-# reverted:
+# reverted (against place_option 2, now superseded by place_option 1 above):
 #   -timing_driven 1 + -correct_hold_violation 0  -> bit-identical (42.858MHz, 0/0)
 #   -route_maxfan 8                                -> bit-identical (42.858MHz, 0/0)
-# Baseline (no extra flags) is the best real result found: 42.858MHz, +0.002% margin,
-# 0/0 violations. Real, razor-thin, deterministic. See pcetang_status_matrix.md lever 24
-# and advisor consult 2026-08-31e for the full record.
+# See pcetang_status_matrix.md lever 24 and advisor consult 2026-08-31e for the record.
 
 run all
