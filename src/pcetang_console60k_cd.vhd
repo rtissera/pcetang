@@ -242,6 +242,13 @@ architecture rtl of pcetang_console60k_cd is
 
          core_config : out std_logic_vector(31 downto 0);
 
+         cd_mounted           : out std_logic;
+         cd_sector_data       : out std_logic_vector(7 downto 0);
+         cd_sector_data_valid : out std_logic;
+         cd_sector_data_last  : out std_logic;
+         cd_sector_req        : in  std_logic;
+         cd_sector_lba        : in  std_logic_vector(23 downto 0);
+
          uart_rx : in  std_logic;
          uart_tx : out std_logic
       );
@@ -416,6 +423,15 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_data_wr_i   : std_logic;
    signal cd_data_end_i  : std_logic;
 
+   -- Real sector-source signals (2026-08-31) between iosys_bl616's new UART commands and
+   -- cd_bridge's generic sector interface -- see pcetang_cd_scsi_plan.md.
+   signal cd_mounted_i           : std_logic;
+   signal cd_sector_data_i       : std_logic_vector(7 downto 0);
+   signal cd_sector_data_valid_i : std_logic;
+   signal cd_sector_data_last_i  : std_logic;
+   signal cd_sector_req_i        : std_logic;
+   signal cd_sector_lba_i        : std_logic_vector(23 downto 0);
+
    -- MEASUREMENT ONLY (2026-08-30), NOT A REAL FEATURE -- do not build on this.
    -- Real toggling signal to force CD_AUDIO_WR non-constant below, so Gowin cannot
    -- prove CDDA_FIFO's write path dead and sweep it away (it currently is, see
@@ -541,6 +557,10 @@ begin
 
       kbd_data => open, kbd_data_valid => open,
       core_config => core_config_r,
+
+      cd_mounted => cd_mounted_i, cd_sector_data => cd_sector_data_i,
+      cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
+      cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
@@ -838,7 +858,14 @@ begin
       CD_COMM_SEND => cd_comm_send_i,
       CD_DATA      => cd_data_i,
       CD_DATA_WR   => cd_data_wr_i,
-      CD_DATA_END  => cd_data_end_i
+      CD_DATA_END  => cd_data_end_i,
+
+      DISC_MOUNTED      => cd_mounted_i,
+      SECTOR_REQ        => cd_sector_req_i,
+      SECTOR_LBA        => cd_sector_lba_i,
+      SECTOR_DATA       => cd_sector_data_i,
+      SECTOR_DATA_VALID => cd_sector_data_valid_i,
+      SECTOR_DATA_LAST  => cd_sector_data_last_i
    );
 
    sdram_inst: sdram

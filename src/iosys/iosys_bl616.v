@@ -56,6 +56,17 @@ module iosys_bl616 #(
     
     output reg [31:0] core_config,
 
+    // Real CD sector-source interface (2026-08-31) -- see pcetang_cd_scsi_plan.md for the
+    // full protocol design. Same clk_pce domain as cd_bridge.vhd on every board that wires
+    // this (this module's own `clk` port is already `clk_pce` on all 3 real CD boards,
+    // confirmed by reading each board top's own instantiation) -- no CDC needed.
+    output reg        cd_mounted,
+    output reg [7:0]  cd_sector_data,
+    output reg        cd_sector_data_valid,
+    output reg        cd_sector_data_last,
+    input             cd_sector_req,
+    input      [23:0] cd_sector_lba,
+
     // UART interface
     input  uart_rx,
     output uart_tx
@@ -139,6 +150,7 @@ reg [31:0] data_reg;
 reg [23:0] rom_remain;
 reg [15:0] data_cnt;
 reg [3:0] kbd_len;
+reg [7:0] cd_chunk_idx;
 
 // Add new registers for textdisp interface
 reg [7:0] x_wr;
@@ -187,6 +199,12 @@ reg fdd_read_start, fdd_read_finish, fdd_write_finish;
 // 0x0b addr[15:0] data[15:0] write to disk management interface (mgmt_address and mgmt_writedata)
 // 0x0c <scancode>            send PS/2 scancode (len specified by frame header)
 // 0x0d <string>              debug printf. core ignores this.
+// 0x0e mount[7:0]            real (2026-08-31, see pcetang_cd_scsi_plan.md): CD-ROM mount
+//                            status, 0=no disc, 1=mounted -- drives cd_mounted
+// 0x10 chunk[7:0] <1024B>    real (2026-08-31): one 1024-byte half of a real 2048-byte
+//                            Mode-1 CD sector, chunk 0 or 1, sent in response to this
+//                            core's own 0x06 request below -- forwarded byte-by-byte to
+//                            cd_sector_data/cd_sector_data_valid in arrival order
 //
 // Response payloads from FPGA to BL616:
 // 0x01 core_id[7:0]          core ID
@@ -194,6 +212,9 @@ reg fdd_read_start, fdd_read_finish, fdd_write_finish;
 // 0x03 joy1[15:0] joy2[15:0] every 20ms, send DS2/SNES joypad state to BL616
 // 0x04 lba[15:0] <data_512>  write a sector to disk
 // 0x05 lba[15:0]             read a sector from disk (followed by command 0x0a)
+// 0x06 lba[31:0]             real (2026-08-31): request a real CD-ROM data sector (24-bit
+//                            LBA, top byte always 0 -- real CD max is ~330K sectors, 19
+//                            bits) -- BL616 answers with two 0x10 frames (chunk 0, chunk 1)
 
 // UART RX: command processing
 always @(posedge clk) begin
@@ -211,6 +232,7 @@ always @(posedge clk) begin
         we <= 0;
         cursor_x <= 0;
         cursor_y <= 0;
+        cd_mounted <= 0;
     end else begin
         rom_do_valid <= 0;
         we <= 0;
@@ -218,6 +240,8 @@ always @(posedge clk) begin
         fdd_read_finish <= 0;
         mgmt_rx <= 0;
         kbd_data_valid <= 0;
+        cd_sector_data_valid <= 0;
+        cd_sector_data_last <= 0;
 
         case (recv_state)
 
@@ -322,6 +346,20 @@ always @(posedge clk) begin
                         kbd_data <= rx_data;
                         kbd_data_valid <= 1;
                     end
+                    'he: begin                      // real CD-ROM mount status
+                        cd_mounted <= rx_data[0];
+                        recv_state <= RECV_IDLE;    // single byte command
+                    end
+                    'h10: begin                     // real CD sector data chunk
+                        if (data_cnt == 0) begin
+                            cd_chunk_idx <= rx_data;
+                        end else begin
+                            cd_sector_data <= rx_data;
+                            cd_sector_data_valid <= 1;
+                            if (cd_chunk_idx == 1 && data_cnt == 1024)
+                                cd_sector_data_last <= 1;
+                        end
+                    end
                     default: begin
                         // unknown command: consume all data and return
                     end
@@ -355,11 +393,12 @@ localparam SEND_CONFIG_STRING = 2;
 localparam SEND_JOYPAD = 3;
 localparam SEND_FDD_WRITE = 4;
 localparam SEND_FDD_READ = 5;
+localparam SEND_CD_SECTOR_REQ = 6;  // real (2026-08-31): matches wire protocol's 0x06
 
-localparam SEND_HEADER = 6;
-localparam SEND_DONE = 7;
+localparam SEND_HEADER = 7;
+localparam SEND_DONE = 8;
 
-reg [2:0] send_state, send_state_next;
+reg [3:0] send_state, send_state_next;
 reg [$clog2(STR_LEN+1)-1:0] send_idx;
 localparam JOY_UPDATE_INTERVAL = 50_000_000 / 50; // 20ms interval for 50Hz
 reg [$clog2(JOY_UPDATE_INTERVAL+1)-1:0] joy_timer;
@@ -367,19 +406,38 @@ reg [15:0] joy1_reg;
 reg [15:0] joy2_reg;
 reg [15:0] resp_frame_len;
 
+// Real CD sector-request latch (2026-08-31) -- cd_sector_req is a single-cycle pulse from
+// cd_bridge.vhd (asserted once in its SCSI_READ_REQ state); this latches it until the TX
+// FSM below can service it. Real, deliberate assumption, not an oversight: cd_bridge never
+// issues a second SECTOR_REQ until the current sector's full 2048-byte transfer completes
+// (waits through SCSI_READ_WAIT_BYTE for all real SECTOR_DATA_VALID pulses first), and one
+// request frame here takes ~1000 clk_pce cycles to transmit at 2Mbaud -- far short of a
+// full sector's real byte-by-byte UART round trip -- so cd_req_pending is never re-set
+// while still 1. A real queue/overflow guard would be over-engineering for a genuinely
+// single-outstanding-request protocol.
+reg cd_req_pending;
+reg [23:0] cd_req_lba;
+
 // UART TX: command responses, joystick updates and FDD requests
 always @(posedge clk) begin
     if (!resetn) begin
         joy_timer <= 0;
         send_state <= 0;
+        cd_req_pending <= 0;
     end else begin
         tx_valid <= 0;
         mgmt_read <= 0;
         fdd_read_start <= 0;
         fdd_write_finish <= 0;
-        
+
         // Joypad state transmission logic
         joy_timer <= joy_timer == 0 ? 0 : joy_timer - 1;
+
+        // Real CD sector-request latch (see declaration comment above)
+        if (cd_sector_req) begin
+            cd_req_pending <= 1;
+            cd_req_lba <= cd_sector_lba;
+        end
 
         // UART transmission state machine
         case (send_state)
@@ -392,6 +450,10 @@ always @(posedge clk) begin
                     send_state_next <= SEND_JOYPAD;
                     send_state <= SEND_HEADER;
                     resp_frame_len <= 5;
+                end else if (cd_req_pending) begin
+                    send_state_next <= SEND_CD_SECTOR_REQ;
+                    send_state <= SEND_HEADER;
+                    resp_frame_len <= 5;    // cmd + 4-byte LBA
                 end else if (fdd_request[1] && fdd_state == FDD_READY) begin
                     send_state_next <= SEND_FDD_WRITE;
                     send_state <= SEND_HEADER;
@@ -468,6 +530,25 @@ always @(posedge clk) begin
                     if (send_idx == 3) begin
                         send_state <= SEND_IDLE;
                         response_ack <= response_req;
+                    end
+                end
+            end
+
+            // Real CD sector request (2026-08-31): send the pending real LBA (top byte
+            // always 0, real CD max is ~330K sectors/19 bits) as a 0x06 frame.
+            SEND_CD_SECTOR_REQ: begin
+                if (tx_ready && ~tx_valid) begin
+                    case (send_idx)
+                        0: tx_data <= 8'h00;
+                        1: tx_data <= cd_req_lba[23:16];
+                        2: tx_data <= cd_req_lba[15:8];
+                        default: tx_data <= cd_req_lba[7:0];
+                    endcase
+                    tx_valid <= 1;
+                    send_idx <= send_idx + 1;
+                    if (send_idx == 3) begin
+                        send_state <= SEND_IDLE;
+                        cd_req_pending <= 0;
                     end
                 end
             end

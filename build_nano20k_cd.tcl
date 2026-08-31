@@ -84,4 +84,11 @@ set_option -bit_compress 1
 set_option -place_option 2
 set_option -route_option 1
 
+# TRIED, REAL NO-OP (2026-08-31): `-maxfan 16` (Gowin's SYN04 "Fanout Guide") was tested
+# against the real 9-violation failure below and produced a bit-identical result (same
+# 42.276MHz, same 9 endpoints) -- the failing source, `MI.ALUCtrl_0_s17/DO[1]`, is a HuC6280
+# microcode-ROM output bit, not a simple flip-flop fanning into combinational logic, so
+# Gowin's fanout-triggered replication heuristic doesn't apply to it. Reverted; see
+# pcetang_status_matrix.md lever 23 for the real diagnosis and what's still open.
+
 run all
