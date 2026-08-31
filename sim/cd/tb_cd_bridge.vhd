@@ -34,6 +34,16 @@
 --      READSUBQ -> real status byte 0x02.
 --  14. READ(6), sa=0x2001 (past the real TOC lead-out at 0x2000) -> CHECK CONDITION;
 --      REQUEST SENSE -> real ILLEGAL_REQUEST(0x5)/NSE_INVALID_ADDRESS(0x21).
+--  15. Real MCU-fed CDDA v2 -- SAPSP (raw LBA=0x1000) -> CD_DM one-cycle pulse, then a
+--      real SECTOR_REQ/SECTOR_IS_AUDIO='1' fetch at LBA 0x1000, synthetic MCU stand-in
+--      streams 8 bytes, relayed through CD_AUDIO_WR in order. No host command between
+--      sectors -> real auto-continue fetches LBA 0x1001, same tag, same relay. A READ(6)
+--      issued right after -- real-interrupts the loop via cd_bridge's own comm_pending
+--      latch (may drain a further real audio sector or two first, since the exact
+--      between-sector instant is a single atomic clock edge no external command can
+--      synchronize to -- see cd_bridge.vhd's own comm_pending comment): CDDA_STATUS
+--      stops, the data read proceeds via CD_DATA_WR with SECTOR_IS_AUDIO='0', and
+--      CD_AUDIO_WR never pulses again.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -71,8 +81,9 @@ architecture sim of tb_cd_bridge is
 	signal sector_data_valid : std_logic := '0';
 	signal sector_data_last  : std_logic := '0';
 
-	signal cd_audio_wr : std_logic;
-	signal cd_dm       : std_logic;
+	signal cd_audio_wr     : std_logic;
+	signal cd_dm           : std_logic;
+	signal sector_is_audio : std_logic;
 
 	signal sim_done  : boolean := false;
 	signal errors    : integer := 0;
@@ -142,13 +153,19 @@ begin
 		SECTOR_DATA_VALID => sector_data_valid,
 		SECTOR_DATA_LAST  => sector_data_last,
 		CD_AUDIO_WR       => cd_audio_wr,
-		CD_DM             => cd_dm
+		CD_DM             => cd_dm,
+		SECTOR_IS_AUDIO   => sector_is_audio
 	);
 
-	-- Synthetic sector source: on SECTOR_REQ, streams 2048 bytes one per CLK (no gap
-	-- needed on this side -- the bridge itself paces its own one-idle-cycle-per-byte
-	-- consumption via SCSI_READ_WAIT_BYTE, so a byte offered every cycle is safe; the
-	-- bridge simply won't sample it every cycle).
+	-- Synthetic sector source: on SECTOR_REQ, streams either a real 2048-byte Mode-1 data
+	-- sector (SECTOR_IS_AUDIO='0', mirrors the real MCU's own data-sector response) or an
+	-- 8-byte stand-in for a real raw CD-DA sector (SECTOR_IS_AUDIO='1' -- real size is
+	-- 2352 bytes/588 samples, but the bridge doesn't care about sector size at all, only
+	-- SECTOR_DATA_LAST, so a short synthetic size exercises the real mechanism without
+	-- 2352 real cycles of testbench runtime). No gap needed on this side -- the bridge
+	-- itself paces its own one-idle-cycle-per-byte consumption (data path) or samples
+	-- every real SECTOR_DATA_VALID pulse directly (audio path), so a byte offered every
+	-- cycle is always safe.
 	sector_source: process
 		variable byte_idx : integer range 0 to 2047;
 	begin
@@ -156,19 +173,33 @@ begin
 			sector_data_valid <= '0';
 			sector_data_last  <= '0';
 			wait until rising_edge(clk) and sector_req = '1';
-			for byte_idx in 0 to 2047 loop
-				wait until rising_edge(clk);
-				sector_data <= std_logic_vector(unsigned(sector_lba(7 downto 0)) xor to_unsigned(byte_idx mod 256, 8));
-				sector_data_valid <= '1';
-				if byte_idx = 2047 then
-					sector_data_last <= '1';
-				end if;
-				wait until rising_edge(clk);
-				sector_data_valid <= '0';
-				sector_data_last  <= '0';
-				-- one real idle cycle, mirrors the bridge's own SCSI_READ_GAP pacing
-				wait until rising_edge(clk);
-			end loop;
+			if sector_is_audio = '1' then
+				for byte_idx in 0 to 7 loop
+					wait until rising_edge(clk);
+					sector_data <= std_logic_vector(unsigned(sector_lba(7 downto 0)) + to_unsigned(byte_idx, 8));
+					sector_data_valid <= '1';
+					if byte_idx = 7 then
+						sector_data_last <= '1';
+					end if;
+					wait until rising_edge(clk);
+					sector_data_valid <= '0';
+					sector_data_last  <= '0';
+				end loop;
+			else
+				for byte_idx in 0 to 2047 loop
+					wait until rising_edge(clk);
+					sector_data <= std_logic_vector(unsigned(sector_lba(7 downto 0)) xor to_unsigned(byte_idx mod 256, 8));
+					sector_data_valid <= '1';
+					if byte_idx = 2047 then
+						sector_data_last <= '1';
+					end if;
+					wait until rising_edge(clk);
+					sector_data_valid <= '0';
+					sector_data_last  <= '0';
+					-- one real idle cycle, mirrors the bridge's own SCSI_READ_GAP pacing
+					wait until rising_edge(clk);
+				end loop;
+			end if;
 		end loop;
 	end process;
 
@@ -474,15 +505,12 @@ begin
 
 		wait for CLK_PERIOD * 4;
 
-		-- 15. Real CDDA v1 tone write -- SAPSP (raw LBA) starts playback: CD_DM pulses
-		-- exactly one cycle (real CD_BYTE_CNT re-arm), then the real byte-rate CE paces
-		-- 4 real CD_AUDIO_WR pulses forming one sample: L lsb/msb, R lsb/msb, little-
-		-- endian, L=R (mono tone), value = -8000 (tone_sign starts '0') = 0xE0C0.
+		-- 15. Real MCU-fed CDDA v2 -- SAPSP (raw LBA=0x1000) starts playback.
 		cd_comm(7 downto 0)   <= x"D8";
-		cd_comm(79 downto 78) <= "00";
-		cd_comm(23 downto 16) <= x"00";
-		cd_comm(31 downto 24) <= x"00";
-		cd_comm(39 downto 32) <= x"00";
+		cd_comm(79 downto 78) <= "00";  -- cdb[9][7:6] = "00" = raw LBA
+		cd_comm(23 downto 16) <= x"00"; -- cdb[2] (MSB of raw LBA)
+		cd_comm(31 downto 24) <= x"10"; -- cdb[3]
+		cd_comm(39 downto 32) <= x"00"; -- cdb[4] (LSB) => LBA = 0x1000
 		send_cmd(clk, cd_comm_send);
 		-- CD_DM and CD_STAT_GET both pulse on the same real dispatch cycle -- catch
 		-- CD_DM here (this also consumes SAPSP's completion, no separate stat_get wait).
@@ -492,28 +520,66 @@ begin
 			report "FAIL: CD_DM one-cycle pulse (still high next cycle)" severity error;
 			errors <= errors + 1;
 		end if;
-		wait for CLK_PERIOD * 4;
 
-		wait until rising_edge(clk) and cd_audio_wr = '1';
-		check_eq(errors, cd_data, x"C0", "CDDA tone byte 0 (L lsb)");
-		wait until rising_edge(clk) and cd_audio_wr = '1';
-		check_eq(errors, cd_data, x"E0", "CDDA tone byte 1 (L msb)");
-		wait until rising_edge(clk) and cd_audio_wr = '1';
-		check_eq(errors, cd_data, x"C0", "CDDA tone byte 2 (R lsb)");
-		wait until rising_edge(clk) and cd_audio_wr = '1';
-		check_eq(errors, cd_data, x"E0", "CDDA tone byte 3 (R msb)");
+		-- First real audio-sector fetch: SECTOR_REQ tagged audio, LBA = SAPSP's target.
+		wait until rising_edge(clk) and sector_req = '1';
+		check_eq(errors, sector_lba, x"001000", "CDDA sector-1 fetch LBA");
+		if sector_is_audio /= '1' then
+			report "FAIL: first CDDA sector fetch not tagged SECTOR_IS_AUDIO" severity error;
+			errors <= errors + 1;
+		end if;
+		for i in 0 to 7 loop
+			wait until rising_edge(clk) and cd_audio_wr = '1';
+			check_eq(errors, cd_data, std_logic_vector(to_unsigned(i, 8)), "CDDA sector-1 audio byte " & integer'image(i));
+		end loop;
 
-		-- READ(6) during playback stops it -- real bus-ownership rule.
+		-- No host command in between -- real auto-continue fetches LBA+1, same tag.
+		wait until rising_edge(clk) and sector_req = '1';
+		check_eq(errors, sector_lba, x"001001", "CDDA sector-2 fetch LBA (auto-continue)");
+		if sector_is_audio /= '1' then
+			report "FAIL: auto-continued CDDA sector fetch not tagged SECTOR_IS_AUDIO" severity error;
+			errors <= errors + 1;
+		end if;
+		for i in 0 to 7 loop
+			wait until rising_edge(clk) and cd_audio_wr = '1';
+			check_eq(errors, cd_data, std_logic_vector(to_unsigned(1 + i, 8)), "CDDA sector-2 audio byte " & integer'image(i));
+		end loop;
+
+		-- READ(6), issued shortly after sector-2 completes -- real-interrupts CDDA via
+		-- cd_bridge's own comm_pending latch (bus-ownership rule) once it takes effect.
+		-- Real, honest timing: the exact SCSI_IDLE instant between two audio sectors is
+		-- a single atomic clock edge (audio auto-continue re-dispatches the very same
+		-- cycle scsi_state returns to idle) -- no external command, real or simulated,
+		-- can synchronize to land exactly there, so this drains up to a few further real
+		-- audio sectors (proving the latch doesn't drop the command, just delays it,
+		-- same real ~12ms-per-sector bound as any host command issued mid-fetch) before
+		-- checking the real data-sector fetch.
 		cd_comm(7 downto 0)   <= x"08";
 		cd_comm(12 downto 8)  <= "00000";
-		cd_comm(23 downto 16) <= x"10";
-		cd_comm(31 downto 24) <= x"00";
+		cd_comm(23 downto 16) <= x"19";
+		cd_comm(31 downto 24) <= x"05";
 		cd_comm(39 downto 32) <= x"01";
 		send_cmd(clk, cd_comm_send);
+
+		for attempt in 0 to 4 loop
+			wait until rising_edge(clk) and sector_req = '1';
+			exit when sector_is_audio = '0';
+			for i in 0 to 7 loop
+				wait until rising_edge(clk) and cd_audio_wr = '1';
+			end loop;
+		end loop;
+		check_eq(errors, sector_lba, x"001905", "READ(6) after CDDA interrupt: real data sector LBA");
+		if sector_is_audio /= '0' then
+			report "FAIL: READ(6) sector_req never arrived (comm_pending latch dropped it)" severity error;
+			errors <= errors + 1;
+		end if;
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"05", "READ(6) after CDDA interrupt: first data byte");
+
 		wait until rising_edge(clk) and cd_stat_get = '1';
-		wait for CLK_PERIOD * 20;  -- longer than one real CE period
+		wait for CLK_PERIOD * 20;
 		if cd_audio_wr /= '0' then
-			report "FAIL: CD_AUDIO_WR stays low after READ(6) stops playback" severity error;
+			report "FAIL: CD_AUDIO_WR stays low after READ(6) interrupts CDDA" severity error;
 			errors <= errors + 1;
 		end if;
 

@@ -17,11 +17,12 @@
 --                            own DoREADBase() check.
 --   SAPSP           (0xD8): set audio play start position. cdb[9][7:6] selects addressing:
 --                            00=raw LBA (cdb[2:4] big-endian 24-bit), 10=BCD AMSF (cdb[2:4]=
---                            M/S/F), 11=BCD track# (cdb[2], looked up in the TOC). Real,
---                            named gap: sets CDDA_STATUS to PLAYING and records the target
---                            LBA, but does not stream audio bytes (no CD_AUDIO_WR wiring
---                            yet -- that is a materially separate design, deliberately out
---                            of scope this pass, see pcetang_cd_scsi_plan.md).
+--                            M/S/F), 11=BCD track# (cdb[2], looked up in the TOC). Sets
+--                            CDDA_STATUS to PLAYING and seeds read_lba with the target LBA
+--                            -- SCSI_IDLE's own audio-continue branch then real-streams raw
+--                            CD-DA sectors from the MCU via the shared SECTOR_REQ/SECTOR_DATA_*
+--                            channel (SECTOR_IS_AUDIO tags the request), same real path
+--                            READ(6) uses. See CD_AUDIO_WR's own port comment.
 --   SAPEP           (0xD9): set audio play end position + real play mode from cdb[1]
 --                            (0x00=silent/stop, 0x01=loop, 0x02=interrupt, 0x03=normal).
 --                            cdb[1]=0x00 sets CDDA_STATUS back to STOPPED, matching
@@ -111,17 +112,20 @@ entity cd_bridge is
 		SECTOR_DATA_VALID : in  std_logic := '0';   -- one pulse per byte, 2048 bytes/sector
 		SECTOR_DATA_LAST  : in  std_logic := '0';   -- pulses together with the 2048th byte
 
-		-- Real CDDA v1 (2026-08-31f): CD_AUDIO_WR/CD_DM feed cd.vhd's own real CDDA_FIFO
+		-- Real CDDA v2 (2026-08-31g): CD_AUDIO_WR/CD_DM feed cd.vhd's own real CDDA_FIFO
 		-- write path directly (same shared CD_DATA byte bus READ(6) already drives --
-		-- never both strobes in the same cycle, see below). This first pass is a real,
-		-- deliberately isolated proof of the write path ONLY -- an internal square-wave
-		-- tone generator, no MCU/sector involvement -- proving CD_AUDIO_WR's routing
-		-- through pce_top/board files, the real 4-byte little-endian L/R packing
-		-- (verified against cd.vhd's own FIFO_D(15:0)=L/FIFO_D(31:16)=R unpack), the
-		-- FIFO write path, and the mix into HDMI audio, before spending any real margin
-		-- on the bigger real MCU-streaming design (see pcetang_cd_scsi_plan.md).
-		CD_AUDIO_WR   : out std_logic;
-		CD_DM         : out std_logic
+		-- never both strobes in the same cycle, enforced structurally, see
+		-- SCSI_READ_WAIT_BYTE below). Real audio bytes come from the MCU over the same
+		-- SECTOR_REQ/SECTOR_LBA/SECTOR_DATA_* channel READ(6) already uses -- SECTOR_
+		-- IS_AUDIO is the one new wire, a type tag on the request so the MCU knows to
+		-- serve a raw 2352-byte CD-DA sector instead of a 2048-byte Mode-1 data sector.
+		-- Real bandwidth check done before building this (see pcetang_status_matrix.md):
+		-- CDDA and data reads are mutually exclusive on real hardware (Mednafen's
+		-- DoREADBase() unconditionally stops CDDA on any READ), so the 2Mbaud UART link
+		-- never has to carry both at once -- verified against pcecd_drive.cpp directly.
+		CD_AUDIO_WR     : out std_logic;
+		CD_DM           : out std_logic;
+		SECTOR_IS_AUDIO : out std_logic
 	);
 end entity;
 
@@ -170,7 +174,20 @@ architecture rtl of cd_bridge is
 	signal pending_key : unsigned(3 downto 0) := SENSEKEY_NO_SENSE;
 	signal pending_asc  : std_logic_vector(7 downto 0) := (others => '0');
 
-	signal cd_comm_send_r : std_logic := '0';
+	-- Real command-pending latch (2026-08-31g) -- CD_COMM_SEND is a genuine one-shot
+	-- pulse in the real donor (SCSI.vhd's own COMM_OUT, confirmed: unconditionally
+	-- defaulted '0' every cycle, set '1' only the exact SP_COMM_END cycle), so a plain
+	-- level check (no separate edge-detect register/process needed -- one cycle less
+	-- latency, matters here) is exactly equivalent to edge detection and can't
+	-- re-trigger. Sampling CD_COMM_SEND only from SCSI_IDLE (as before this latch
+	-- existed) drops any command that arrives while scsi_state is busy -- real and
+	-- reachable even pre-CDDA (a 256-sector READ(6) already occupies scsi_state with no
+	-- yield), and now routinely reachable too (a real audio-sector fetch is ~12ms, a
+	-- real READ(6) CDB takes SCSI.vhd's own ~665us REQ/ACK handshake to assemble -- the
+	-- pulse can land mid-fetch). This latch closes both: set on any real CD_COMM_SEND
+	-- pulse (after the dispatch case, so a same-cycle set/clear collision resolves to
+	-- "set wins" by VHDL's last-assignment-wins), cleared only on real dispatch.
+	signal comm_pending : std_logic := '0';
 
 	-- READ(6) real working state
 	signal read_lba     : unsigned(23 downto 0) := (others => '0');
@@ -208,16 +225,12 @@ architecture rtl of cd_bridge is
 	signal cdda_status   : std_logic_vector(1 downto 0) := CDDA_STOPPED;
 	signal last_sapsp_lba : unsigned(23 downto 0) := (others => '0');
 
-	-- Real CDDA v1 tone generator (see CD_AUDIO_WR's own port comment) -- paced by a
-	-- real CEGen instance at cd.vhd's own byte rate (IN_CLK/OUT_CLK match its existing
-	-- CDDA_CLK_GEN exactly: matching the donor's constants makes this write rate and the
-	-- donor's real FIFO-read rate track each other, even though both are slightly off
-	-- true 44.1kHz on any given board's real clk_pce).
-	signal cdda_ce         : std_logic;
-	signal cdda_byte_idx   : unsigned(1 downto 0) := (others => '0');
-	signal cdda_sample_ctr : unsigned(7 downto 0) := (others => '0');
-	signal cdda_tone_sign  : std_logic := '0';
-	constant CDDA_TONE_AMPLITUDE : signed(15 downto 0) := to_signed(8000, 16);
+	-- Real audio-fetch tag -- distinguishes an audio-sector fetch from a real READ(6)
+	-- data-sector fetch while both share SCSI_READ_REQ/SCSI_READ_WAIT_BYTE (same LUT
+	-- cost either way, real budget concern on Primer 25K CD -- see
+	-- pcetang_status_matrix.md). Set at whichever SCSI_IDLE dispatch starts the fetch,
+	-- held for its entire duration (never re-defaulted mid-fetch).
+	signal is_audio_read : std_logic := '0';
 
 	-- Real shared LBA->AMSF converter (repeated-subtract, multi-cycle, off the hot path).
 	-- conv_total starts at LBA+150; conv_m_bcd/conv_s_bcd count directly in packed BCD
@@ -267,27 +280,7 @@ architecture rtl of cd_bridge is
 
 begin
 
-	CD_COMM_SEND_EDGE : process (CLK, RST_N)
-	begin
-		if RST_N = '0' then
-			cd_comm_send_r <= '0';
-		elsif rising_edge(CLK) then
-			cd_comm_send_r <= CD_COMM_SEND;
-		end if;
-	end process;
-
 	SECTOR_LBA <= std_logic_vector(read_lba);
-
-	-- Real CDDA v1 byte-rate CE, matching cd.vhd's own CDDA_CLK_GEN constants exactly
-	-- (429545/441 there is sample rate; 429545/1764 here is byte rate = 4x that).
-	CDDA_CE_GEN : entity work.CEGen
-	port map (
-		CLK     => CLK,
-		RST_N   => RST_N,
-		IN_CLK  => 429545,
-		OUT_CLK => 1764,
-		CE      => cdda_ce
-	);
 
 	-- Real TOC write + self-resetting extents, independent process (real, simple, no
 	-- interaction with the main command FSM's own state).
@@ -333,7 +326,6 @@ begin
 		variable sapsp_vec : std_logic_vector(23 downto 0);
 		variable gdi_track : unsigned(7 downto 0);
 		variable amsf_m, amsf_s, amsf_f : unsigned(7 downto 0);
-		variable cdda_sample : signed(15 downto 0);
 	begin
 		if RST_N = '0' then
 			scsi_state    <= SCSI_IDLE;
@@ -360,47 +352,28 @@ begin
 			conv_f_bcd     <= (others => '0');
 			CD_AUDIO_WR      <= '0';
 			CD_DM            <= '0';
-			cdda_byte_idx    <= (others => '0');
-			cdda_sample_ctr  <= (others => '0');
-			cdda_tone_sign   <= '0';
+			SECTOR_IS_AUDIO  <= '0';
+			is_audio_read    <= '0';
+			comm_pending     <= '0';
 		elsif rising_edge(CLK) then
-			CD_STAT_GET <= '0';
-			CD_DATA_WR  <= '0';
-			SECTOR_REQ  <= '0';
-			CD_AUDIO_WR <= '0';
-			CD_DM       <= '0';
-
-			-- Real CDDA v1 tone write -- runs independently of scsi_state, real mutual
-			-- exclusion with READ(6)'s own CD_DATA/CD_DATA_WR comes from CDDA_STATUS
-			-- itself (READ(6) dispatch forces it to STOPPED, see below), not from FSM
-			-- state, so this never collides with the state machine's own CD_DATA writes.
-			if cdda_ce = '1' and cdda_status = CDDA_PLAYING then
-				if cdda_tone_sign = '1' then
-					cdda_sample := CDDA_TONE_AMPLITUDE;
-				else
-					cdda_sample := -CDDA_TONE_AMPLITUDE;
-				end if;
-				case cdda_byte_idx is
-					when "00" => CD_DATA <= std_logic_vector(cdda_sample(7 downto 0));   -- L lsb
-					when "01" => CD_DATA <= std_logic_vector(cdda_sample(15 downto 8));  -- L msb
-					when "10" => CD_DATA <= std_logic_vector(cdda_sample(7 downto 0));   -- R lsb
-					when others => CD_DATA <= std_logic_vector(cdda_sample(15 downto 8)); -- R msb
-				end case;
-				CD_AUDIO_WR   <= '1';
-				cdda_byte_idx <= cdda_byte_idx + 1;
-				if cdda_byte_idx = "11" then
-					if cdda_sample_ctr = 49 then
-						cdda_sample_ctr <= (others => '0');
-						cdda_tone_sign  <= not cdda_tone_sign;
-					else
-						cdda_sample_ctr <= cdda_sample_ctr + 1;
-					end if;
-				end if;
-			end if;
+			CD_STAT_GET     <= '0';
+			CD_DATA_WR      <= '0';
+			SECTOR_REQ      <= '0';
+			CD_AUDIO_WR     <= '0';
+			CD_DM           <= '0';
+			SECTOR_IS_AUDIO <= '0';
 
 			case scsi_state is
 				when SCSI_IDLE =>
-					if CD_COMM_SEND = '1' and cd_comm_send_r = '0' then
+					if comm_pending = '1' or CD_COMM_SEND = '1' then
+						-- Real same-cycle path (CD_COMM_SEND checked directly, not just
+						-- the latch): when scsi_state is genuinely idle already, a pulse
+						-- must dispatch this same cycle, matching the pre-latch design's
+						-- own behavior -- the latch alone (registered, one cycle behind)
+						-- would lose that race against SCSI_IDLE's own audio-continue
+						-- elsif below on the exact cycle a fetch just finished. See the
+						-- post-case latch-set below for why this doesn't double-arm.
+						comm_pending <= '0';
 						case CD_COMM(7 downto 0) is
 							when SCSI_OP_REQUEST_SENSE =>
 								-- Real drive-level condition overrides whatever's pending
@@ -445,7 +418,8 @@ begin
 									-- shared CD_DATA bus, so CD_AUDIO_WR and CD_DATA_WR must
 									-- never both be real candidates in the same cycle. This
 									-- resolves that for free, no explicit interlock needed.
-									cdda_status <= CDDA_STOPPED;
+									cdda_status   <= CDDA_STOPPED;
+									is_audio_read <= '0';
 									-- sa = CDB[1][4:0] & CDB[2] & CDB[3], sc = CDB[4] (0 => 256)
 									-- CDB[n] = CD_COMM(8*n+7 downto 8*n) -- see SCSI.vhd's own
 									-- COMMAND<=COMM(11)&...&COMM(0) concatenation.
@@ -510,6 +484,13 @@ begin
 									end case;
 									last_sapsp_lba <= sapsp_lba;
 									cdda_status    <= CDDA_PLAYING;
+									-- Real fetch start: read_lba is the SAME register READ(6)
+									-- uses (shared, mutually exclusive by construction -- see
+									-- SCSI_IDLE's own audio-continue branch below), seeded here
+									-- with the real play-start LBA, then advanced one raw audio
+									-- sector at a time as SCSI_READ_WAIT_BYTE's audio branch
+									-- completes each SECTOR_DATA_LAST.
+									read_lba       <= sapsp_lba;
 									-- Real re-arm at every playback start -- guards against a
 									-- real byte-count misalignment (e.g. a PAUSE landing
 									-- mid-sample on a prior session) silently swapping L/R or
@@ -517,7 +498,6 @@ begin
 									-- real CD_BYTE_CNT reset for exactly one cycle (see
 									-- cd.vhd's real CDDA process, `if DM = '1' then
 									-- CD_BYTE_CNT <= (others => '0')`).
-									cdda_byte_idx  <= (others => '0');
 									CD_DM          <= '1';
 									pending_key    <= SENSEKEY_NO_SENSE;
 									pending_asc    <= (others => '0');
@@ -537,9 +517,13 @@ begin
 									if CD_COMM(15 downto 8) = x"00" then  -- cdb[1]=0x00 => stop
 										cdda_status <= CDDA_STOPPED;
 									else
-										cdda_status   <= CDDA_PLAYING;
-										cdda_byte_idx <= (others => '0');  -- real re-arm, see SAPSP
-										CD_DM         <= '1';
+										cdda_status <= CDDA_PLAYING;
+										-- real resume: re-fetch from the last known play position
+										-- (same "stand-in" precision as READSUBQ's own reported
+										-- position, see that command's header comment -- a real
+										-- mid-track pause/resume offset isn't tracked here)
+										read_lba    <= last_sapsp_lba;
+										CD_DM       <= '1';  -- real re-arm, see SAPSP
 									end if;
 									pending_key <= SENSEKEY_NO_SENSE;
 									pending_asc <= (others => '0');
@@ -623,6 +607,15 @@ begin
 								CD_MSG      <= x"00";
 								CD_STAT_GET <= '1';
 						end case;
+					elsif cdda_status = CDDA_PLAYING then
+						-- Real audio auto-continue: no host command arrived this cycle, and
+						-- playback is live -- fetch the next raw audio sector. A real command
+						-- (checked above, same cycle, takes priority via if/elsif) can only
+						-- land back here between sectors, same latency-bounded interrupt
+						-- window READ(6) itself already has for its own multi-sector
+						-- transfers -- not a new class of behavior, see file header.
+						is_audio_read <= '1';
+						scsi_state    <= SCSI_READ_REQ;
 					end if;
 
 				-- Real shared LBA->AMSF converter -- repeated subtract, multi-cycle,
@@ -744,16 +737,41 @@ begin
 				-- stream its 2048 bytes (SECTOR_DATA_VALID pulses), relay each byte into
 				-- SCSI.vhd's DATA-IN FIFO with the same one-idle-cycle-per-byte gap as
 				-- REQUEST SENSE, then advance to the next sector until READ_COUNT is
-				-- exhausted.
+				-- exhausted. Shared with the real audio-sector fetch (is_audio_read='1',
+				-- see SCSI_IDLE's own audio-continue branch) -- same request/response
+				-- shape, different byte destination and end condition (SECTOR_DATA_LAST
+				-- instead of a fixed 2048-byte count, since a real raw CD-DA sector is
+				-- 2352 bytes and the MCU alone decides how to chunk it -- see
+				-- cd_bridge.vhd's own SECTOR_IS_AUDIO port comment).
 				when SCSI_READ_REQ =>
-					SECTOR_REQ <= '1';
-					scsi_state <= SCSI_READ_WAIT_BYTE;
+					SECTOR_REQ      <= '1';
+					SECTOR_IS_AUDIO <= is_audio_read;
+					scsi_state      <= SCSI_READ_WAIT_BYTE;
 
 				when SCSI_READ_WAIT_BYTE =>
 					if SECTOR_DATA_VALID = '1' then
-						CD_DATA    <= SECTOR_DATA;
-						CD_DATA_WR <= '1';
-						scsi_state <= SCSI_READ_GAP;
+						if is_audio_read = '1' then
+							-- Real audio byte: forwarded straight into cd.vhd's own CDDA_FIFO
+							-- write path. No gap state needed here (unlike the data path
+							-- below) -- successive SECTOR_DATA_VALID pulses are already
+							-- naturally spaced by real UART byte time (~5us at 2Mbaud, many
+							-- clk_pce cycles), so CD_AUDIO_WR's own edge-detect in cd.vhd
+							-- (CD_WR_OLD) never sees back-to-back highs.
+							CD_DATA     <= SECTOR_DATA;
+							CD_AUDIO_WR <= '1';
+							if SECTOR_DATA_LAST = '1' then
+								-- real fetch loop: advance to the next raw audio sector and
+								-- yield to SCSI_IDLE so a real host command can interrupt
+								-- between sectors (see SCSI_IDLE's own audio-continue branch)
+								read_lba   <= read_lba + 1;
+								scsi_state <= SCSI_IDLE;
+							end if;
+							-- else: stay in SCSI_READ_WAIT_BYTE for the next audio byte
+						else
+							CD_DATA    <= SECTOR_DATA;
+							CD_DATA_WR <= '1';
+							scsi_state <= SCSI_READ_GAP;
+						end if;
 					end if;
 
 				when SCSI_READ_GAP =>
@@ -784,6 +802,17 @@ begin
 						scsi_state  <= SCSI_IDLE;
 					end if;
 			end case;
+
+			-- Real command-pending latch (see comm_pending's own declaration comment) --
+			-- only arms when scsi_state is NOT SCSI_IDLE this cycle: if it IS, the
+			-- dispatch branch above already saw this same CD_COMM_SEND pulse directly
+			-- (same-cycle path) and cleared comm_pending itself -- latching here too
+			-- would re-arm a phantom pending command for a pulse that was already
+			-- consumed, causing a spurious re-dispatch of stale CD_COMM bytes next time
+			-- SCSI_IDLE is reached.
+			if CD_COMM_SEND = '1' and scsi_state /= SCSI_IDLE then
+				comm_pending <= '1';
+			end if;
 		end if;
 	end process;
 

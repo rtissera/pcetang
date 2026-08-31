@@ -70,6 +70,10 @@ module iosys_bl616 #(
     output reg        cd_sector_data_last,
     input             cd_sector_req,
     input      [23:0] cd_sector_lba,
+    input             cd_sector_is_audio,   // real (2026-08-31g): tags the pending fetch
+                                             // as a raw CD-DA sector (2352B) vs a Mode-1
+                                             // data sector (2048B) -- see cd_bridge.vhd's
+                                             // own SECTOR_IS_AUDIO port comment
 
     // UART interface
     input  uart_rx,
@@ -220,9 +224,15 @@ reg fdd_read_start, fdd_read_finish, fdd_write_finish;
 // 0x03 joy1[15:0] joy2[15:0] every 20ms, send DS2/SNES joypad state to BL616
 // 0x04 lba[15:0] <data_512>  write a sector to disk
 // 0x05 lba[15:0]             read a sector from disk (followed by command 0x0a)
-// 0x06 lba[31:0]             real (2026-08-31): request a real CD-ROM data sector (24-bit
-//                            LBA, top byte always 0 -- real CD max is ~330K sectors, 19
-//                            bits) -- BL616 answers with two 0x10 frames (chunk 0, chunk 1)
+// 0x06 is_audio[7:0] lba[23:0]  real (2026-08-31, extended 2026-08-31g): request a real
+//                            CD sector -- is_audio=0: Mode-1 data sector (2048B), BL616
+//                            answers with 0x10 frames (chunk 0/1, 1024B each, matches the
+//                            existing 0x10 handler exactly). is_audio=1: raw CD-DA sector
+//                            (2352B) -- BL616 answers with 0x10 frames too, chunked
+//                            however it likes (chunk index + byte count already carry the
+//                            real end-of-sector marker, this FPGA side only needs
+//                            SECTOR_DATA_LAST, not a fixed size). 24-bit LBA, real CD max
+//                            is ~330K sectors (19 bits).
 
 // UART RX: command processing
 always @(posedge clk) begin
@@ -378,7 +388,18 @@ always @(posedge clk) begin
                         end else begin
                             cd_sector_data <= rx_data;
                             cd_sector_data_valid <= 1;
-                            if (cd_chunk_idx == 1 && data_cnt == 1024)
+                            // Real data-sector shape (unchanged, matches the existing
+                            // shipped MCU firmware): exactly 2 fixed 1024B chunks (0 and
+                            // 1), last byte of chunk 1 ends the sector. Real audio-sector
+                            // shape (2026-08-31g, cd_sector_is_audio requests): a raw
+                            // CD-DA sector is 2352B, not 2x1024 -- the MCU signals its
+                            // real final chunk with the sentinel chunk_idx=8'hFF (data
+                            // sectors never use this value, no collision), and the last
+                            // byte of THAT frame (data_cnt+2==len_reg, same generic
+                            // last-byte check RECV_PARAM already does above) ends the
+                            // sector, whatever its real chunk count/size.
+                            if ((cd_chunk_idx == 1 && data_cnt == 1024) ||
+                                (cd_chunk_idx == 8'hFF && (data_cnt + 2 == len_reg)))
                                 cd_sector_data_last <= 1;
                         end
                     end
@@ -439,6 +460,7 @@ reg [15:0] resp_frame_len;
 // single-outstanding-request protocol.
 reg cd_req_pending;
 reg [23:0] cd_req_lba;
+reg cd_req_is_audio;  // real (2026-08-31g): latched alongside cd_req_lba, see below
 
 // UART TX: command responses, joystick updates and FDD requests
 always @(posedge clk) begin
@@ -459,6 +481,7 @@ always @(posedge clk) begin
         if (cd_sector_req) begin
             cd_req_pending <= 1;
             cd_req_lba <= cd_sector_lba;
+            cd_req_is_audio <= cd_sector_is_audio;
         end
 
         // UART transmission state machine
@@ -556,12 +579,17 @@ always @(posedge clk) begin
                 end
             end
 
-            // Real CD sector request (2026-08-31): send the pending real LBA (top byte
-            // always 0, real CD max is ~330K sectors/19 bits) as a 0x06 frame.
+            // Real CD sector request (2026-08-31, extended 2026-08-31g): send the pending
+            // real LBA as a 0x06 frame. Byte 0 was always 0 (top byte of a real CD LBA,
+            // max ~330K sectors/19 bits -- genuinely unused as address bits) -- repurposed
+            // to carry cd_req_is_audio: 0=Mode-1 data sector (2048B), 1=raw CD-DA sector
+            // (2352B). The MCU alone decides how to chunk its response (see
+            // cd_bridge.vhd's own SECTOR_IS_AUDIO port comment) -- this FPGA side doesn't
+            // need to know or care about sector size, only the type tag.
             SEND_CD_SECTOR_REQ: begin
                 if (tx_ready && ~tx_valid) begin
                     case (send_idx)
-                        0: tx_data <= 8'h00;
+                        0: tx_data <= {7'h00, cd_req_is_audio};
                         1: tx_data <= cd_req_lba[23:16];
                         2: tx_data <= cd_req_lba[15:8];
                         default: tx_data <= cd_req_lba[7:0];

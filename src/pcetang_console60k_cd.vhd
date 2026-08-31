@@ -252,6 +252,7 @@ architecture rtl of pcetang_console60k_cd is
          cd_sector_data_last  : out std_logic;
          cd_sector_req        : in  std_logic;
          cd_sector_lba        : in  std_logic_vector(23 downto 0);
+         cd_sector_is_audio   : in  std_logic;
 
          uart_rx : in  std_logic;
          uart_tx : out std_logic
@@ -439,6 +440,7 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_sector_data_last_i  : std_logic;
    signal cd_sector_req_i        : std_logic;
    signal cd_sector_lba_i        : std_logic_vector(23 downto 0);
+   signal cd_sector_is_audio_i   : std_logic;
    signal cd_audio_wr_i          : std_logic;
    signal cd_dm_i                : std_logic;
 
@@ -564,6 +566,7 @@ begin
       cd_sector_data => cd_sector_data_i,
       cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
       cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
+      cd_sector_is_audio => cd_sector_is_audio_i,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
@@ -871,6 +874,7 @@ begin
       CD_DM             => cd_dm_i,
       SECTOR_REQ        => cd_sector_req_i,
       SECTOR_LBA        => cd_sector_lba_i,
+      SECTOR_IS_AUDIO   => cd_sector_is_audio_i,
       SECTOR_DATA       => cd_sector_data_i,
       SECTOR_DATA_VALID => cd_sector_data_valid_i,
       SECTOR_DATA_LAST  => cd_sector_data_last_i
