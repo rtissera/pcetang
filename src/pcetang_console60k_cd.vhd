@@ -540,9 +540,7 @@ begin
    generic map (
       FREQ => 42_857_000,     -- matches clk_pce below, not the AUDIO/hclk domain
       COLOR_LOGO => "011000000001000",   -- purple-ish, arbitrary first-cut choice
-      CORE_ID => x"0003",                -- 1=nestang, 2=snestang (their scheme) -- 3
-                                          -- picked here as unclaimed; real ID scheme
-                                          -- coordination with nand2mario not done
+      CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00"
    )
    port map (

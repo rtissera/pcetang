@@ -8,17 +8,14 @@
 // nand2mario's nes2hdmi.sv ELVDS_OBUF style, which this repo's pce2hdmi.sv follows), so
 // the pairs are split into separate IO_LOC lines here, values unchanged.
 //
-// uart_rxd/uart_txd are NOT CONFIRMED -- see docs/ARCHITECTURE.md's board-support
-// section. T13/V12/R13/U13 are the JTAG TMS/TCK/TDI/TDO pins that ../TangNano60K's own
-// notes (same physical board) say the onboard BL616 also shares for its own
-// (different, SPI-based) companion-MCU link -- TangCore's own dev docs independently
-// describe BL616<->FPGA communication over what its architecture doc calls
-// "BL616_TX"/"BL616_RX" on a debug connector that also carries TDI/TCK/TDO/TMS. Two
-// independent sources agree these 4 pins are the right neighborhood, but which 2
-// specifically carry TangCore's plain UART (not SPI) has not been confirmed against a
-// real Console 60K schematic. Picked TDI/TDO (R13/U13) as TX/RX respectively -- a
-// guess, needs real hardware or a definitive nand2mario source to confirm. Requires
-// -use_jtag_as_gpio 1 (see build script) either way.
+// uart_rxd/uart_txd real pins: V14/U15 (2026-09-01), confirmed against
+// ../../tangcore-work/tangcore/monitor/src/boards/console.cst -- hardware-proven on
+// this exact board via monitor.bin's own working BL616 CORE_ID handshake. The prior
+// guess (R13/U13, the JTAG TDI/TDO pins) was real but wrong: it made this design's own
+// UART driver fight BL616's own bit-banged JTAG signals on the same wires the instant
+// the core went active, corrupting the tail of every SRAM-load transaction over BL616's
+// own JTAG path (external JTAG cables use a separate header, so they never saw it). See
+// the uart_txd/uart_rxd IO_LOC block below.
 
 IO_LOC  "clk" V22;
 IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF;
@@ -135,8 +132,15 @@ IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
 IO_LOC  "tmds_d_n[2]" J17;
 IO_PORT "tmds_d_n[2]" PULL_MODE=NONE DRIVE=8 IO_TYPE=LVCMOS33D;
 
-// BL616 UART -- NOT CONFIRMED, see header.
-IO_LOC  "uart_txd" R13;
+// BL616 UART -- real pins (2026-09-01), cross-checked against
+// ../../tangcore-work/tangcore/monitor/src/boards/console.cst, which is hardware-proven
+// on this exact board (monitor.bin's own CORE_ID handshake works over these pins).
+// The old R13/U13 guess put this UART on the JTAG TDI/TDO pins -- as soon as this
+// design's own UART driver went live post-config it fought BL616's own bit-banged JTAG
+// on the same wires, corrupting the tail of the SRAM-load transaction (readStatusReg
+// coming back all-zero, DONE never seen) -- real, GHDL/gw_sh-clean bitstreams loaded
+// fine, only BL616's own JTAG path broke. use_jtag_as_gpio is no longer needed either.
+IO_LOC  "uart_txd" U15;
 IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
-IO_LOC  "uart_rxd" U13;
+IO_LOC  "uart_rxd" V14;
 IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=3.3;

@@ -477,7 +477,7 @@ begin
    generic map (
       FREQ => 43_200_000,
       COLOR_LOGO => "011000000001000",
-      CORE_ID => x"0003",
+      CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00"
    )
    port map (

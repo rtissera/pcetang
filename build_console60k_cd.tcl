@@ -71,7 +71,6 @@ set_option -use_sspi_as_gpio 1
 set_option -use_done_as_gpio 1
 set_option -use_ready_as_gpio 1
 set_option -use_i2c_as_gpio 1
-set_option -use_jtag_as_gpio 1
 set_option -bit_compress 1
 
 # route_option forced 0 (2026-08-30) -- CONFIRMED real fix for a 2h19m routing-phase-0
