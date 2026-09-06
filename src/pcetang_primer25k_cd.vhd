@@ -988,6 +988,11 @@ begin
       -- pattern as every other board that hasn't opted in.
       VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
 
+      -- TEMP DEBUG (2026-09-06): Console 60K-only debug taps (see pce_top.vhd's own
+      -- port comments). Explicitly `open` here rather than omitted, matching this
+      -- file's style for every other unused pce_top output.
+      DBG_CPU_A => open, DBG_VDC_WR => open,
+
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,

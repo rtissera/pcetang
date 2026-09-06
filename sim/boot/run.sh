@@ -4,7 +4,7 @@
 # Real-ROM boot simulation of pce_top. See tb_pce_boot.vhd's header for what this does
 # and does NOT prove.
 #
-#   ./run.sh <rom.pce> [run_us] [verbose] [sgx] [cd_en] [trace_n] [trace_skip]
+#   ./run.sh <rom.pce> [run_us] [verbose] [sgx] [cd_en] [trace_n] [trace_skip] [rom_lat]
 #
 # Analysed with --std=08 (the testbench needs VHDL-2008 external names to tap pce_top's
 # internal CPU bus without modifying any RTL) and -fsynopsys (the donor uses
@@ -14,7 +14,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-WORK="$HERE/work"
+# Override to run several configurations concurrently -- each needs its own analysis
+# directory or they clobber each other's work-obj08.cf.
+WORK="${GHDL_WORK:-$HERE/work}"
 
 ROM="${1:?usage: run.sh <rom.pce> [run_us] [verbose] [sgx] [cd_en]}"
 RUN_US="${2:-120000}"
@@ -23,6 +25,7 @@ SGX="${4:-1}"
 CD_EN="${5:-0}"
 TRACE_N="${6:-0}"
 TRACE_SKIP="${7:-0}"
+ROM_LAT="${8:-0}"
 
 mkdir -p "$WORK"
 rm -f "$WORK"/*.o "$WORK"/*.cf "$WORK"/tb_pce_boot 2>/dev/null || true
@@ -78,4 +81,5 @@ ghdl -r "${GHDL_FLAGS[@]}" tb_pce_boot \
 	-gCD_EN_G="'$CD_EN'" \
 	-gTRACE_N="$TRACE_N" \
 	-gTRACE_SKIP="$TRACE_SKIP" \
+	-gROM_LAT="$ROM_LAT" \
 	--ieee-asserts=disable

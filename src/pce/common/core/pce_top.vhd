@@ -162,6 +162,22 @@ entity pce_top is
 		DBG_DEADLINE_MISS_1 : out std_logic;
 		DBG_FIFO_OVERFLOW_1 : out std_logic;
 
+		-- PCE PORT (2026-09-06): read-only taps on the internal CPU bus, for the board's
+		-- RTL debug-trace channel (see pcetang_rtl_trace_channel.md). Purely
+		-- combinational reads of signals that already exist below -- no new logic, same
+		-- precedent as SCREEN_DBG/OFS_Y_DBG in huc6270.vhd. Every board that doesn't
+		-- want them leaves them `open`.
+		--
+		-- Why these two specifically: a GHDL boot testbench (sim/boot/) proved this core
+		-- boots a real HuCard given an ideal ROM -- first VDC write at 15.28 ms, 7 ROM
+		-- banks touched -- while the same ROM on real Console 60K hardware stays black.
+		-- DBG_VDC_WR settles the one question the board top cannot otherwise see: does
+		-- the CPU ever reach the code that programs the VDC on real hardware? DBG_CPU_A
+		-- is the physical (post-MPR) address, which the board's own ROM_A cannot show
+		-- (ROM_A drops CPU_A(19) on the 512K bucket and shows nothing for RAM/IO cycles).
+		DBG_CPU_A  : out std_logic_vector(20 downto 0);
+		DBG_VDC_WR : out std_logic;
+
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
 		ROM_A 		: out std_logic_vector(21 downto 0);
@@ -1029,6 +1045,13 @@ ROM_A <=   "00000"&CPU_A(16 downto 0)                                       when
 
 ROM_RD    <= CPU_PRE_RD and not CPU_ROM_SEL_N and CPU_PRAM_SEL_N and ((AC_RAM_CS_N and CD_RAM_CS_N) or not CD_EN);
 ROM_CLKEN <= CPU_CLKEN;
+
+-- PCE PORT (2026-09-06): debug taps, see the port declarations above. DBG_VDC_WR is a
+-- one-CPU-cycle pulse on any CPU write that lands on VDC0 -- the same condition the
+-- GHDL boot testbench counts via CPU_VDC0_SEL_N, so a hardware count and a sim count
+-- mean exactly the same thing and can be compared directly.
+DBG_CPU_A  <= CPU_A;
+DBG_VDC_WR <= CPU_CE and not CPU_WR_N and not CPU_VDC0_SEL_N;
 
 process( CLK ) begin
 	if rising_edge( CLK ) then

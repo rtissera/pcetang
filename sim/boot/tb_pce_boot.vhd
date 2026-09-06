@@ -37,7 +37,14 @@ entity tb_pce_boot is
 		-- Dump the first N raw CPU bus cycles (every CPU_CE with RD or WR active).
 		TRACE_N    : integer := 0;
 		-- Skip this many CPU bus cycles before TRACE_N starts printing.
-		TRACE_SKIP : integer := 0
+		TRACE_SKIP : integer := 0;
+		-- ROM read latency in clk_pce cycles. 0 = ideal zero-wait memory (ROM_RDY tied
+		-- '1'). Nonzero mimics the SHAPE of pcetang_console60k_cd.vhd's read bridge:
+		-- ROM_RDY drops while ROM_RD is asserted, the data is registered, and ROM_RDY
+		-- rises ROM_LAT cycles later. This does NOT model sdram.sv -- it only tests
+		-- whether the handshake protocol itself can stall the HuC6280, independently of
+		-- whether the returned data is correct.
+		ROM_LAT    : integer := 0
 	);
 end entity;
 
@@ -53,6 +60,19 @@ architecture sim of tb_pce_boot is
 	signal rom_rd    : std_logic;
 	signal rom_a     : std_logic_vector(21 downto 0);
 	signal rom_do    : std_logic_vector(7 downto 0) := (others => '1');
+	signal rom_q     : std_logic_vector(7 downto 0) := (others => '1');
+	signal rom_rdy   : std_logic := '1';
+
+	-- Board-side ports that pcetang_console60k_cd.vhd routes to the shared port-C
+	-- arbiter (which drives cd_ram_rdy_i, the OTHER term of pce_top's WAIT_N). Probed
+	-- here rather than left open: if the CD/ADPCM side requests DRAM during a plain
+	-- HuCard boot, that arbiter can stall the CPU exactly the way ROM_RDY can.
+	signal cd_ram_rd_s, cd_ram_wr_s : std_logic;
+	signal adpcm_req_s              : std_logic;
+	signal adpcm_we_s               : std_logic;
+
+	signal dbg_cpu_a_s  : std_logic_vector(20 downto 0);
+	signal dbg_vdc_wr_s : std_logic;
 
 	-- video
 	signal video_vs, video_hs, video_vbl, video_hbl, video_ce : std_logic;
@@ -146,8 +166,46 @@ begin
 	end process;
 
 	-- -------------------------------------------------------------- ROM model
-	-- Ideal, zero-wait, combinational. ROM_RDY is tied '1' at the port map below.
-	rom_do <= rom_img(to_integer(unsigned(rom_a)));
+	rom_q <= rom_img(to_integer(unsigned(rom_a)));
+
+	gen_rom_ideal : if ROM_LAT = 0 generate
+		rom_do  <= rom_q;
+		rom_rdy <= '1';
+	end generate;
+
+	-- Latency model. Mirrors the board bridge's own structure: ROM_RD is a LEVEL held
+	-- for the whole CPU memory cycle, so the FSM must re-arm from idle (it will
+	-- immediately restart while ROM_RD is still high, exactly as the board's RB_IDLE
+	-- does) rather than edge-detect.
+	gen_rom_lat : if ROM_LAT /= 0 generate
+		process (clk)
+			variable cnt   : integer := 0;
+			variable busy  : boolean := false;
+		begin
+			if rising_edge(clk) then
+				if reset = '1' then
+					busy    := false;
+					cnt     := 0;
+					rom_rdy <= '1';
+				elsif not busy then
+					rom_rdy <= '1';
+					if rom_rd = '1' then
+						busy    := true;
+						cnt     := ROM_LAT;
+						rom_rdy <= '0';
+					end if;
+				else
+					if cnt <= 1 then
+						busy    := false;
+						rom_do  <= rom_q;
+						rom_rdy <= '1';
+					else
+						cnt := cnt - 1;
+					end if;
+				end if;
+			end if;
+		end process;
+	end generate;
 
 	-- ------------------------------------------------------------------- DUT
 	dut : entity work.pce_top
@@ -169,8 +227,14 @@ begin
 		VRAM1_RAM_A_LINE_REFILL => open, VRAM1_RAM_A_LINE_DO => (others => '0'),
 		DBG_DEADLINE_MISS_1 => open, DBG_FIFO_OVERFLOW_1 => open,
 
+		-- Mapped, not left open, so the summary can cross-check the exact signal the
+		-- board's hardware trace reports (DBG_VDC_WR) against this testbench's own
+		-- independent count via CPU_VDC0_SEL_N. If those two ever disagree, the
+		-- hardware number would be meaningless.
+		DBG_CPU_A => dbg_cpu_a_s, DBG_VDC_WR => dbg_vdc_wr_s,
+
 		ROM_RD    => rom_rd,
-		ROM_RDY   => '1',
+		ROM_RDY   => rom_rdy,
 		ROM_A     => rom_a,
 		ROM_DO    => rom_do,
 		ROM_SZ    => ROM_SZ_G,
@@ -186,11 +250,11 @@ begin
 		JOY_OUT => joy_out, JOY_IN => "1111",
 
 		CD_EN => CD_EN_G, CD_RAM_A => open, CD_RAM_DO => open,
-		CD_RAM_DI => x"FF", CD_RAM_RD => open, CD_RAM_WR => open,
+		CD_RAM_DI => x"FF", CD_RAM_RD => cd_ram_rd_s, CD_RAM_WR => cd_ram_wr_s,
 		CD_RAM_RDY => '1',
 
 		ADPCM_RAM_A => open, ADPCM_RAM_DO => open,
-		ADPCM_RAM_WE => open, ADPCM_RAM_REQ => open,
+		ADPCM_RAM_WE => adpcm_we_s, ADPCM_RAM_REQ => adpcm_req_s,
 		ADPCM_RAM_SLOT_CNT => open,
 		ADPCM_RAM_DI => "0000", ADPCM_RAM_READY => '1',
 
@@ -247,6 +311,7 @@ begin
 
 		variable printed   : integer := 0;
 		variable n_bus     : integer := 0;
+		variable n_dbg_vdc : integer := 0;
 		variable traced    : integer := 0;
 		variable vdc_reg   : std_logic_vector(4 downto 0) := (others => '0');
 
@@ -263,6 +328,16 @@ begin
 		variable prev_v0i : std_logic := '1';
 		variable prev_v1i : std_logic := '1';
 		variable prev_cdi : std_logic := '1';
+
+		-- port-C requesters (see the signal declarations above for why these matter)
+		variable n_cdram_rd  : integer := 0;
+		variable n_cdram_wr  : integer := 0;
+		variable n_adpcm_req : integer := 0;
+		variable cyc_cdram   : integer := 0;
+		variable cyc_adpcm   : integer := 0;
+		variable prev_crd : std_logic := '0';
+		variable prev_cwr : std_logic := '0';
+		variable prev_areq: std_logic := '0';
 
 		variable b : integer;
 
@@ -290,6 +365,23 @@ begin
 			prev_v0i := vdc0_irq_n;
 			prev_v1i := vdc1_irq_n;
 			prev_cdi := cd_irq_n;
+
+			-- Independent count of the port the board's hardware trace reports.
+			if dbg_vdc_wr_s = '1' then
+				n_dbg_vdc := n_dbg_vdc + 1;
+			end if;
+
+			-- port-C requesters: rising edges, and total cycles held asserted (the
+			-- board's arbiter drops cd_ram_rdy_i for as long as it is servicing one,
+			-- so the held-cycle count is what actually bounds a CPU stall).
+			if cd_ram_rd_s  = '1' and prev_crd  = '0' then n_cdram_rd  := n_cdram_rd  + 1; end if;
+			if cd_ram_wr_s  = '1' and prev_cwr  = '0' then n_cdram_wr  := n_cdram_wr  + 1; end if;
+			if adpcm_req_s  = '1' and prev_areq = '0' then n_adpcm_req := n_adpcm_req + 1; end if;
+			if cd_ram_rd_s = '1' or cd_ram_wr_s = '1' then cyc_cdram := cyc_cdram + 1; end if;
+			if adpcm_req_s = '1' then cyc_adpcm := cyc_adpcm + 1; end if;
+			prev_crd  := cd_ram_rd_s;
+			prev_cwr  := cd_ram_wr_s;
+			prev_areq := adpcm_req_s;
 
 			-- video activity
 			if video_vbl = '1' and prev_vbl = '0' then vbl_edges := vbl_edges + 1; end if;
@@ -378,6 +470,13 @@ begin
 		write(l, string'("  sim time            : ")); write(l, now); writeline(output, l);
 		write(l, string'("  VDC0 writes         : ")); write(l, n_vdc0_wr); writeline(output, l);
 		write(l, string'("  first VDC0 write at : ")); write(l, first_vdc); writeline(output, l);
+		write(l, string'("  DBG_VDC_WR count    : ")); write(l, n_dbg_vdc);
+		if n_dbg_vdc = n_vdc0_wr then
+			write(l, string'("   (matches, tap is sound)"));
+		else
+			write(l, string'("   *** DISAGREES with VDC0 writes -- tap is WRONG ***"));
+		end if;
+		writeline(output, l);
 		write(l, string'("  VDC0 reads          : ")); write(l, n_vdc0_rd); writeline(output, l);
 		write(l, string'("  VDC1 writes         : ")); write(l, n_vdc1_wr); writeline(output, l);
 		write(l, string'("  VPC  writes         : ")); write(l, n_vpc_wr);  writeline(output, l);
@@ -388,6 +487,11 @@ begin
 		write(l, string'("  VBLANK edges        : ")); write(l, vbl_edges);  writeline(output, l);
 		write(l, string'("  VSYNC edges         : ")); write(l, vs_edges);   writeline(output, l);
 		write(l, string'("  CPU bus cycles      : ")); write(l, n_bus);      writeline(output, l);
+		write(l, string'("  CD_RAM_RD pulses    : ")); write(l, n_cdram_rd);  writeline(output, l);
+		write(l, string'("  CD_RAM_WR pulses    : ")); write(l, n_cdram_wr);  writeline(output, l);
+		write(l, string'("  ADPCM_RAM_REQ pulses: ")); write(l, n_adpcm_req); writeline(output, l);
+		write(l, string'("  CD_RAM held cycles  : ")); write(l, cyc_cdram);   writeline(output, l);
+		write(l, string'("  ADPCM held cycles   : ")); write(l, cyc_adpcm);   writeline(output, l);
 		write(l, string'("  distinct ROM banks  : ")); write(l, nbanks);     writeline(output, l);
 		write(l, string'("  ROM banks touched   : "));
 		for i in 0 to 127 loop

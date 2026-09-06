@@ -416,6 +416,47 @@ architecture rtl of pcetang_console60k_cd is
    signal wr_addr        : std_logic_vector(24 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
 
+   -- TEMP DEBUG (2026-09-06): ROM-image self-test. A GHDL boot testbench (sim/boot/,
+   -- commit eab68ee) proved this exact ROM boots pce_top given an IDEAL zero-wait ROM --
+   -- first VDC write at 15.28 ms, 7 distinct ROM banks touched, VBLANK running -- while
+   -- the same ROM on real hardware stays black. That bisection leaves two candidates the
+   -- testbench structurally cannot reach: the SDRAM-resident ROM image being wrong, and
+   -- synthesis/timing-level failures. This settles the first one.
+   --
+   -- Between the end of the MCU's ROM load and the release of core_resetn (a window
+   -- where port B is otherwise idle and the CPU is still held in reset, so nothing can
+   -- race it) this FSM sweeps the whole loaded image back out of SDRAM, accumulating a
+   -- rotate-and-add checksum, and emits one trace line per 16KB block. Comparing those
+   -- against the same checksum computed over the .pce file on the PC (see
+   -- scripts/rom_checksum.py) localises any corruption to a 16KB block, or rules the
+   -- image out entirely. Only ~9 bytes of the trace payload are used per block, and
+   -- blocks are ~2.3 ms apart, far wider than the ~50 us a 10-byte trace frame takes at
+   -- 2 Mbaud, so no trace can overrun the single-outstanding channel.
+   constant VFY_BLK_BITS : integer := 14;             -- 16KB blocks
+   type vfy_state_t is (VF_IDLE, VF_REQ, VF_SETTLE, VF_WAIT, VF_ACC, VF_EMIT, VF_DONE);
+   signal vfy_state   : vfy_state_t := VF_IDLE;
+   signal vfy_active  : std_logic := '0';
+   signal vfy_req     : std_logic := '0';
+   signal vfy_addr    : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
+   signal vfy_len     : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
+   signal vfy_sum     : unsigned(31 downto 0) := (others => '0');
+   signal vfy_blk     : unsigned(7 downto 0) := (others => '0');
+   signal vfy_settle  : unsigned(2 downto 0) := (others => '0');
+   -- Bounded so a stuck SDRAM can never keep the core in reset forever: on timeout the
+   -- sweep gives up, emits what it has, and releases the core anyway.
+   signal vfy_timeout : unsigned(11 downto 0) := (others => '0');
+   signal vfy_emit    : std_logic := '0';
+   signal vfy_emit_d  : std_logic := '0';
+   signal vfy_sum_lat : unsigned(31 downto 0) := (others => '0');
+   signal vfy_blk_lat : unsigned(7 downto 0) := (others => '0');
+
+   -- Debug taps from pce_top (see that file's DBG_CPU_A/DBG_VDC_WR port comments).
+   signal dbg_cpu_a   : std_logic_vector(20 downto 0);
+   signal dbg_vdc_wr  : std_logic;
+   signal dbg_vdc_cnt : unsigned(31 downto 0) := (others => '0');
+   signal dbg_vbl_r   : std_logic := '0';
+   signal dbg_vbl_cnt : unsigned(15 downto 0) := (others => '0');
+
    -- CD-RAM bridge: pce_top's CD_RAM_A/CD_RAM_DO/CD_RAM_DI/CD_RAM_RD/CD_RAM_WR through
    -- sdram.sv's port C -- shared with ADPCM RAM (2026-08-28, see the cdr_owner_t signal
    -- block above), same as pcetang_primer25k_cd.vhd. Level-held REQ (port A's
@@ -641,11 +682,14 @@ begin
       if rising_edge(clk_pce) then
          rom_loading_r <= rom_loading(0);
 
+         -- TEMP DEBUG: the release on loading's falling edge is now deferred until the
+         -- ROM self-test sweep finishes (vfy_state = VF_DONE below). The sweep is
+         -- bounded and always terminates, so the core is always released.
          if reset_n = '0' then
             core_resetn <= '0';
          elsif rom_loading(0) = '1' and rom_loading_r = '0' then
             core_resetn <= '0';
-         elsif rom_loading(0) = '0' and rom_loading_r = '1' then
+         elsif vfy_state = VF_DONE then
             core_resetn <= '1';
          end if;
 
@@ -686,7 +730,13 @@ begin
    -- Static mux: write bridge (load) owns port B while rom_loading_r is set, read
    -- bridge (gameplay fetch) owns it otherwise. Mutually exclusive because the core is
    -- held in core_resetn's reset for the whole load, so ROM_RD cannot fire during it.
-   romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
+   -- TEMP DEBUG: three-way now -- the ROM self-test owns port B in the window between
+   -- load-done and core release. It cannot overlap either of the other two: the write
+   -- bridge is done (rom_loading_r is low) and the read bridge cannot have started
+   -- (core_resetn is still low, so pce_top drives no ROM_RD).
+   romb_addr <= wr_addr when rom_loading_r = '1' else
+                std_logic_vector(ROM_SDRAM_BASE + resize(vfy_addr, 25)) when vfy_active = '1' else
+                rd_addr;
    romb_we   <= '1'     when rom_loading_r = '1' else '0';
    romb_di   <= wr_data;
 
@@ -712,7 +762,11 @@ begin
    -- the combined signal exactly once, the pending mismatch survives the ownership
    -- switch, and a quiet bridge contributes a constant. Both bridges are mutually
    -- exclusive in time anyway (see above), so they never toggle in the same cycle.
-   romb_req  <= wr_req xor rd_req;
+   -- TEMP DEBUG: vfy_req folded in with the same XOR rationale as wr_req/rd_req above --
+   -- each owner toggling its own register still toggles the combined signal exactly
+   -- once, and a quiet owner contributes a constant, so no request is ever cancelled by
+   -- an ownership switch.
+   romb_req  <= wr_req xor rd_req xor vfy_req;
 
    -- ROM write bridge: one iosys_bl616 byte becomes one real SDRAM write via port B.
    -- Same pattern as pcetang_console60k.vhd's ROM write bridge.
@@ -745,6 +799,112 @@ begin
                   wr_state <= RB_IDLE;
                end if;
          end case;
+      end if;
+   end process;
+
+   -- TEMP DEBUG: ROM-image self-test sweep. See the vfy_* declarations above for why
+   -- this exists and what its output is compared against. Uses the same 5-cycle-settle
+   -- then check-wait handshake the read/write bridges already use, so it exercises the
+   -- real port-B path rather than a special-cased one -- if the bridge handshake itself
+   -- returns wrong data, this sweep sees exactly the same wrong data the CPU would.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         vfy_emit   <= '0';
+         vfy_emit_d <= vfy_emit;
+
+         case vfy_state is
+            when VF_IDLE =>
+               vfy_active <= '0';
+               -- Start on loading's falling edge, the same edge that used to release
+               -- the core directly.
+               if rom_loading(0) = '0' and rom_loading_r = '1' then
+                  vfy_active  <= '1';
+                  vfy_addr    <= (others => '0');
+                  vfy_sum     <= (others => '0');
+                  vfy_blk     <= (others => '0');
+                  vfy_len     <= rom_wr_addr;
+                  vfy_state   <= VF_REQ;
+               end if;
+
+            when VF_REQ =>
+               -- Nothing loaded (or a zero-length load): don't sweep, just release.
+               if vfy_len = 0 then
+                  vfy_state <= VF_DONE;
+               else
+                  vfy_req     <= not vfy_req;
+                  vfy_settle  <= (others => '0');
+                  vfy_timeout <= (others => '0');
+                  vfy_state   <= VF_SETTLE;
+               end if;
+
+            when VF_SETTLE =>
+               if vfy_settle = "100" then
+                  if romb_wait = '1' then
+                     vfy_state <= VF_WAIT;
+                  else
+                     vfy_state <= VF_ACC;
+                  end if;
+               else
+                  vfy_settle <= vfy_settle + 1;
+               end if;
+
+            when VF_WAIT =>
+               vfy_timeout <= vfy_timeout + 1;
+               if romb_wait = '0' then
+                  vfy_state <= VF_ACC;
+               elsif vfy_timeout = x"FFF" then
+                  -- SDRAM never answered. Give up rather than hold the core in reset
+                  -- forever; the emitted checksum will be visibly wrong, which is
+                  -- itself the finding.
+                  vfy_state <= VF_DONE;
+               end if;
+
+            when VF_ACC =>
+               -- Rotate-left-1 then add, so byte ORDER matters (a plain sum would miss
+               -- a shuffled image). scripts/rom_checksum.py computes the identical
+               -- function over the .pce file.
+               vfy_sum  <= (vfy_sum(30 downto 0) & vfy_sum(31)) + resize(unsigned(romb_do), 32);
+               -- Always advance, then decide on the ADVANCED value -- otherwise the
+               -- final block's end test can never become true and the sweep re-reads
+               -- the last byte forever.
+               vfy_addr <= vfy_addr + 1;
+               if (vfy_addr + 1 = vfy_len)
+                  or (vfy_addr(VFY_BLK_BITS-1 downto 0) = (VFY_BLK_BITS-1 downto 0 => '1')) then
+                  vfy_state <= VF_EMIT;
+               else
+                  vfy_state <= VF_REQ;
+               end if;
+
+            when VF_EMIT =>
+               -- Latch before clearing: vfy_sum is zeroed in this same cycle, so the
+               -- trace process (which fires one cycle later, on vfy_emit_d) would
+               -- otherwise sample an already-cleared accumulator.
+               vfy_sum_lat <= vfy_sum;
+               vfy_blk_lat <= vfy_blk;
+               vfy_emit    <= '1';
+               vfy_blk     <= vfy_blk + 1;
+               vfy_sum     <= (others => '0');
+               if vfy_addr >= vfy_len then
+                  vfy_state <= VF_DONE;
+               else
+                  vfy_state <= VF_REQ;
+               end if;
+
+            when VF_DONE =>
+               vfy_active <= '0';
+         end case;
+
+         -- Re-arm on the START of any load, AFTER the case so it always wins. Without
+         -- this, VF_DONE is terminal, and since core_resetn's own process releases the
+         -- core whenever `vfy_state = VF_DONE`, a SECOND ROM load would be released from
+         -- reset immediately instead of being held for the duration of the load --
+         -- exactly the race core_resetn exists to prevent. Not reachable today (the MCU
+         -- reprograms the FPGA per core load) but a real trap for whoever changes that.
+         if rom_loading(0) = '1' and rom_loading_r = '0' then
+            vfy_state  <= VF_IDLE;
+            vfy_active <= '0';
+         end if;
       end if;
    end process;
 
@@ -988,6 +1148,10 @@ begin
       DBG_DEADLINE_MISS => open, DBG_FIFO_OVERFLOW => open,
       VRAM0_RAM_A_LINE_REFILL => open, VRAM0_RAM_A_LINE_DO => (others => '0'),
 
+      -- TEMP DEBUG (2026-09-06): see pce_top.vhd's own port comments and the trace
+      -- process near the bottom of this file.
+      DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr,
+
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
       ROM_A     => rom_a,
@@ -1084,11 +1248,41 @@ begin
    -- "address mapping wrong" (rom_sz_r bucket rounding / SF2' mapping, never exercised
    -- on real hardware); the state bits say whether the bridge is stuck and where.
    -- Capped at 64 snapshots so the log stays readable and the UART is not flooded.
+   --
+   -- 2026-09-06 SECOND PASS. The first pass traced rom_a and concluded "the CPU never
+   -- leaves ROM bank 0". That conclusion was WRONG, and the way it was wrong is worth
+   -- recording: sim/boot/'s testbench shows a perfectly healthy run of this same ROM
+   -- also spends almost every 100 ms sample inside bank 0, because the game's main loop
+   -- lives at $F000-$FFFF (ROM 0x1000-0x1FFF, bank 0) and only visits other banks in
+   -- short bursts. A 100 ms sampler cannot distinguish "stuck in bank 0" from "healthy,
+   -- and mostly in bank 0". So this pass traces things whose value is unambiguous
+   -- rather than an address that has to be interpreted statistically:
+   --
+   --   tags 0x00-0x3F : ROM self-test block checksums (see the vfy_* FSM above). These
+   --                    answer "is the image in SDRAM the image on the SD card?" against
+   --                    scripts/rom_checksum.py's output for the same file. This is the
+   --                    first candidate the GHDL bisection left open.
+   --   tags 0x80+     : runtime heartbeat, now carrying DBG_VDC_WR's cumulative count
+   --                    and the VBLANK count. A nonzero, climbing VDC write count means
+   --                    the CPU DID reach the code that programs the VDC and the fault
+   --                    is downstream (video path); a flat zero means it did not, and
+   --                    the fault is upstream. That single number splits the remaining
+   --                    search space in half, which the previous payload could not.
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
          dbg_trace_req <= '0';
-         if core_resetn = '0' then
+
+         -- Phase 1: one trace per completed ROM self-test block.
+         if vfy_emit_d = '1' then
+            dbg_trace_req  <= '1';
+            dbg_trace_tag  <= std_logic_vector(vfy_blk_lat);
+            -- [63:56] block | [55:24] checksum | [23:2] end address | [1:0] pad
+            dbg_trace_data <= std_logic_vector(vfy_blk_lat)
+                              & std_logic_vector(vfy_sum_lat)
+                              & std_logic_vector(vfy_addr)
+                              & "00";
+         elsif core_resetn = '0' then
             dbg_fetch_cnt <= (others => '0');
             dbg_hb_cnt    <= (others => '0');
          else
@@ -1096,20 +1290,42 @@ begin
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             if dbg_hb_cnt = 0 and dbg_fetch_cnt < 64 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
+               -- 0x80+ so heartbeat tags can never be confused with a block checksum.
+               dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt or x"80");
                dbg_trace_req <= '1';
-               dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt);
-               -- [63:40] pad | [39:18] rom_a(21:0) | [17:10] romb_do | [9:2] rom_sz_r
-               -- | [1] romb_wait | [0] rom_rdy_i   ... plus rd_state in the pad's low bits
-               -- 16 + 4 + 4 flags + 2 state + 22 addr + 8 data + 8 size = 64 bits.
-               -- Decoded on the PC as: byte2 low nibble = rom_rd/core_resetn/rom_rdy/
-               -- romb_wait, byte3 top 2 bits = rd_state (00 IDLE, 01 SETTLE, 10 WAIT),
-               -- bytes 3..5 = rom_a, byte6 = romb_do, byte7 = rom_sz_r.
-               dbg_trace_data <= x"0000" & "0000"
-                                 & rom_rd_i & core_resetn & rom_rdy_i & romb_wait
+               -- [63:32] cumulative VDC0 write count | [31:16] VBLANK count
+               -- | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait
+               -- | [10:0]  DBG_CPU_A(20:10), the physical bank + high offset
+               -- Decoded on the PC: bytes 0-3 = VDC write count (the key number),
+               -- bytes 4-5 = VBLANK count, byte 6 top 2 bits = rd_state (00 IDLE,
+               -- 01 SETTLE, 10 WAIT).
+               dbg_trace_data <= std_logic_vector(dbg_vdc_cnt)
+                                 & std_logic_vector(dbg_vbl_cnt)
                                  & rd_state_bits
-                                 & rom_a(21 downto 0)
-                                 & romb_do
-                                 & rom_sz_r(7 downto 0);
+                                 & rom_rd_i & rom_rdy_i & romb_wait
+                                 & dbg_cpu_a(20 downto 10);
+            end if;
+         end if;
+      end if;
+   end process;
+
+   -- TEMP DEBUG: cumulative counters feeding the heartbeat payload above. Both are
+   -- gated on core_resetn (the CPU actually running), NOT on reset_n -- earlier probe
+   -- rounds produced false positives precisely because reset_n-gated counters latch
+   -- during the SDRAM's own power-on init, before anything real has happened.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         dbg_vbl_r <= video_vbl;
+         if core_resetn = '0' then
+            dbg_vdc_cnt <= (others => '0');
+            dbg_vbl_cnt <= (others => '0');
+         else
+            if dbg_vdc_wr = '1' then
+               dbg_vdc_cnt <= dbg_vdc_cnt + 1;
+            end if;
+            if video_vbl = '1' and dbg_vbl_r = '0' then
+               dbg_vbl_cnt <= dbg_vbl_cnt + 1;
             end if;
          end if;
       end if;
