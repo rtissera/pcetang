@@ -80,6 +80,34 @@ set_option -bit_compress 1
 # here; route_option 0 (default, congestion-based) completes full PnR clean. Do not
 # "fix" by reverting to 1 without re-testing for the hang. See pcetang_status_matrix.md
 # lever 18.
+# 2026-09-06 REAL FIX ATTEMPT for SDRAM data corruption. Gowin's defaults for these
+# three are FALSE (confirmed in SUG100 4.4.2E), so every register touching an IO buffer
+# -- including sdram.sv's `data_reg <= SDRAM_DQ` capture flop and the dq_out drive
+# registers -- sits in FABRIC. Each DQ pin then has its own pad<->fabric routing delay,
+# nanoseconds apart and re-randomised by every place-and-route.
+#
+# That matches the hardware evidence exactly. Read-back of the ROM image, same board,
+# same ROM, only clk_sdram changed:
+#   120 MHz -- 66/128 bytes wrong, 15 of 16 DQ lines
+#   100 MHz -- 14/128 wrong, odd addresses only, DQ[8],[9],[10]
+#    80 MHz --  1/40  wrong, DQ[9],[10],[12]
+# Converging but never reaching zero, the failing PIN SET SHIFTING between builds, and
+# every single flip 0->1 (bus sampled before it settles, never after). Frequency was
+# never the root cause -- per-pin skew was, and more period only masks it.
+#
+# Placing those registers in the IO cell would make the pad<->register delay fixed and
+# identical across pins, which is the standard fix for exactly this.
+#
+# HONEST RESULT: enabling these did NOT actually pack the SDRAM DQ registers. The PnR
+# report still shows "I/O Register as FF | 31/876", unchanged from before, so Gowin
+# declined to pack the bidirectional DQ path (tristate control from fabric, and the
+# capture register fans out widely). Kept because they are harmless and do apply to
+# simpler IO, but do NOT treat this as the DQ-skew fix -- it is not one. The real
+# options if the pattern self-test blames the DQ bus are a phase-shifted capture clock
+# or per-pin drive/PULL_MODE in the .cst.
+set_option -ireg_in_iob 1
+set_option -oreg_in_iob 1
+set_option -ioreg_in_iob 1
 set_option -place_option 2
 set_option -route_option 0
 # 2026-09-06: back to place_option 2 ("timing priority"). Adding the clk_sdram->clk_pce

@@ -60,6 +60,7 @@ def parse_log(path):
     passes = {0: {}, 1: {}}
     beats = []
     dumps = {}
+    pattern = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -69,6 +70,13 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if tag == 0xD0:
+                val = int.from_bytes(payload, "big")
+                pattern["errs"] = (val >> 48) & 0xFFFF
+                pattern["first_got"] = (val >> 40) & 0xFF
+                pattern["first_addr"] = (val >> 32) & 0xFF
+                pattern["tested"] = (val >> 16) & 0xFFFF
+                continue
             if 0xC0 <= tag <= 0xCF:
                 dumps[tag - 0xC0] = payload
                 continue
@@ -85,7 +93,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps
+    return passes, beats, dumps, pattern
 
 
 def main():
@@ -107,7 +115,23 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps = parse_log(args.log)
+    passes, beats, dumps, pattern = parse_log(args.log)
+
+    if pattern:
+        e, n = pattern["errs"], pattern["tested"]
+        print()
+        print(f"SDRAM PATTERN SELF-TEST (FPGA-written, no UART): {e} mismatches in {n} bytes")
+        if e == 0:
+            print("  -> The SDRAM interface round-trips its OWN data perfectly.")
+            print("     So any ROM corruption is UPSTREAM: UART / iosys / the write bridge,")
+            print("     NOT the DQ bus or its timing.")
+        else:
+            print(f"  -> first bad: addr 0x{pattern['first_addr']:02x} "
+                  f"expected 0x{pattern['first_addr'] ^ 0x5A:02x} "
+                  f"got 0x{pattern['first_got']:02x}")
+            print("     The SDRAM interface corrupts its own data, so the fault is the")
+            print("     DQ bus / capture timing -- not the loader.")
+
 
     if dumps:
         raw = b"".join(dumps[i] for i in sorted(dumps))

@@ -176,12 +176,30 @@ begin
 
    PLLA_inst: PLLA
       generic map (
+         -- 2026-09-06 REAL FIX. The previous values put FVCO at 1475 MHz, OUTSIDE the
+         -- 700-1400 MHz range this PLL supports, and gw_sh had been saying so on every
+         -- build: "WARN (PA1019) : Invalid VCO frequency ... suitable range is from
+         -- 700MHz to 1400MHz". It happened to lock on the one board tested, but an
+         -- out-of-spec VCO is not something to ship -- it has no guaranteed margin over
+         -- temperature or across parts.
+         --
+         -- Re-derived with the fractional MDIV this primitive already exposes
+         -- (MDIV_FRAC_SEL counts eighths), which the old header dismissed without
+         -- trying it:
+         --   PFD  = FCLKIN/IDIV_SEL = 50/1 = 50 MHz          (19-87.5 MHz range, OK)
+         --   FVCO = PFD*(MDIV_SEL + MDIV_FRAC_SEL/8)
+         --        = 50*(14 + 7/8) = 50*14.875 = 743.75 MHz   (700-1400, IN SPEC)
+         --   clk_pixel    = 743.75/10 = 74.375 MHz
+         --   clk_5x_pixel = 743.75/2  = 371.875 MHz          (exact 5x preserved)
+         -- 74.375 MHz is +0.17% against the 74.25 MHz CEA-861 nominal, versus -0.67%
+         -- before -- so this is both in spec AND four times closer to standard.
          FCLKIN     => "50",
-         IDIV_SEL   => 2,     -- /2 -> PFD 25 MHz (within 19-87.5 MHz)
+         IDIV_SEL   => 1,     -- /1 -> PFD 50 MHz (within 19-87.5 MHz)
          FBDIV_SEL  => 1,
-         MDIV_SEL   => 59,    -- x59 -> FVCO 1475 MHz (25*59)
-         ODIV0_SEL  => 20,    -- 1475/20 = 73.75 MHz (clk_pixel, -0.67% vs 74.25)
-         ODIV1_SEL  => 4,     -- 1475/4 = 368.75 MHz (clk_5x_pixel, exact 5x ratio)
+         MDIV_SEL   => 14,    -- x14.875 -> FVCO 743.75 MHz, in the 700-1400 range
+         MDIV_FRAC_SEL => 7,  -- the .875 (eighths)
+         ODIV0_SEL  => 10,    -- 743.75/10 = 74.375 MHz (clk_pixel, +0.17% vs 74.25)
+         ODIV1_SEL  => 2,     -- 743.75/2 = 371.875 MHz (clk_5x_pixel, exact 5x ratio)
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE"
       )

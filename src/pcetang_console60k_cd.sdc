@@ -22,16 +22,16 @@ create_clock -name clk -period 20.000 [get_ports {clk}]
 # console60k_pll.vhd, unchanged here.
 create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 6 [get_nets {clk_pce}]
 
-create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 5 -multiply_by 12 [get_nets {clk_sdram}]
+create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 5 -multiply_by 8 [get_nets {clk_sdram}]
 
 # clk_pixel: 73.750 MHz (FVCO 1475 MHz / ODIV0 20), -0.67% vs the nominal 74.25 CEA-861
 # 1280x720p60 spec -- see pcetang_console60k_hdmi_pll_720p.vhd's header for the real
 # PLLA-parameter derivation. Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV0_SEL=20).
-create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 40 -multiply_by 59 [get_nets {clk_pixel}]
+create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 80 -multiply_by 119 [get_nets {clk_pixel}]
 
 # clk_5x_pixel: 368.750 MHz (FVCO 1475 MHz / ODIV1 4), same -0.67%, exact 5x preserved.
 # Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV1_SEL=4).
-create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 8 -multiply_by 59 [get_nets {clk_5x_pixel}]
+create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 16 -multiply_by 119 [get_nets {clk_5x_pixel}]
 
 set_multicycle_path -setup 3 -from [get_clocks {clk_pce}] -to [get_clocks {clk_sdram}]
 set_multicycle_path -hold  2 -from [get_clocks {clk_pce}] -to [get_clocks {clk_sdram}]

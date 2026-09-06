@@ -470,7 +470,10 @@ architecture rtl of pcetang_console60k_cd is
    -- was known to survive the MCU's SD-write path intact. (An earlier opcode-9 bug
    -- truncated debug.log mid-line, so trace volume is not a free parameter here.)
    constant VFY_BLK_BITS : integer := 15;
-   type vfy_state_t is (VF_IDLE, VF_REQ, VF_ADDR, VF_SETTLE, VF_WAIT, VF_ACC,
+   type vfy_state_t is (VF_IDLE,
+                        -- SDRAM pattern self-test phase, runs first (see PAT_BASE)
+                        PT_WA, PT_WR, PT_WS, PT_RA, PT_RR, PT_RS, PT_EMIT,
+                        VF_REQ, VF_ADDR, VF_SETTLE, VF_WAIT, VF_ACC,
                         VF_EMIT, VF_GAP, VF_RESUME, VF_DONE);
    signal vfy_state   : vfy_state_t := VF_IDLE;
    signal vfy_active  : std_logic := '0';
@@ -519,6 +522,30 @@ architecture rtl of pcetang_console60k_cd is
    signal vfy_is_dump_lat  : std_logic := '0';
    signal vfy_dump_idx_lat : unsigned(3 downto 0) := (others => '0');
    constant VFY_DUMP_BYTES : integer := 128;
+
+   -- SDRAM PATTERN SELF-TEST (2026-09-06). The ROM read-back is corrupt, but that test
+   -- cannot say WHERE: the bytes travel MCU -> UART -> iosys -> write bridge -> SDRAM ->
+   -- read bridge, and a fault anywhere looks identical at the end. This writes a known
+   -- pattern to a scratch SDRAM window FROM THE FPGA (no UART, no loader) and reads it
+   -- straight back through the same port B, so it isolates the SDRAM interface itself:
+   --   pattern clean + ROM corrupt -> the SDRAM interface is fine, the fault is upstream
+   --                                  in the UART/loader/write-bridge path
+   --   pattern corrupt             -> the SDRAM interface (or its DQ timing) is the fault
+   -- Pattern is `addr xor 0x5A`, which walks all 256 byte values so every DQ line sees
+   -- both polarities -- important because every corruption seen so far has been strictly
+   -- 0->1, so a pattern of mostly-ones would hide it.
+   constant PAT_BASE  : unsigned(24 downto 0) := to_unsigned(16#500000#, 25);
+   constant PAT_BYTES : integer := 256;
+   signal pat_active  : std_logic := '0';
+   signal pat_we      : std_logic := '0';
+   signal pat_addr    : unsigned(8 downto 0) := (others => '0');
+   signal pat_data    : std_logic_vector(7 downto 0) := (others => '0');
+   signal pat_req     : std_logic := '0';
+   signal pat_settle  : unsigned(2 downto 0) := (others => '0');
+   signal pat_wdog    : unsigned(11 downto 0) := (others => '0');
+   signal pat_errs    : unsigned(15 downto 0) := (others => '0');
+   signal pat_first   : std_logic_vector(15 downto 0) := (others => '0');
+   signal pat_done    : std_logic := '0';
 
    signal vfy_pass     : std_logic := '0';
    signal vfy_pass_lat : std_logic := '0';
@@ -812,10 +839,11 @@ begin
    -- bridge is done (rom_loading_r is low) and the read bridge cannot have started
    -- (core_resetn is still low, so pce_top drives no ROM_RD).
    romb_addr <= wr_addr when rom_loading_r = '1' else
+                std_logic_vector(PAT_BASE + resize(pat_addr, 25)) when pat_active = '1' else
                 std_logic_vector(ROM_SDRAM_BASE + resize(vfy_addr, 25)) when vfy_active = '1' else
                 rd_addr;
-   romb_we   <= '1'     when rom_loading_r = '1' else '0';
-   romb_di   <= wr_data;
+   romb_we   <= '1'     when rom_loading_r = '1' else pat_we;
+   romb_di   <= wr_data when rom_loading_r = '1' else pat_data;
 
    -- REAL LATENT HAZARD, fixed 2026-09-06 (NOTE: this did NOT resolve the black-screen
    -- symptom it was found while chasing -- the hazard below is real and worth fixing on
@@ -843,7 +871,7 @@ begin
    -- each owner toggling its own register still toggles the combined signal exactly
    -- once, and a quiet owner contributes a constant, so no request is ever cancelled by
    -- an ownership switch.
-   romb_req  <= wr_req xor rd_req xor vfy_req;
+   romb_req  <= wr_req xor rd_req xor vfy_req xor pat_req;
 
    -- Two-flop synchronisers for the clk_sdram -> clk_pce WAIT flags. See romb_wait's
    -- declaration for the real hardware evidence that made these necessary.
@@ -923,8 +951,87 @@ begin
                   vfy_is_dump <= '0';
                   vfy_dump_idx <= (others => '0');
                   vfy_len     <= rom_wr_addr;
-                  vfy_state   <= VF_REQ;
+                  pat_addr    <= (others => '0');
+                  pat_errs    <= (others => '0');
+                  pat_first   <= (others => '1');
+                  pat_active  <= '1';
+                  vfy_state   <= PT_WA;
                end if;
+
+            -- ---- pattern WRITE: addr+data settle, then toggle req (same one-cycle
+            -- address setup the ROM bridges use -- see the read bridge's header).
+            when PT_WA =>
+               pat_data <= std_logic_vector(pat_addr(7 downto 0) xor x"5A");
+               pat_we   <= '1';
+               vfy_state <= PT_WR;
+
+            when PT_WR =>
+               pat_req   <= not pat_req;
+               pat_settle<= (others => '0');
+               pat_wdog  <= (others => '0');
+               vfy_state <= PT_WS;
+
+            when PT_WS =>
+               if pat_settle = "100" then
+                  pat_wdog <= pat_wdog + 1;
+                  if romb_wait = '0' then
+                     pat_we <= '0';
+                     if pat_addr = PAT_BYTES-1 then
+                        pat_addr  <= (others => '0');
+                        vfy_state <= PT_RA;      -- writes done, read them back
+                     else
+                        pat_addr  <= pat_addr + 1;
+                        vfy_state <= PT_WA;
+                     end if;
+                  elsif pat_wdog = x"FFF" then
+                     pat_we <= '0';
+                     vfy_state <= PT_EMIT;       -- SDRAM never answered; report
+                  end if;
+               else
+                  pat_settle <= pat_settle + 1;
+               end if;
+
+            -- ---- pattern READ-BACK and compare
+            when PT_RA =>
+               pat_we    <= '0';
+               vfy_state <= PT_RR;
+
+            when PT_RR =>
+               pat_req   <= not pat_req;
+               pat_settle<= (others => '0');
+               pat_wdog  <= (others => '0');
+               vfy_state <= PT_RS;
+
+            when PT_RS =>
+               if pat_settle = "100" then
+                  pat_wdog <= pat_wdog + 1;
+                  if romb_wait = '0' then
+                     if romb_do /= std_logic_vector(pat_addr(7 downto 0) xor x"5A") then
+                        pat_errs <= pat_errs + 1;
+                        if pat_first = x"FFFF" then
+                           -- remember the first failing address and what it returned
+                           pat_first <= romb_do & std_logic_vector(pat_addr(7 downto 0));
+                        end if;
+                     end if;
+                     if pat_addr = PAT_BYTES-1 then
+                        vfy_state <= PT_EMIT;
+                     else
+                        pat_addr  <= pat_addr + 1;
+                        vfy_state <= PT_RA;
+                     end if;
+                  elsif pat_wdog = x"FFF" then
+                     vfy_state <= PT_EMIT;
+                  end if;
+               else
+                  pat_settle <= pat_settle + 1;
+               end if;
+
+            when PT_EMIT =>
+               pat_active <= '0';
+               pat_done   <= '1';
+               vfy_gap    <= (others => '0');
+               vfy_emit   <= '1';
+               vfy_state  <= VF_GAP;   -- reuse the inter-trace gap, then the ROM sweep
 
             when VF_REQ =>
                -- Nothing loaded (or a zero-length load): don't sweep, just release.
@@ -1025,7 +1132,10 @@ begin
                end if;
 
             when VF_RESUME =>
-               if vfy_is_dump = '1' then
+               if pat_done = '1' then
+                  pat_done  <= '0';
+                  vfy_state <= VF_REQ;      -- pattern phase reported; now sweep the ROM
+               elsif vfy_is_dump = '1' then
                   vfy_is_dump <= '0';
                   vfy_state   <= VF_REQ;
                elsif vfy_addr >= vfy_len then
@@ -1477,13 +1587,22 @@ begin
             -- which is fine for a debug build but worth knowing before reusing this.
             -- Raw dump lines get tags 0xC0-0xCF, clear of the checksum tags (0x00-0x7F)
             -- and the runtime heartbeat (0x80+).
-            if vfy_is_dump_lat = '1' then
+            if pat_done = '1' then
+               dbg_trace_tag <= x"D0";
+            elsif vfy_is_dump_lat = '1' then
                dbg_trace_tag <= x"C" & std_logic_vector(vfy_dump_idx_lat);
             else
                dbg_trace_tag <= '0' & vfy_pass_lat & std_logic_vector(vfy_blk_lat(5 downto 0));
             end if;
             -- [63:56] block | [55:24] checksum | [23:2] end address | [1:0] pad
-            if vfy_is_dump_lat = '1' then
+            if pat_done = '1' then
+               -- [63:48] mismatch count | [47:32] first bad {got, addr}
+               -- | [31:16] bytes tested | [15:0] 0
+               dbg_trace_data <= std_logic_vector(pat_errs)
+                                 & pat_first
+                                 & std_logic_vector(to_unsigned(PAT_BYTES,16))
+                                 & x"0000";
+            elsif vfy_is_dump_lat = '1' then
                -- 8 raw SDRAM bytes, MSB first = ascending address order.
                dbg_trace_data <= vfy_dump_lat;
             else
@@ -1561,7 +1680,7 @@ begin
    hdmi_out: pce2hdmi_sd
    generic map (
       VIDEOID       => 4,        -- CEA-861 1280x720p60
-      CLKFRQ        => 73750,    -- kHz, matches the real 720p PLL's actual clk_pixel
+      CLKFRQ        => 74375,    -- kHz, matches the real 720p PLL's actual clk_pixel
       SCREEN_WIDTH  => 1280,
       SCREEN_HEIGHT => 720
    )

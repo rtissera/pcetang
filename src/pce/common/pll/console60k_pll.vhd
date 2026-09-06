@@ -184,7 +184,27 @@ begin
                                -- default when omitted; 1 matches the proven sibling config
          MDIV_SEL   => 24,    -- x24 -> FVCO 1200 MHz
          ODIV0_SEL  => 28,    -- 1200/28 = 42.857 MHz
-         ODIV1_SEL  => 10,    -- 1200/10 = 120.000 MHz (clk_sdram)
+         -- 2026-09-06: 120 -> 100 MHz (ODIV1 10 -> 12). Real hardware read-back of the
+         -- ROM image showed 66 of 128 bytes wrong by 1-2 scattered bits, and the flips
+         -- were 128/128 in the SAME direction (0->1, never a single 1->0) -- the
+         -- signature of sampling the DQ bus before it has settled, not of a logic bug.
+         -- The SDRAM clock is ODDR-forwarded at mid-phase, so the read round trip
+         -- (clock out -> tAC -> data back) has to fit inside half a clk_sdram period;
+         -- at 120 MHz that is 4.17 ns against a -6 part's ~5.4 ns tAC plus board and IO
+         -- delay, i.e. genuinely short. 100 MHz buys 0.83 ns of period on every edge.
+         -- Refresh stays well in spec: 511 cycles @100 MHz = 5.11 us vs the 7.8 us/row
+         -- requirement. RASCAS_DELAY/CAS_LATENCY are counted in CYCLES, so a slower
+         -- clock only makes them more conservative.
+         -- 2026-09-06 second step: 100 -> 80 MHz (ODIV1 12 -> 15). Real read-back data,
+         -- same ROM, same board, only this divider changed:
+         --   120 MHz -- 66/128 bytes wrong, 15 of 16 DQ lines, odd AND even addresses
+         --   100 MHz -- 14/128 bytes wrong, ODD addresses only, only DQ[8],DQ[9],DQ[10]
+         -- Monotonic in clock period, every flip 0->1, and the residue collapsed onto
+         -- three physically adjacent pins (B21/A21/B20) of the upper byte lane. That is
+         -- a DQ-bus setup limit, not logic. 80 MHz gives a 6.25 ns half-period for the
+         -- round trip vs 5.0 ns at 100 MHz. Refresh still in spec: 511 cycles @80 MHz
+         -- = 6.39 us against the 7.8 us/row requirement.
+         ODIV1_SEL  => 15,    -- 1200/15 = 80.000 MHz (clk_sdram)
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE"
       )
