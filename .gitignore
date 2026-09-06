@@ -1,2 +1,5 @@
 # Gowin synthesis/PnR output -- large, regenerable, not source.
 impl/
+
+# GHDL simulation work directories -- regenerable analysis output, not source.
+sim/*/work/
