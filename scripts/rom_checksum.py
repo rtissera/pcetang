@@ -53,9 +53,9 @@ def parse_log(path):
     is 0x40-0x7F. Tags >= 0x80 are the runtime heartbeat.
 
     Block payload:     [63:56] block  [55:24] checksum  [23:2] end address  [1:0] pad
-    Heartbeat payload: [63:32] cumulative VDC0 write count  [31:16] VBLANK count
-                       [15:14] rd_state  [13:11] rom_rd/rom_rdy/romb_wait
-                       [10:0]  DBG_CPU_A(20:10)
+    Heartbeat payload: [63:32] cumulative VDC0 write count  [31:16] ROM-read watchdog
+                       timeouts  [15:14] rd_state  [13:11] rom_rd/rom_rdy/romb_wait
+                       [10:0]  VBLANK count
     """
     passes = {0: {}, 1: {}}
     beats = []
@@ -71,8 +71,12 @@ def parse_log(path):
             if tag >= 0x80:
                 beats.append({
                     "vdc": (val >> 32) & MASK,
-                    "vbl": (val >> 16) & 0xFFFF,
+                    "timeouts": (val >> 16) & 0xFFFF,
                     "rd_state": (val >> 14) & 0x3,
+                    "rom_rd": (val >> 13) & 1,
+                    "rom_rdy": (val >> 12) & 1,
+                    "romb_wait": (val >> 11) & 1,
+                    "vbl": val & 0x7FF,
                 })
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
@@ -145,17 +149,37 @@ def main():
 
     if beats:
         vdc = [b["vdc"] for b in beats]
+        last = beats[-1]
+        states = {0: "IDLE", 1: "SETTLE", 2: "WAIT"}
         print()
         print(f"heartbeat: {len(beats)} samples, VDC write count "
-              f"{vdc[0]} -> {vdc[-1]}, VBLANK {beats[-1]['vbl']}")
+              f"{vdc[0]} -> {vdc[-1]}, VBLANK {last['vbl']}")
+        print(f"        rd_state={states.get(last['rd_state'], '?')} "
+              f"rom_rdy={last['rom_rdy']} romb_wait={last['romb_wait']}  "
+              f"ROM-read watchdog timeouts={last['timeouts']}")
+        if last["timeouts"] == 0 and last["rd_state"] != 2:
+            print("        ROM read path healthy: no stalled reads, bridge not parked "
+                  "in WAIT.")
+        elif last["timeouts"]:
+            print(f"        *** {last['timeouts']} ROM reads STALLED and were escaped by "
+                  f"the watchdog.\n        The clk_pce/clk_sdram deadlock is NOT fully "
+                  f"fixed -- but the CPU kept running.")
+        if last["rd_state"] == 2 and last["romb_wait"]:
+            print("        *** bridge parked in RB_WAIT with romb_wait high -- SDRAM "
+                  "read never completed.")
         if vdc[-1] == 0:
             print("        VDC write count is FLAT ZERO -- the CPU never reached the "
                   "code that\n        programs the VDC. The fault is UPSTREAM of the "
                   "video path.")
+        elif len(set(vdc)) == 1:
+            print(f"        VDC write count is FROZEN at {vdc[-1]} across every sample "
+                  f"-- the CPU\n        started programming the VDC and then STOPPED. "
+                  f"For reference the GHDL\n        sim reaches 3335 by 20ms and 17772 "
+                  f"by 76ms, still climbing.")
         else:
-            print("        VDC write count is NONZERO -- the CPU did reach VDC setup, "
-                  "so the\n        fault is DOWNSTREAM (video path / HDMI), not the CPU "
-                  "or the ROM.\n        For reference the GHDL sim reaches 3335 by 20ms, "
+            print("        VDC write count is CLIMBING -- the CPU is running and "
+                  "programming the\n        VDC, so the fault is DOWNSTREAM (video path "
+                  "/ HDMI).\n        For reference the GHDL sim reaches 3335 by 20ms, "
                   "17772 by 76ms.")
     else:
         print("\nheartbeat: no RTL[80+] samples in the log -- the core may never have "

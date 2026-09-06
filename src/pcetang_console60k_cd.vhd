@@ -407,12 +407,19 @@ architecture rtl of pcetang_console60k_cd is
    signal romb_do   : std_logic_vector(7 downto 0);
    signal romb_wait : std_logic;
 
-   type romb_state_t is (RB_IDLE, RB_SETTLE, RB_WAIT);
+   -- RB_ADDR added 2026-09-06 -- see the read bridge's own header comment for the real
+   -- hardware deadlock it fixes. It exists purely to give the address a full clk_pce
+   -- cycle of setup before the request toggles.
+   type romb_state_t is (RB_IDLE, RB_ADDR, RB_SETTLE, RB_WAIT);
 
    signal rd_state       : romb_state_t := RB_IDLE;
    signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
    signal rd_req         : std_logic := '0';
    signal rd_addr        : std_logic_vector(24 downto 0);
+   -- Watchdog + its escape counter -- see the read bridge's header for why a CDC fix
+   -- ships WITH a live recurrence counter rather than on its own.
+   signal rd_wdog        : unsigned(11 downto 0) := (others => '0');
+   signal dbg_rd_timeout_cnt : unsigned(15 downto 0) := (others => '0');
 
    signal wr_state       : romb_state_t := RB_IDLE;
    signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
@@ -441,7 +448,8 @@ architecture rtl of pcetang_console60k_cd is
    -- was known to survive the MCU's SD-write path intact. (An earlier opcode-9 bug
    -- truncated debug.log mid-line, so trace volume is not a free parameter here.)
    constant VFY_BLK_BITS : integer := 15;
-   type vfy_state_t is (VF_IDLE, VF_REQ, VF_SETTLE, VF_WAIT, VF_ACC, VF_EMIT, VF_DONE);
+   type vfy_state_t is (VF_IDLE, VF_REQ, VF_ADDR, VF_SETTLE, VF_WAIT, VF_ACC,
+                        VF_EMIT, VF_GAP, VF_RESUME, VF_DONE);
    signal vfy_state   : vfy_state_t := VF_IDLE;
    signal vfy_active  : std_logic := '0';
    signal vfy_req     : std_logic := '0';
@@ -453,6 +461,8 @@ architecture rtl of pcetang_console60k_cd is
    -- Bounded so a stuck SDRAM can never keep the core in reset forever: on timeout the
    -- sweep gives up, emits what it has, and releases the core anyway.
    signal vfy_timeout : unsigned(11 downto 0) := (others => '0');
+   -- ~23 ms spacing between checksum emits, see VF_EMIT's comment.
+   signal vfy_gap     : unsigned(19 downto 0) := (others => '0');
    signal vfy_emit    : std_logic := '0';
    signal vfy_emit_d  : std_logic := '0';
    signal vfy_sum_lat : unsigned(31 downto 0) := (others => '0');
@@ -801,10 +811,17 @@ begin
                if rom_do_valid = '1' then
                   wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 25));
                   wr_data <= rom_do;
-                  wr_req  <= not wr_req;
-                  wr_settle_cnt <= (others => '0');
-                  wr_state <= RB_SETTLE;
+                  wr_state <= RB_ADDR;
                end if;
+
+            -- Same address-before-request setup as the read bridge -- see its header for
+            -- the real deadlock. A corrupted ROM *load* would be far harder to spot than
+            -- a hung fetch, so this side gets the same treatment even though the observed
+            -- failure was on the read path.
+            when RB_ADDR =>
+               wr_req  <= not wr_req;
+               wr_settle_cnt <= (others => '0');
+               wr_state <= RB_SETTLE;
 
             when RB_SETTLE =>
                if wr_settle_cnt = "100" then
@@ -856,11 +873,16 @@ begin
                if vfy_len = 0 then
                   vfy_state <= VF_DONE;
                else
-                  vfy_req     <= not vfy_req;
-                  vfy_settle  <= (others => '0');
-                  vfy_timeout <= (others => '0');
-                  vfy_state   <= VF_SETTLE;
+                  vfy_state <= VF_ADDR;
                end if;
+
+            -- Address settled (romb_addr follows vfy_addr combinationally), so the
+            -- request toggle now happens a full cycle later -- same fix as both bridges.
+            when VF_ADDR =>
+               vfy_req     <= not vfy_req;
+               vfy_settle  <= (others => '0');
+               vfy_timeout <= (others => '0');
+               vfy_state   <= VF_SETTLE;
 
             when VF_SETTLE =>
                if vfy_settle = "100" then
@@ -901,6 +923,13 @@ begin
                end if;
 
             when VF_EMIT =>
+               -- 2026-09-06: the previous run's log showed the frame parser losing sync
+               -- partway through the sweep (raw `aa 00 0a 09` headers leaking into
+               -- payloads). Traces were already ~5 ms apart, so the likely cause is an
+               -- SD f_sync stall on the MCU overrunning its UART RX. Hold the sweep for
+               -- ~23 ms after each emit -- the sweep's wall-clock cost is irrelevant
+               -- (the CPU is still in reset) and a readable log is not.
+               vfy_gap <= (others => '0');
                -- Latch before clearing: vfy_sum is zeroed in this same cycle, so the
                -- trace process (which fires one cycle later, on vfy_emit_d) would
                -- otherwise sample an already-cleared accumulator.
@@ -912,6 +941,15 @@ begin
                vfy_emit     <= '1';
                vfy_blk     <= vfy_blk + 1;
                vfy_sum     <= (others => '0');
+               vfy_state <= VF_GAP;
+
+            when VF_GAP =>
+               vfy_gap <= vfy_gap + 1;
+               if vfy_gap = x"FFFFF" then
+                  vfy_state <= VF_RESUME;
+               end if;
+
+            when VF_RESUME =>
                if vfy_addr >= vfy_len then
                   if vfy_pass = '0' then
                      -- Second pass over the identical byte range, same order. See
@@ -945,7 +983,35 @@ begin
    end process;
 
    -- ROM read bridge: one pce_top ROM_RD per CPU cart-ROM byte access becomes one real
-   -- SDRAM read via port B. Same pattern as pcetang_console60k.vhd's ROM read bridge.
+   -- SDRAM read via port B.
+   --
+   -- REAL DEADLOCK, found on hardware 2026-09-06 and fixed here. The RTL trace showed 30
+   -- consecutive heartbeats with rd_state = RB_WAIT, romb_wait = '1' and rom_rdy_i = '0'
+   -- -- i.e. this bridge waiting forever on an SDRAM read that never completes, holding
+   -- pce_top's WAIT_N low, freezing the HuC6280 mid-fetch at ROM ~0x400-0x7FF after only
+   -- 9 VDC writes. Video timing kept running, which is exactly why the symptom was a
+   -- black screen with sync rather than lost sync, and why the CPU LOOKED like it was
+   -- sitting in a data table: that address was the frozen fetch, not executing code.
+   --
+   -- Root cause: rd_addr and rd_req were assigned in the SAME clk_pce cycle, and both
+   -- cross into clk_sdram UNSYNCHRONISED (sdram.sv samples RAM_B_REQ directly, there is
+   -- no synchroniser on that port). sdram.sv decides hit-vs-miss on RAM_B_ADDR at the
+   -- cycle it observes the RAM_B_REQ toggle, then LAUNCHES from STATE_IDLE re-evaluating
+   -- `fetch_req_b` against RAM_B_ADDR again. If those two evaluations see the address
+   -- differently -- exactly what simultaneous ADDR/REQ transitions across an
+   -- unsynchronised boundary allow -- the miss branch can set RAM_B_WAIT while the launch
+   -- condition reads false. `old_b_req` is then never consumed, nothing is ever launched,
+   -- and RAM_B_WAIT stays high forever with no transaction pending. Deadlock.
+   --
+   -- Fix: RB_ADDR gives the address a full clk_pce cycle (~2.8 clk_sdram cycles) of setup
+   -- before the request toggles, so every observation of RAM_B_REQ's edge sees a settled,
+   -- identical RAM_B_ADDR.
+   --
+   -- The watchdog is deliberate and stays in: a CDC bug argued away on paper is not the
+   -- same as one proven gone on hardware. If the deadlock ever recurs, the CPU keeps
+   -- running (with one bad byte) instead of freezing, and dbg_rd_timeout_cnt reports how
+   -- often over the trace channel -- a live count is far better evidence than another
+   -- silent freeze.
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
@@ -956,10 +1022,15 @@ begin
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
                              resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
-                  rd_req <= not rd_req;
-                  rd_settle_cnt <= (others => '0');
-                  rd_state <= RB_SETTLE;
+                  rd_state <= RB_ADDR;
                end if;
+
+            when RB_ADDR =>
+               -- Address settled last cycle; only now toggle the request.
+               rd_req <= not rd_req;
+               rd_settle_cnt <= (others => '0');
+               rd_wdog <= (others => '0');
+               rd_state <= RB_SETTLE;
 
             when RB_SETTLE =>
                if rd_settle_cnt = "100" then
@@ -975,10 +1046,20 @@ begin
                end if;
 
             when RB_WAIT =>
+               rd_wdog <= rd_wdog + 1;
                if romb_wait = '0' then
                   rom_do_i <= romb_do;
                   rom_rdy_i <= '1';
                   rd_state <= RB_IDLE;
+               elsif rd_wdog = x"3FF" then
+                  -- ~1024 clk_pce cycles (~24 us) is orders of magnitude beyond any real
+                  -- SDRAM read. Give up, release the CPU, and count it.
+                  rom_do_i <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state  <= RB_IDLE;
+                  if dbg_rd_timeout_cnt /= x"FFFF" then
+                     dbg_rd_timeout_cnt <= dbg_rd_timeout_cnt + 1;
+                  end if;
                end if;
          end case;
       end if;
@@ -1337,17 +1418,19 @@ begin
                -- 0x80+ so heartbeat tags can never be confused with a block checksum.
                dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt or x"80");
                dbg_trace_req <= '1';
-               -- [63:32] cumulative VDC0 write count | [31:16] VBLANK count
-               -- | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait
-               -- | [10:0]  DBG_CPU_A(20:10), the physical bank + high offset
-               -- Decoded on the PC: bytes 0-3 = VDC write count (the key number),
-               -- bytes 4-5 = VBLANK count, byte 6 top 2 bits = rd_state (00 IDLE,
-               -- 01 SETTLE, 10 WAIT).
+               -- [63:32] cumulative VDC0 write count | [31:16] ROM-read watchdog
+               -- timeouts | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait
+               -- | [10:0] VBLANK count
+               -- The watchdog count replaces the old VBLANK slot because it is now the
+               -- number that decides whether the CDC fix actually worked: 0 means no
+               -- ROM read ever stalled, nonzero means the deadlock still happens and is
+               -- merely being escaped. VBLANK keeps the low 11 bits, which is plenty to
+               -- show video is alive.
                dbg_trace_data <= std_logic_vector(dbg_vdc_cnt)
-                                 & std_logic_vector(dbg_vbl_cnt)
+                                 & std_logic_vector(dbg_rd_timeout_cnt)
                                  & rd_state_bits
                                  & rom_rd_i & rom_rdy_i & romb_wait
-                                 & dbg_cpu_a(20 downto 10);
+                                 & std_logic_vector(dbg_vbl_cnt(10 downto 0));
             end if;
          end if;
       end if;

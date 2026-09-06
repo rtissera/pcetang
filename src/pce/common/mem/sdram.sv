@@ -414,6 +414,21 @@ always @(posedge clk) begin
 	if(!RAM_B_WE && (old_b_req ^ RAM_B_REQ) && last_valid[1] && (last_a[1] == RAM_B_ADDR[24:2])) begin
 		old_b_req <= RAM_B_REQ;
 		RAM_B_DO <= last_data[1][(RAM_B_ADDR[1:0]*8) +:8];
+		// PCE PORT (2026-09-06): REAL DEADLOCK FIX, found on Console 60K hardware.
+		// RAM_B_WAIT is set by the miss branch below and cleared ONLY on the ch1_busy
+		// completion further down. This hit branch consumes `old_b_req` -- which IS the
+		// pending-request flag the STATE_IDLE launch checks -- so if it ever fires while
+		// a miss raised by the branch below is still pending, that request is swallowed:
+		// nothing is launched, ch1_busy is never set, and RAM_B_WAIT stays high FOREVER
+		// with no transaction outstanding. The board's ROM read bridge then sits in
+		// RB_WAIT holding pce_top's WAIT_N low, and the HuC6280 freezes mid-fetch.
+		// Observed exactly that way: 30 consecutive trace heartbeats with
+		// rd_state=RB_WAIT, romb_wait=1, rom_rdy=0, and the VDC write count frozen at 9
+		// while video timing kept running -- a black screen WITH sync.
+		// Clearing WAIT here is correct and unconditional: reaching this branch means
+		// this request is being answered right now from the cache, so by definition
+		// nothing is outstanding for port B any more.
+		RAM_B_WAIT <= 0;
 	end
 	// PCE PORT: miss branch, mirrors RAM_A_WAIT's edge-detect above. old_b_req is left
 	// unchanged here (same as the original) so the mismatch persists as the pending-
