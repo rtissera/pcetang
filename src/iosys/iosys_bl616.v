@@ -19,7 +19,16 @@ module iosys_bl616 #(
     parameter FREQ=21_477_000,
     parameter [14:0] COLOR_LOGO=15'b00000_10101_00000,
     parameter [15:0] CORE_ID=1,     // 1: nestang, 2: snestang
-    parameter [7:0] LOADING_STATE=0
+    parameter [7:0] LOADING_STATE=0,
+    // Real RTL debug-trace channel, OFF by default (2026-09-06). Tying dbg_trace_req low
+    // at the top level was NOT enough: GowinSynthesis kept dbg_data_r's 64 flops, its
+    // 8-way output mux and the extra send state, and that cost real timing. Measured by
+    // bisecting a Primer 25K CD timing failure to the commit that added this channel --
+    // 0 setup-violated endpoints at 3f1f590, 25 at f75a2fa, with that board's ONLY change
+    // in f75a2fa being these three ports tied to constants. A module parameter is
+    // constant-folded at elaboration, so `if (DBG_TRACE ...)` prunes the whole channel
+    // properly. Set to 1 only on a board that actually reads traces.
+    parameter DBG_TRACE=0
 )
 (
     input clk,                      // main logic clock
@@ -505,7 +514,7 @@ always @(posedge clk) begin
         end
 
         // Real RTL debug-trace latch (see declaration comment above)
-        if (dbg_trace_req && !dbg_pending) begin
+        if (DBG_TRACE && dbg_trace_req && !dbg_pending) begin
             dbg_pending <= 1;
             dbg_tag_r   <= dbg_trace_tag;
             dbg_data_r  <= dbg_trace_data;
@@ -526,7 +535,7 @@ always @(posedge clk) begin
                     send_state_next <= SEND_CD_SECTOR_REQ;
                     send_state <= SEND_HEADER;
                     resp_frame_len <= 5;    // cmd + 4-byte LBA
-                end else if (dbg_pending) begin
+                end else if (DBG_TRACE && dbg_pending) begin
                     send_state_next <= SEND_DBG_TRACE;
                     send_state <= SEND_HEADER;
                     resp_frame_len <= 10;   // cmd + tag + 8 data bytes
@@ -637,7 +646,7 @@ always @(posedge clk) begin
             // Real RTL debug trace (2026-09-06): 1 tag byte + 8 data bytes, MSB first.
             // Lands in debug.log on the MCU's SD card -- see the dbg_trace_* ports.
             SEND_DBG_TRACE: begin
-                if (tx_ready && ~tx_valid) begin
+                if (DBG_TRACE && tx_ready && ~tx_valid) begin
                     case (send_idx)
                         0: tx_data <= dbg_tag_r;
                         1: tx_data <= dbg_data_r[63:56];

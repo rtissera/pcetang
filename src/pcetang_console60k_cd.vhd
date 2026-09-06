@@ -216,7 +216,11 @@ architecture rtl of pcetang_console60k_cd is
          FREQ      : integer := 21_477_000;
          COLOR_LOGO : std_logic_vector(14 downto 0) := (others => '0');
          CORE_ID   : std_logic_vector(15 downto 0) := (others => '0');
-         LOADING_STATE : std_logic_vector(7 downto 0) := (others => '0')
+         LOADING_STATE : std_logic_vector(7 downto 0) := (others => '0');
+         -- Real RTL debug-trace channel, enabled on THIS board only -- see
+         -- iosys_bl616.v's own DBG_TRACE parameter comment for the measured timing
+         -- cost it carries on boards that don't read traces.
+         DBG_TRACE : integer := 0
       );
       port (
          clk       : in  std_logic;
@@ -432,7 +436,11 @@ architecture rtl of pcetang_console60k_cd is
    -- image out entirely. Only ~9 bytes of the trace payload are used per block, and
    -- blocks are ~2.3 ms apart, far wider than the ~50 us a 10-byte trace frame takes at
    -- 2 Mbaud, so no trace can overrun the single-outstanding channel.
-   constant VFY_BLK_BITS : integer := 14;             -- 16KB blocks
+   -- 32KB blocks: 16 per pass for a 512K HuCard, so TWO passes plus a 32-sample
+   -- heartbeat come to 64 trace lines total -- the same volume as the previous run that
+   -- was known to survive the MCU's SD-write path intact. (An earlier opcode-9 bug
+   -- truncated debug.log mid-line, so trace volume is not a free parameter here.)
+   constant VFY_BLK_BITS : integer := 15;
    type vfy_state_t is (VF_IDLE, VF_REQ, VF_SETTLE, VF_WAIT, VF_ACC, VF_EMIT, VF_DONE);
    signal vfy_state   : vfy_state_t := VF_IDLE;
    signal vfy_active  : std_logic := '0';
@@ -449,6 +457,20 @@ architecture rtl of pcetang_console60k_cd is
    signal vfy_emit_d  : std_logic := '0';
    signal vfy_sum_lat : unsigned(31 downto 0) := (others => '0');
    signal vfy_blk_lat : unsigned(7 downto 0) := (others => '0');
+   -- The sweep runs TWICE over the same bytes, and both results are emitted (pass 0 as
+   -- tags 0x00-0x3F, pass 1 as 0x40-0x7F). This is what separates the two candidates
+   -- instead of just flagging one:
+   --   passes agree with each other AND with the file -> image is good, read path is
+   --     good; the fault is elsewhere entirely.
+   --   passes agree with each other but NOT the file  -> the image really is corrupt.
+   --   passes DISAGREE with each other                -> the READ PATH is unreliable
+   --     (the image may be perfectly fine), which is the far more likely fault given
+   --     the bridge's unsynchronised clk_pce/clk_sdram crossing.
+   -- Without the second pass a mismatch would be ambiguous between those last two, and
+   -- would most likely have been misread as "image corrupt" -- costing a hardware cycle
+   -- and pointing the whole investigation the wrong way.
+   signal vfy_pass     : std_logic := '0';
+   signal vfy_pass_lat : std_logic := '0';
 
    -- Debug taps from pce_top (see that file's DBG_CPU_A/DBG_VDC_WR port comments).
    signal dbg_cpu_a   : std_logic_vector(20 downto 0);
@@ -604,7 +626,8 @@ begin
       FREQ => 42_857_000,     -- matches clk_pce below, not the AUDIO/hclk domain
       COLOR_LOGO => "011000000001000",   -- purple-ish, arbitrary first-cut choice
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
-      LOADING_STATE => x"00"
+      LOADING_STATE => x"00",
+      DBG_TRACE => 1
    )
    port map (
       clk => clk_pce, hclk => clk_pixel, resetn => reset_n,
@@ -823,6 +846,7 @@ begin
                   vfy_addr    <= (others => '0');
                   vfy_sum     <= (others => '0');
                   vfy_blk     <= (others => '0');
+                  vfy_pass    <= '0';
                   vfy_len     <= rom_wr_addr;
                   vfy_state   <= VF_REQ;
                end if;
@@ -880,13 +904,25 @@ begin
                -- Latch before clearing: vfy_sum is zeroed in this same cycle, so the
                -- trace process (which fires one cycle later, on vfy_emit_d) would
                -- otherwise sample an already-cleared accumulator.
-               vfy_sum_lat <= vfy_sum;
-               vfy_blk_lat <= vfy_blk;
-               vfy_emit    <= '1';
+               vfy_sum_lat  <= vfy_sum;
+               vfy_blk_lat  <= vfy_blk;
+               -- Latched here too: vfy_pass flips in this same cycle on the last block,
+               -- so the latch correctly captures the pass this checksum belongs to.
+               vfy_pass_lat <= vfy_pass;
+               vfy_emit     <= '1';
                vfy_blk     <= vfy_blk + 1;
                vfy_sum     <= (others => '0');
                if vfy_addr >= vfy_len then
-                  vfy_state <= VF_DONE;
+                  if vfy_pass = '0' then
+                     -- Second pass over the identical byte range, same order. See
+                     -- vfy_pass's declaration for how the two results are read.
+                     vfy_pass  <= '1';
+                     vfy_addr  <= (others => '0');
+                     vfy_blk   <= (others => '0');
+                     vfy_state <= VF_REQ;
+                  else
+                     vfy_state <= VF_DONE;
+                  end if;
                else
                   vfy_state <= VF_REQ;
                end if;
@@ -1276,7 +1312,11 @@ begin
          -- Phase 1: one trace per completed ROM self-test block.
          if vfy_emit_d = '1' then
             dbg_trace_req  <= '1';
-            dbg_trace_tag  <= std_logic_vector(vfy_blk_lat);
+            -- tag = 0_P_bbbbbb : bit 6 is the pass, so pass 0 lands at 0x00-0x3F and
+            -- pass 1 at 0x40-0x7F, leaving 0x80+ for the runtime heartbeat. Supports up
+            -- to 64 blocks per pass = 2MB at 32KB blocks; SF2's 2560K would exceed that,
+            -- which is fine for a debug build but worth knowing before reusing this.
+            dbg_trace_tag  <= '0' & vfy_pass_lat & std_logic_vector(vfy_blk_lat(5 downto 0));
             -- [63:56] block | [55:24] checksum | [23:2] end address | [1:0] pad
             dbg_trace_data <= std_logic_vector(vfy_blk_lat)
                               & std_logic_vector(vfy_sum_lat)
@@ -1288,7 +1328,11 @@ begin
          else
             dbg_hb_cnt <= dbg_hb_cnt + 1;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
-            if dbg_hb_cnt = 0 and dbg_fetch_cnt < 64 then
+            -- 32, not 64: two checksum passes now emit 32 lines before the core is even
+            -- released, and the heartbeat comes LAST -- so if the log were ever
+            -- truncated it is the VDC count, the more valuable half, that would be lost.
+            -- 32+32 keeps total volume at the 64 lines a previous run survived.
+            if dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
                -- 0x80+ so heartbeat tags can never be confused with a block checksum.
                dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt or x"80");

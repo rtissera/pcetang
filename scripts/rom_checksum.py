@@ -29,7 +29,7 @@ import argparse
 import re
 import sys
 
-BLOCK = 1 << 14  # 16KB, must match VFY_BLK_BITS in pcetang_console60k_cd.vhd
+BLOCK = 1 << 15  # 32KB, must match VFY_BLK_BITS in pcetang_console60k_cd.vhd
 MASK = 0xFFFFFFFF
 
 
@@ -47,13 +47,18 @@ def block_checksums(data: bytes):
 
 
 def parse_log(path):
-    """Pull block checksums out of debug.log's `RTL[tag] b0 b1 ...` lines.
+    """Pull block checksums and the heartbeat out of debug.log's `RTL[tag] b0..b7` lines.
 
-    Payload layout, matching the VHDL concatenation:
-        [63:56] block  [55:24] checksum  [23:2] end address  [1:0] pad
-    Heartbeat traces use tags >= 0x80 and are skipped here.
+    Tag layout: 0_P_bbbbbb -- bit 6 is the sweep pass, so pass 0 is 0x00-0x3F and pass 1
+    is 0x40-0x7F. Tags >= 0x80 are the runtime heartbeat.
+
+    Block payload:     [63:56] block  [55:24] checksum  [23:2] end address  [1:0] pad
+    Heartbeat payload: [63:32] cumulative VDC0 write count  [31:16] VBLANK count
+                       [15:14] rd_state  [13:11] rom_rd/rom_rdy/romb_wait
+                       [10:0]  DBG_CPU_A(20:10)
     """
-    got = {}
+    passes = {0: {}, 1: {}}
+    beats = []
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -61,15 +66,18 @@ def parse_log(path):
             if not m:
                 continue
             tag = int(m.group(1), 16)
-            if tag >= 0x80:
-                continue
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
-            blk = (val >> 56) & 0xFF
-            chk = (val >> 24) & MASK
-            end = (val >> 2) & 0x3FFFFF
-            got[blk] = (chk, end)
-    return got
+            if tag >= 0x80:
+                beats.append({
+                    "vdc": (val >> 32) & MASK,
+                    "vbl": (val >> 16) & 0xFFFF,
+                    "rd_state": (val >> 14) & 0x3,
+                })
+                continue
+            passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
+                                                  (val >> 2) & 0x3FFFFF)
+    return passes, beats
 
 
 def main():
@@ -91,37 +99,69 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    got = parse_log(args.log)
-    if not got:
+    passes, beats = parse_log(args.log)
+    if not passes[0] and not passes[1]:
         print("no RTL[..] block-checksum lines found in the log", file=sys.stderr)
         return 2
 
-    bad = 0
+    bad_vs_file = 0
+    disagree = 0
     for blk, chk, end in expected:
-        if blk not in got:
+        p0 = passes[0].get(blk)
+        p1 = passes[1].get(blk)
+        if p0 is None and p1 is None:
             print(f"  block {blk:02x}  MISSING from log")
-            bad += 1
+            bad_vs_file += 1
             continue
-        gchk, gend = got[blk]
-        if gchk == chk:
+        g0 = p0[0] if p0 else None
+        g1 = p1[0] if p1 else None
+        if g0 is not None and g1 is not None and g0 != g1:
+            print(f"  block {blk:02x}  PASSES DISAGREE  pass0 {g0:08x}  pass1 {g1:08x}"
+                  f"  (file {chk:08x})")
+            disagree += 1
+            continue
+        got = g0 if g0 is not None else g1
+        if got == chk:
             print(f"  block {blk:02x}  OK       {chk:08x}")
         else:
-            print(f"  block {blk:02x}  MISMATCH expected {chk:08x} got {gchk:08x} "
-                  f"(end {gend:#08x}, expected {end:#08x})")
-            bad += 1
-
-    extra = sorted(set(got) - {b for b, _, _ in expected})
-    for blk in extra:
-        print(f"  block {blk:02x}  UNEXPECTED in log ({got[blk][0]:08x})")
+            print(f"  block {blk:02x}  MISMATCH file {chk:08x} got {got:08x}")
+            bad_vs_file += 1
 
     print()
-    if bad:
-        print(f"RESULT: {bad} block(s) wrong -- the ROM image in SDRAM does NOT match "
-              f"the file. The load/store path is the fault, not the core.")
+    if disagree:
+        print(f"RESULT: {disagree} block(s) read back DIFFERENTLY on two identical "
+              f"sweeps.\n        The SDRAM READ PATH is unreliable -- the stored image "
+              f"may be perfectly fine.\n        Look at the bridge's unsynchronised "
+              f"clk_pce/clk_sdram crossing, not at the loader.")
+    elif bad_vs_file:
+        print(f"RESULT: {bad_vs_file} block(s) wrong, but both sweeps agree with each "
+              f"other.\n        The ROM image in SDRAM really does NOT match the file "
+              f"-- the LOAD path is the fault.")
     else:
-        print("RESULT: every block matches. The ROM image in SDRAM is correct, so the "
-              "fault is downstream of it (read path under CPU load, or synthesis/timing).")
-    return 1 if bad else 0
+        print("RESULT: both sweeps agree with each other and with the file. The ROM "
+              "image\n        in SDRAM is correct AND reads back reliably, so the fault "
+              "is elsewhere\n        (synthesis/timing, or the read path only under "
+              "concurrent CPU load).")
+
+    if beats:
+        vdc = [b["vdc"] for b in beats]
+        print()
+        print(f"heartbeat: {len(beats)} samples, VDC write count "
+              f"{vdc[0]} -> {vdc[-1]}, VBLANK {beats[-1]['vbl']}")
+        if vdc[-1] == 0:
+            print("        VDC write count is FLAT ZERO -- the CPU never reached the "
+                  "code that\n        programs the VDC. The fault is UPSTREAM of the "
+                  "video path.")
+        else:
+            print("        VDC write count is NONZERO -- the CPU did reach VDC setup, "
+                  "so the\n        fault is DOWNSTREAM (video path / HDMI), not the CPU "
+                  "or the ROM.\n        For reference the GHDL sim reaches 3335 by 20ms, "
+                  "17772 by 76ms.")
+    else:
+        print("\nheartbeat: no RTL[80+] samples in the log -- the core may never have "
+              "been released.")
+
+    return 1 if (bad_vs_file or disagree) else 0
 
 
 if __name__ == "__main__":
