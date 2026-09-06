@@ -56,6 +56,7 @@ add_file src/hdmi2/hdmi.sv
 add_file src/pce2hdmi_sd.sv
 add_file src/pce/common/mem/sdram.sv
 add_file src/pcetang_console60k_hdmi_pll_480p.vhd
+add_file src/pcetang_console60k_hdmi_pll_720p.vhd
 add_file src/pce/common/pll/console60k_pll.vhd
 add_file src/pcetang_console60k_cd.vhd
 add_file src/pcetang_console60k.cst

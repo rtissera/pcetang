@@ -128,8 +128,10 @@ entity pcetang_console60k_cd is
       tmds_d_n    : out   std_logic_vector(2 downto 0);
       tmds_d_p    : out   std_logic_vector(2 downto 0);
 
-      -- BL616 UART link. Pin assignment NOT YET CONFIRMED against a real Console 60K
-      -- schematic for TangCore's specific firmware -- see docs/ARCHITECTURE.md.
+      -- BL616 UART link. Real pins confirmed 2026-09-01 (V14/U15, see
+      -- pcetang_console60k.cst) against tangcore/monitor's own hardware-proven
+      -- assignment -- the original guess (R13/U13, the JTAG TDI/TDO pins) was real but
+      -- wrong, see that .cst file's header for the full story.
       uart_rxd    : in    std_logic;
       uart_txd    : out   std_logic
    );
@@ -147,7 +149,11 @@ architecture rtl of pcetang_console60k_cd is
       );
    end component;
 
-   component pcetang_console60k_hdmi_pll_480p is
+   -- 2026-09-06: swapped to the 720p PLL -- some real HDMI sinks reject the 480p60
+   -- output outright ("no signal"), while 1280x720p60 is near-universally accepted.
+   -- gw_sh-clean and confirmed on real hardware (monitor locks 1280x720p60). See
+   -- pcetang_console60k_hdmi_pll_720p.vhd for the real PLLA derivation.
+   component pcetang_console60k_hdmi_pll_720p is
       port (
          clkin        : in  std_logic;
          reset        : in  std_logic;
@@ -506,7 +512,7 @@ begin
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll_480p
+   hdmi_pll: pcetang_console60k_hdmi_pll_720p
    port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
 
@@ -662,9 +668,32 @@ begin
    -- bridge (gameplay fetch) owns it otherwise. Mutually exclusive because the core is
    -- held in core_resetn's reset for the whole load, so ROM_RD cannot fire during it.
    romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
-   romb_req  <= wr_req  when rom_loading_r = '1' else rd_req;
    romb_we   <= '1'     when rom_loading_r = '1' else '0';
    romb_di   <= wr_data;
+
+   -- REAL LATENT HAZARD, fixed 2026-09-06 (NOTE: this did NOT resolve the black-screen
+   -- symptom it was found while chasing -- the hazard below is real and worth fixing on
+   -- its own merits, but the black screen has another cause, still open). This was
+   --    romb_req <= wr_req when rom_loading_r = '1' else rd_req;
+   -- but sdram.sv's port B is EDGE/TOGGLE-triggered (`old_b_req ^ RAM_B_REQ`), not
+   -- level-triggered, and wr_req/rd_req are two independent toggle registers. Muxing
+   -- between them makes romb_req jump discontinuously the moment ownership switches at
+   -- end-of-load. If the last write's request was still pending then (RAM_B_WAIT set,
+   -- not yet launched from STATE_IDLE), that jump flips the XOR mismatch back to 0 and
+   -- silently CANCELS it: RAM_B_WAIT then stays high forever with nothing pending, no
+   -- ch1_busy, and the state machine sitting idle in MODE_NORMAL. The read bridge's
+   -- first real fetch then waits on romb_wait forever, pce_top hangs mid-fetch holding
+   -- ROM_RDY low, and the CPU never reaches the code that programs the VDC. That was
+   -- the hypothesis this fix was written against; on-screen probes suggested it, but
+   -- those probes turned out to have their own false-positive (counters gated on
+   -- reset_n rather than on "SDRAM reached MODE_NORMAL once"), and applying this fix
+   -- did NOT change the symptom. Keeping it regardless: an edge-triggered port fed from
+   -- a muxed pair of independent toggle registers is a genuine hazard either way.
+   -- XOR has no such discontinuity: each bridge toggling its own register still toggles
+   -- the combined signal exactly once, the pending mismatch survives the ownership
+   -- switch, and a quiet bridge contributes a constant. Both bridges are mutually
+   -- exclusive in time anyway (see above), so they never toggle in the same cycle.
+   romb_req  <= wr_req xor rd_req;
 
    -- ROM write bridge: one iosys_bl616 byte becomes one real SDRAM write via port B.
    -- Same pattern as pcetang_console60k.vhd's ROM write bridge.
@@ -1007,7 +1036,18 @@ begin
    joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
              joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
 
+   -- 2026-09-06: 720p60 output (see hdmi_pll instance above). Vertical
+   -- scale stays the existing fixed 2x line-double (pce2hdmi_sd.sv's own cy[0]==0
+   -- check) -- fills roughly the top 484 of 720 active lines, real picture but
+   -- letterboxed, not a full-height scale. Horizontal fill is automatic (the
+   -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
+   generic map (
+      VIDEOID       => 4,        -- CEA-861 1280x720p60
+      CLKFRQ        => 73750,    -- kHz, matches the real 720p PLL's actual clk_pixel
+      SCREEN_WIDTH  => 1280,
+      SCREEN_HEIGHT => 720
+   )
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,

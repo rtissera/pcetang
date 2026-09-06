@@ -586,9 +586,20 @@ begin
    -- (gameplay fetch) owns it otherwise. The two are never both active -- pce_top's CLK is
    -- held in core_resetn's reset for the entire load, so ROM_RD cannot fire during it.
    romb_addr <= wr_addr when rom_loading_r = '1' else rd_addr;
-   romb_req  <= wr_req  when rom_loading_r = '1' else rd_req;
    romb_we   <= '1'     when rom_loading_r = '1' else '0';
    romb_di   <= wr_data;
+
+   -- REAL LATENT HAZARD, fixed 2026-09-06: same as pcetang_console60k_cd.vhd's romb_req --
+   -- see that file for the full derivation and the real hardware evidence. In short:
+   -- sdram.sv's port B is edge/TOGGLE-triggered, so muxing between two independent
+   -- toggle registers makes romb_req jump discontinuously at the end-of-load ownership
+   -- switch, which can silently cancel a still-pending request and leave RAM_B_WAIT
+   -- stuck high forever (CPU then hangs mid-fetch -> permanently black screen). Found
+   -- on Console 60K while chasing a black screen; it did NOT turn out to be that
+   -- symptom's cause, but it is a real hazard on its own merits. This board has the
+   -- identical construct, so it is fixed here too (NOT separately reproduced on Primer
+   -- 25K hardware -- same code, same hazard).
+   romb_req  <= wr_req xor rd_req;
 
    joy1_ds2 <= (others => '0');
    joy1     <= joy1_ds2 or hid1(11 downto 0);
