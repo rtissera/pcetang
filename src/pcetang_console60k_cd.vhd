@@ -405,7 +405,29 @@ architecture rtl of pcetang_console60k_cd is
    signal romb_we   : std_logic := '0';
    signal romb_di   : std_logic_vector(7 downto 0);
    signal romb_do   : std_logic_vector(7 downto 0);
-   signal romb_wait : std_logic;
+   -- REAL CDC FIX (2026-09-06). sdram.sv runs on clk_sdram (120 MHz); every consumer of
+   -- these WAIT flags runs on clk_pce (42.857 MHz). They were sampled DIRECTLY by the
+   -- bridge state machines with no synchroniser -- an asynchronous input into a FSM.
+   --
+   -- Static timing analysis cannot see this: the crossing is an unconstrained async path,
+   -- so gw_sh reports "0 violations" no matter how bad it is, and the real behaviour is
+   -- placement luck that changes on every rebuild. That is exactly what was observed on
+   -- hardware across three builds that ALL reported 0 setup/0 hold violations:
+   --   build 4a1f7073 -- ROM self-test swept all 512K, 2 read timeouts, CPU ran to 76958
+   --                    VDC writes
+   --   build 4bff83b3 -- identical read bridge, only sweep-side logic added: the sweep
+   --                    aborted on its FIRST read and the runtime timeout counter
+   --                    saturated at 65535 (~27k stalled reads/second)
+   -- A metastable or skewed romb_wait makes the bridge miss the completion edge, which
+   -- then presents as the deadlock/stall this file's read bridge already had to grow a
+   -- watchdog for.
+   --
+   -- Two flops in the destination domain. The 2-cycle latency this adds is harmless: the
+   -- read bridge's own settle is 5 cycles (WAIT rises ~1 clk_sdram + 2 sync << 5) and
+   -- RB_WAIT waits indefinitely for the fall.
+   signal romb_wait_raw : std_logic;
+   signal romb_wait_m   : std_logic := '0';
+   signal romb_wait : std_logic := '0';
 
    -- RB_ADDR added 2026-09-06 -- see the read bridge's own header comment for the real
    -- hardware deadlock it fixes. It exists purely to give the address a full clk_pce
@@ -479,6 +501,25 @@ architecture rtl of pcetang_console60k_cd is
    -- Without the second pass a mismatch would be ambiguous between those last two, and
    -- would most likely have been misread as "image corrupt" -- costing a hardware cycle
    -- and pointing the whole investigation the wrong way.
+   -- RAW READ-BACK DUMP (2026-09-06). Run 2 proved the deadlock fix works (VDC writes
+   -- 9 -> 76958, climbing) but every 32KB checksum came back wrong with BOTH passes
+   -- agreeing byte-for-byte -- so SDRAM reads are now perfectly repeatable yet do not
+   -- match the file. A checksum cannot be inverted, and no simple transformation of the
+   -- file (byte-pair swap, byte-lane duplication, +-1/+512 offsets, 16-bit half swap)
+   -- reproduces the observed value, so guessing the corruption is a dead end. Dump the
+   -- first 128 bytes verbatim instead and diff them against the .pce directly -- that
+   -- names the transformation in one hardware cycle instead of N.
+   signal vfy_dump     : std_logic_vector(63 downto 0) := (others => '0');
+   signal vfy_dump_lat : std_logic_vector(63 downto 0) := (others => '0');
+   signal vfy_is_dump  : std_logic := '0';
+   signal vfy_dump_idx : unsigned(3 downto 0) := (others => '0');
+   -- Latched at VF_EMIT: vfy_dump_idx increments and vfy_is_dump is cleared before
+   -- the trace process fires (one cycle later, on vfy_emit_d), same reason vfy_sum
+   -- and vfy_pass are latched there.
+   signal vfy_is_dump_lat  : std_logic := '0';
+   signal vfy_dump_idx_lat : unsigned(3 downto 0) := (others => '0');
+   constant VFY_DUMP_BYTES : integer := 128;
+
    signal vfy_pass     : std_logic := '0';
    signal vfy_pass_lat : std_logic := '0';
 
@@ -505,7 +546,10 @@ architecture rtl of pcetang_console60k_cd is
    signal cdr_rd_n : std_logic := '0';
    signal cdr_di   : std_logic_vector(7 downto 0);
    signal cdr_do   : std_logic_vector(7 downto 0);
-   signal cdr_wait : std_logic;
+   -- Same crossing, same fix -- see romb_wait above.
+   signal cdr_wait_raw : std_logic;
+   signal cdr_wait_m   : std_logic := '0';
+   signal cdr_wait : std_logic := '0';
 
    type cdr_state_t is (CDR_IDLE, CDR_SETTLE, CDR_HOLD);
    signal cdr_state      : cdr_state_t := CDR_IDLE;
@@ -801,6 +845,18 @@ begin
    -- an ownership switch.
    romb_req  <= wr_req xor rd_req xor vfy_req;
 
+   -- Two-flop synchronisers for the clk_sdram -> clk_pce WAIT flags. See romb_wait's
+   -- declaration for the real hardware evidence that made these necessary.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         romb_wait_m <= romb_wait_raw;
+         romb_wait   <= romb_wait_m;
+         cdr_wait_m  <= cdr_wait_raw;
+         cdr_wait    <= cdr_wait_m;
+      end if;
+   end process;
+
    -- ROM write bridge: one iosys_bl616 byte becomes one real SDRAM write via port B.
    -- Same pattern as pcetang_console60k.vhd's ROM write bridge.
    process (clk_pce)
@@ -864,6 +920,8 @@ begin
                   vfy_sum     <= (others => '0');
                   vfy_blk     <= (others => '0');
                   vfy_pass    <= '0';
+                  vfy_is_dump <= '0';
+                  vfy_dump_idx <= (others => '0');
                   vfy_len     <= rom_wr_addr;
                   vfy_state   <= VF_REQ;
                end if;
@@ -915,9 +973,17 @@ begin
                -- final block's end test can never become true and the sweep re-reads
                -- the last byte forever.
                vfy_addr <= vfy_addr + 1;
+               -- Raw dump window: pass 0 only, first VFY_DUMP_BYTES bytes, MSB-first so
+               -- the trace line reads left-to-right in address order.
+               vfy_dump <= vfy_dump(55 downto 0) & romb_do;
                if (vfy_addr + 1 = vfy_len)
                   or (vfy_addr(VFY_BLK_BITS-1 downto 0) = (VFY_BLK_BITS-1 downto 0 => '1')) then
-                  vfy_state <= VF_EMIT;
+                  vfy_is_dump <= '0';
+                  vfy_state   <= VF_EMIT;
+               elsif vfy_pass = '0' and vfy_addr < VFY_DUMP_BYTES
+                     and vfy_addr(2 downto 0) = "111" then
+                  vfy_is_dump <= '1';
+                  vfy_state   <= VF_EMIT;
                else
                   vfy_state <= VF_REQ;
                end if;
@@ -935,12 +1001,21 @@ begin
                -- otherwise sample an already-cleared accumulator.
                vfy_sum_lat  <= vfy_sum;
                vfy_blk_lat  <= vfy_blk;
+               vfy_dump_lat <= vfy_dump;
+               vfy_is_dump_lat  <= vfy_is_dump;
+               vfy_dump_idx_lat <= vfy_dump_idx;
                -- Latched here too: vfy_pass flips in this same cycle on the last block,
                -- so the latch correctly captures the pass this checksum belongs to.
                vfy_pass_lat <= vfy_pass;
                vfy_emit     <= '1';
-               vfy_blk     <= vfy_blk + 1;
-               vfy_sum     <= (others => '0');
+               -- A dump emit is NOT a block boundary: leave the checksum accumulator and
+               -- the block counter alone, or the 32KB sums would be silently wrong.
+               if vfy_is_dump = '0' then
+                  vfy_blk <= vfy_blk + 1;
+                  vfy_sum <= (others => '0');
+               else
+                  vfy_dump_idx <= vfy_dump_idx + 1;
+               end if;
                vfy_state <= VF_GAP;
 
             when VF_GAP =>
@@ -950,7 +1025,10 @@ begin
                end if;
 
             when VF_RESUME =>
-               if vfy_addr >= vfy_len then
+               if vfy_is_dump = '1' then
+                  vfy_is_dump <= '0';
+                  vfy_state   <= VF_REQ;
+               elsif vfy_addr >= vfy_len then
                   if vfy_pass = '0' then
                      -- Second pass over the identical byte range, same order. See
                      -- vfy_pass's declaration for how the two results are read.
@@ -1232,13 +1310,13 @@ begin
       RAM_B_WE   => romb_we,
       RAM_B_DI   => romb_di,
       RAM_B_DO   => romb_do,
-      RAM_B_WAIT => romb_wait,
+      RAM_B_WAIT => romb_wait_raw,
       RAM_C_ADDR => cdr_addr,
       RAM_C_REQ  => cdr_req,
       RAM_C_RD_n => cdr_rd_n,
       RAM_C_DI   => cdr_di,
       RAM_C_DO   => cdr_do,
-      RAM_C_WAIT => cdr_wait,
+      RAM_C_WAIT => cdr_wait_raw,
       RAM_C_WIDE => '0',
       RAM_C_DI16 => (others => '0'),
       RAM_C_DO16 => open,
@@ -1397,12 +1475,23 @@ begin
             -- pass 1 at 0x40-0x7F, leaving 0x80+ for the runtime heartbeat. Supports up
             -- to 64 blocks per pass = 2MB at 32KB blocks; SF2's 2560K would exceed that,
             -- which is fine for a debug build but worth knowing before reusing this.
-            dbg_trace_tag  <= '0' & vfy_pass_lat & std_logic_vector(vfy_blk_lat(5 downto 0));
+            -- Raw dump lines get tags 0xC0-0xCF, clear of the checksum tags (0x00-0x7F)
+            -- and the runtime heartbeat (0x80+).
+            if vfy_is_dump_lat = '1' then
+               dbg_trace_tag <= x"C" & std_logic_vector(vfy_dump_idx_lat);
+            else
+               dbg_trace_tag <= '0' & vfy_pass_lat & std_logic_vector(vfy_blk_lat(5 downto 0));
+            end if;
             -- [63:56] block | [55:24] checksum | [23:2] end address | [1:0] pad
-            dbg_trace_data <= std_logic_vector(vfy_blk_lat)
-                              & std_logic_vector(vfy_sum_lat)
-                              & std_logic_vector(vfy_addr)
-                              & "00";
+            if vfy_is_dump_lat = '1' then
+               -- 8 raw SDRAM bytes, MSB first = ascending address order.
+               dbg_trace_data <= vfy_dump_lat;
+            else
+               dbg_trace_data <= std_logic_vector(vfy_blk_lat)
+                                 & std_logic_vector(vfy_sum_lat)
+                                 & std_logic_vector(vfy_addr)
+                                 & "00";
+            end if;
          elsif core_resetn = '0' then
             dbg_fetch_cnt <= (others => '0');
             dbg_hb_cnt    <= (others => '0');

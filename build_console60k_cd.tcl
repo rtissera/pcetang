@@ -80,8 +80,16 @@ set_option -bit_compress 1
 # here; route_option 0 (default, congestion-based) completes full PnR clean. Do not
 # "fix" by reverting to 1 without re-testing for the hang. See pcetang_status_matrix.md
 # lever 18.
-set_option -place_option 1
+set_option -place_option 2
 set_option -route_option 0
+# 2026-09-06: back to place_option 2 ("timing priority"). Adding the clk_sdram->clk_pce
+# WAIT synchronisers left place_option 1 with 8 setup-violated endpoints (worst -0.039ns,
+# split between hdmi_out/hdmi_inst on clk_pixel and core/CPU/CORE/MCODE on clk_pce -- the
+# two paths this board has always had ~0 margin on, not the new logic). Swept 0/1/2 on
+# identical trees: place_option 0 closes at clk_pce 42.928MHz (+0.17%), place_option 2 at
+# 43.403MHz (+1.27%), place_option 1 fails. Picked 2 for the real margin, and because the
+# failure here is timing, not the routability problem that made 1 the right answer before.
+# The place_option 1 rationale below is kept as the record of why it was ever 1.
 # place_option 1 = "routability priority" (2026-08-31f real fix, CONFIRMED): CDDA v1
 # real audio-writeback wiring (CD_AUDIO_WR/CD_DATA from cd_bridge.vhd into cd.vhd's
 # CDDA_FIFO) pushed the prior place_option 2 ("timing priority") baseline into 2 setup +

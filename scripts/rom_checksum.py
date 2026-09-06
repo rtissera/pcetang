@@ -59,6 +59,7 @@ def parse_log(path):
     """
     passes = {0: {}, 1: {}}
     beats = []
+    dumps = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -68,6 +69,9 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if 0xC0 <= tag <= 0xCF:
+                dumps[tag - 0xC0] = payload
+                continue
             if tag >= 0x80:
                 beats.append({
                     "vdc": (val >> 32) & MASK,
@@ -81,7 +85,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats
+    return passes, beats, dumps
 
 
 def main():
@@ -103,7 +107,33 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats = parse_log(args.log)
+    passes, beats, dumps = parse_log(args.log)
+
+    if dumps:
+        raw = b"".join(dumps[i] for i in sorted(dumps))
+        n = len(raw)
+        ref = data[:n]
+        print()
+        print(f"RAW SDRAM READ-BACK, first {n} bytes vs the .pce file:")
+        bad = 0
+        for off in range(0, n, 16):
+            got = raw[off:off + 16]
+            exp = ref[off:off + 16]
+            mark = "  " if got == exp else "<-"
+            if got != exp:
+                bad += 1
+            print(f"  {off:04x} sdram {got.hex(' ')} {mark}")
+            if got != exp:
+                print(f"       file  {exp.hex(' ')}")
+        if bad == 0:
+            print("  -> first bytes MATCH the file exactly.")
+        else:
+            print(f"  -> {bad} of {(n + 15) // 16} lines differ.")
+            # try to name the transformation
+            idx = [ref.find(bytes([b])) for b in raw[:8]]
+            print(f"  offsets in file of the first 8 bytes read: {idx}")
+        print()
+
     if not passes[0] and not passes[1]:
         print("no RTL[..] block-checksum lines found in the log", file=sys.stderr)
         return 2
@@ -162,8 +192,10 @@ def main():
                   "in WAIT.")
         elif last["timeouts"]:
             print(f"        *** {last['timeouts']} ROM reads STALLED and were escaped by "
-                  f"the watchdog.\n        The clk_pce/clk_sdram deadlock is NOT fully "
-                  f"fixed -- but the CPU kept running.")
+                  f"the watchdog.\n        The deadlock is NOT fixed. The watchdog "
+                  f"released the CPU with whatever byte\n        was on the bus, so it "
+                  f"kept running ON CORRUPT DATA -- treat EVERYTHING else\n        in "
+                  f"this run (VDC count, checksums, picture) as untrustworthy.")
         if last["rd_state"] == 2 and last["romb_wait"]:
             print("        *** bridge parked in RB_WAIT with romb_wait high -- SDRAM "
                   "read never completed.")

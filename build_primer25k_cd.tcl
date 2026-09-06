@@ -78,8 +78,15 @@ set_option -bit_compress 1
 # clk_pce margin (+0.019%->+1.85%, see pcetang_status_matrix.md lever 13) for free --
 # place_option/route_option default to 0 (compile-speed/congestion) on every board in
 # this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
-set_option -place_option 1
+set_option -place_option 0
 set_option -route_option 0
+# 2026-09-06 real fix, CONFIRMED by a 3-way sweep: place_option 1 (below) stopped routing
+# this board once the sdram.sv port-B deadlock fix landed -- ERROR (PR0004), 15 unrouted
+# nets, deterministic. Swept place_option 0/2 and route_option 1 on identical trees:
+# place_option 0 routes clean (0 errors, 0 setup/hold violations, real bitstream),
+# place_option 2 still errors. So this board is back on the project-wide default. The
+# place_option 1 history below is kept because it is the record of why it was ever 1, and
+# because the same lever may be needed again -- re-read it before changing this line.
 # 2026-08-31c real fix, CONFIRMED: place_option 1 = "routability priority" (per Gowin's
 # own rtlplaceoptions.xml -- place_option 2, the prior setting, is "timing priority").
 # The real failure signature here was unrouted nets (2321, then 1652 after a real LUT

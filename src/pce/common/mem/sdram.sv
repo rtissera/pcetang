@@ -425,10 +425,26 @@ always @(posedge clk) begin
 		// Observed exactly that way: 30 consecutive trace heartbeats with
 		// rd_state=RB_WAIT, romb_wait=1, rom_rdy=0, and the VDC write count frozen at 9
 		// while video timing kept running -- a black screen WITH sync.
-		// Clearing WAIT here is correct and unconditional: reaching this branch means
-		// this request is being answered right now from the cache, so by definition
-		// nothing is outstanding for port B any more.
-		RAM_B_WAIT <= 0;
+		// Guarded on !ch1_busy, NOT unconditional. `last_a[1]`/`last_valid[1]` are set at
+		// LAUNCH (below), not at completion, so a request arriving while a port-B fill is
+		// still in flight tag-hits the in-flight block and reaches this branch. Clearing
+		// WAIT there would tell the client "done" mid-fill and hand it `last_data[1]`,
+		// which still holds the PREVIOUS block -- trading the freeze for silent data
+		// corruption, which is strictly harder to diagnose. With the guard, WAIT is left
+		// for the ch1_busy completion to clear, which is correct because a transaction
+		// really is outstanding.
+		//
+		// RESIDUAL, deliberately not "fixed" here: in that same in-flight window this
+		// branch still returns stale `last_data[1]`. That is donor behaviour and the
+		// board's bridge should never issue during a fill (it waits on romb_wait, and
+		// RB_ADDR now keeps ADDR/REQ from transitioning together). It is NOT made worse
+		// by this change. Suppressing the hit during ch1_busy was considered and rejected:
+		// the request would fall through to the miss branch, but `fetch_req_b` is false on
+		// a tag match, so STATE_IDLE would never launch it -- reintroducing the exact
+		// deadlock this commit fixes. If a future run shows 0 watchdog timeouts but still
+		// returns wrong ROM bytes, THIS window is the next thing to look at, and the real
+		// fix is to make the tag valid at completion rather than at launch.
+		if(!ch1_busy) RAM_B_WAIT <= 0;
 	end
 	// PCE PORT: miss branch, mirrors RAM_A_WAIT's edge-detect above. old_b_req is left
 	// unchanged here (same as the original) so the mismatch persists as the pending-
