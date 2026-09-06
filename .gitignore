@@ -3,3 +3,7 @@ impl/
 
 # GHDL simulation work directories -- regenerable analysis output, not source.
 sim/*/work/
+
+# Python bytecode from scripts/
+__pycache__/
+*.pyc
