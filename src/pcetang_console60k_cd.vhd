@@ -259,6 +259,9 @@ architecture rtl of pcetang_console60k_cd is
          cd_sector_req        : in  std_logic;
          cd_sector_lba        : in  std_logic_vector(23 downto 0);
          cd_sector_is_audio   : in  std_logic;
+         dbg_trace_req        : in  std_logic;
+         dbg_trace_tag        : in  std_logic_vector(7 downto 0);
+         dbg_trace_data       : in  std_logic_vector(63 downto 0);
 
          uart_rx : in  std_logic;
          uart_tx : out std_logic
@@ -379,6 +382,19 @@ architecture rtl of pcetang_console60k_cd is
    -- this, the CPU could run and issue ROM_RD mid-load, racing the write bridge on the
    -- same SDRAM port B.
    signal core_resetn : std_logic := '0';
+
+   -- TEMP DEBUG (2026-09-06): traces the first N cart-ROM fetches out over
+   -- iosys_bl616.v's real RTL debug-trace channel, so they land as text lines in
+   -- debug.log on the SD card instead of having to be painted on HDMI and read off the
+   -- screen. Gated on core_resetn (the CPU actually running), NOT on reset_n -- earlier
+   -- probe rounds produced false positives precisely because reset_n-gated flags latch
+   -- during the SDRAM's own power-on init, before anything real has happened.
+   signal dbg_trace_req  : std_logic := '0';
+   signal dbg_trace_tag  : std_logic_vector(7 downto 0) := (others => '0');
+   signal dbg_trace_data : std_logic_vector(63 downto 0) := (others => '0');
+   signal dbg_fetch_cnt  : unsigned(7 downto 0) := (others => '0');
+   signal dbg_hb_cnt     : unsigned(21 downto 0) := (others => '0');
+   signal rd_state_bits  : std_logic_vector(1 downto 0);
 
    signal romb_addr : std_logic_vector(24 downto 0);
    signal romb_req  : std_logic := '0';
@@ -571,6 +587,9 @@ begin
       cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
       cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
       cd_sector_is_audio => cd_sector_is_audio_i,
+      dbg_trace_req => dbg_trace_req,
+      dbg_trace_tag => dbg_trace_tag,
+      dbg_trace_data => dbg_trace_data,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
@@ -985,7 +1004,19 @@ begin
 
       JOY_OUT => joy_out, JOY_IN => joy_in,
 
-      CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
+      -- REAL FIX (2026-09-06), found on real Console 60K hardware via the RTL debug
+      -- trace channel: CD_EN was hardwired '1', so a plain HuCard booted with the CD
+      -- subsystem live and no disc mounted. The traced CPU fetch pattern showed the
+      -- HuC6280 re-reading its IRQ2 vector ($FFF6) once per loop and re-entering the
+      -- handler at ROM 0x464 (40 RTI / 48 PHA / a9 01 LDA #$01 / 53 TAM ...) forever --
+      -- i.e. IRQ2 (the CD-ROM interrupt) asserting continuously, so the CPU never
+      -- reached the code that programs the VDC. Video timing kept running, so the
+      -- symptom was a black screen rather than lost sync.
+      -- Gate it on a real disc actually being mounted (cd_mounted_i, driven by the MCU's
+      -- own mount/unmount protocol -- loadpce leaves it 0, loadpcecd sets it 1). This
+      -- also makes the joypad port's CD-presence bit (pce_top.vhd:483, `not CD_EN`)
+      -- report the truth instead of always claiming a CD unit is attached.
+      CD_EN => cd_mounted_i, CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
       CD_RAM_RDY => cd_ram_rdy_i,
 
@@ -1035,6 +1066,60 @@ begin
    -- real player's HID state is currently active.
    joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
              joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
+
+   -- TEMP DEBUG (2026-09-06): periodic HEARTBEAT snapshot of the ROM-read bridge, over
+   -- iosys_bl616.v's RTL debug-trace channel -> debug.log on the SD card.
+   --
+   -- Deliberately a heartbeat and NOT a per-completion trace: the first attempt only
+   -- fired on the fast completion path (rd_settle_cnt="100" with romb_wait='0'), which
+   -- produced ZERO output on real hardware. That is itself consistent with the read
+   -- bridge sitting in RB_WAIT forever on a romb_wait that never drops -- exactly the
+   -- hang this is trying to characterise -- so the probe was blind to the very failure
+   -- it was meant to catch. A timer-driven snapshot fires regardless of whether anything
+   -- ever completes, so it cannot be silenced by the bug.
+   --
+   -- Payload (see the concatenation below): current CPU ROM address, the last byte SDRAM
+   -- returned, the ROM_SZ bucket in force, and the live handshake/state bits. Comparing
+   -- the address against the .pce file on the PC separates "SDRAM read path broken" from
+   -- "address mapping wrong" (rom_sz_r bucket rounding / SF2' mapping, never exercised
+   -- on real hardware); the state bits say whether the bridge is stuck and where.
+   -- Capped at 64 snapshots so the log stays readable and the UART is not flooded.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         dbg_trace_req <= '0';
+         if core_resetn = '0' then
+            dbg_fetch_cnt <= (others => '0');
+            dbg_hb_cnt    <= (others => '0');
+         else
+            dbg_hb_cnt <= dbg_hb_cnt + 1;
+            -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
+            if dbg_hb_cnt = 0 and dbg_fetch_cnt < 64 then
+               dbg_fetch_cnt <= dbg_fetch_cnt + 1;
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt);
+               -- [63:40] pad | [39:18] rom_a(21:0) | [17:10] romb_do | [9:2] rom_sz_r
+               -- | [1] romb_wait | [0] rom_rdy_i   ... plus rd_state in the pad's low bits
+               -- 16 + 4 + 4 flags + 2 state + 22 addr + 8 data + 8 size = 64 bits.
+               -- Decoded on the PC as: byte2 low nibble = rom_rd/core_resetn/rom_rdy/
+               -- romb_wait, byte3 top 2 bits = rd_state (00 IDLE, 01 SETTLE, 10 WAIT),
+               -- bytes 3..5 = rom_a, byte6 = romb_do, byte7 = rom_sz_r.
+               dbg_trace_data <= x"0000" & "0000"
+                                 & rom_rd_i & core_resetn & rom_rdy_i & romb_wait
+                                 & rd_state_bits
+                                 & rom_a(21 downto 0)
+                                 & romb_do
+                                 & rom_sz_r(7 downto 0);
+            end if;
+         end if;
+      end if;
+   end process;
+
+   -- 2-bit encoding of the read bridge's state, for the heartbeat payload above.
+   rd_state_bits <= "00" when rd_state = RB_IDLE else
+                    "01" when rd_state = RB_SETTLE else
+                    "10";   -- RB_WAIT
+
 
    -- 2026-09-06: 720p60 output (see hdmi_pll instance above). Vertical
    -- scale stays the existing fixed 2x line-double (pce2hdmi_sd.sv's own cy[0]==0

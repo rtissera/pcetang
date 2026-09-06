@@ -230,6 +230,11 @@ architecture rtl of pcetang_primer25k_cd is
          cd_sector_req        : in  std_logic;
          cd_sector_lba        : in  std_logic_vector(23 downto 0);
          cd_sector_is_audio   : in  std_logic;
+         -- TEMP DEBUG (2026-09-06): RTL debug-trace channel, tied off on this board --
+         -- see iosys_bl616.v's own port comment.
+         dbg_trace_req        : in  std_logic;
+         dbg_trace_tag        : in  std_logic_vector(7 downto 0);
+         dbg_trace_data       : in  std_logic_vector(63 downto 0);
 
          uart_rx : in  std_logic;
          uart_tx : out std_logic
@@ -634,6 +639,9 @@ begin
       cd_sector_data_valid => cd_sector_data_valid_i, cd_sector_data_last => cd_sector_data_last_i,
       cd_sector_req => cd_sector_req_i, cd_sector_lba => cd_sector_lba_i,
       cd_sector_is_audio => cd_sector_is_audio_i,
+      dbg_trace_req => '0',
+      dbg_trace_tag => (others => '0'),
+      dbg_trace_data => (others => '0'),
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );

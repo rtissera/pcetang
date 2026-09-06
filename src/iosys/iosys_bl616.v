@@ -75,6 +75,18 @@ module iosys_bl616 #(
                                              // data sector (2048B) -- see cd_bridge.vhd's
                                              // own SECTOR_IS_AUDIO port comment
 
+    // Real RTL debug-trace channel (2026-09-06). Pulse dbg_trace_req for one cycle with
+    // dbg_trace_tag/dbg_trace_data valid, and the values arrive as a line in debug.log on
+    // the MCU's SD card ("RTL[tag] b0 b1 ... b7"). Exists because there is no UART or JTAG
+    // into the running core: before this, reading an internal RTL signal on real hardware
+    // meant painting it onto the HDMI output and reading it off the screen by eye.
+    // Single-outstanding, same real assumption as cd_sector_req above -- a new pulse while
+    // one is still queued is dropped, so trace sparingly (on a state change, not per clock).
+    // Tie dbg_trace_req low on boards/builds that don't use it.
+    input             dbg_trace_req,
+    input      [7:0]  dbg_trace_tag,
+    input      [63:0] dbg_trace_data,
+
     // UART interface
     input  uart_rx,
     output uart_tx
@@ -440,6 +452,7 @@ localparam SEND_CD_SECTOR_REQ = 6;  // real (2026-08-31): matches wire protocol'
 
 localparam SEND_HEADER = 7;
 localparam SEND_DONE = 8;
+localparam SEND_DBG_TRACE = 9;      // real (2026-09-06): RTL debug trace, see ports
 
 reg [3:0] send_state, send_state_next;
 reg [$clog2(STR_LEN+1)-1:0] send_idx;
@@ -462,12 +475,19 @@ reg cd_req_pending;
 reg [23:0] cd_req_lba;
 reg cd_req_is_audio;  // real (2026-08-31g): latched alongside cd_req_lba, see below
 
+// Real RTL debug-trace latch (2026-09-06), same single-outstanding shape as the CD
+// sector-request latch above -- see the dbg_trace_* port comments.
+reg dbg_pending;
+reg [7:0]  dbg_tag_r;
+reg [63:0] dbg_data_r;
+
 // UART TX: command responses, joystick updates and FDD requests
 always @(posedge clk) begin
     if (!resetn) begin
         joy_timer <= 0;
         send_state <= 0;
         cd_req_pending <= 0;
+        dbg_pending <= 0;
     end else begin
         tx_valid <= 0;
         mgmt_read <= 0;
@@ -482,6 +502,13 @@ always @(posedge clk) begin
             cd_req_pending <= 1;
             cd_req_lba <= cd_sector_lba;
             cd_req_is_audio <= cd_sector_is_audio;
+        end
+
+        // Real RTL debug-trace latch (see declaration comment above)
+        if (dbg_trace_req && !dbg_pending) begin
+            dbg_pending <= 1;
+            dbg_tag_r   <= dbg_trace_tag;
+            dbg_data_r  <= dbg_trace_data;
         end
 
         // UART transmission state machine
@@ -499,6 +526,10 @@ always @(posedge clk) begin
                     send_state_next <= SEND_CD_SECTOR_REQ;
                     send_state <= SEND_HEADER;
                     resp_frame_len <= 5;    // cmd + 4-byte LBA
+                end else if (dbg_pending) begin
+                    send_state_next <= SEND_DBG_TRACE;
+                    send_state <= SEND_HEADER;
+                    resp_frame_len <= 10;   // cmd + tag + 8 data bytes
                 end else if (fdd_request[1] && fdd_state == FDD_READY) begin
                     send_state_next <= SEND_FDD_WRITE;
                     send_state <= SEND_HEADER;
@@ -599,6 +630,30 @@ always @(posedge clk) begin
                     if (send_idx == 3) begin
                         send_state <= SEND_IDLE;
                         cd_req_pending <= 0;
+                    end
+                end
+            end
+
+            // Real RTL debug trace (2026-09-06): 1 tag byte + 8 data bytes, MSB first.
+            // Lands in debug.log on the MCU's SD card -- see the dbg_trace_* ports.
+            SEND_DBG_TRACE: begin
+                if (tx_ready && ~tx_valid) begin
+                    case (send_idx)
+                        0: tx_data <= dbg_tag_r;
+                        1: tx_data <= dbg_data_r[63:56];
+                        2: tx_data <= dbg_data_r[55:48];
+                        3: tx_data <= dbg_data_r[47:40];
+                        4: tx_data <= dbg_data_r[39:32];
+                        5: tx_data <= dbg_data_r[31:24];
+                        6: tx_data <= dbg_data_r[23:16];
+                        7: tx_data <= dbg_data_r[15:8];
+                        default: tx_data <= dbg_data_r[7:0];
+                    endcase
+                    tx_valid <= 1;
+                    send_idx <= send_idx + 1;
+                    if (send_idx == 8) begin
+                        send_state <= SEND_IDLE;
+                        dbg_pending <= 0;
                     end
                 end
             end
