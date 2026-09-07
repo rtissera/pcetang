@@ -84,7 +84,12 @@ def parse_log(path):
             if tag >= 0x80:
                 beats.append({
                     "vdc": (val >> 32) & MASK,
-                    "timeouts": (val >> 16) & 0xFFFF,
+                    "timeouts": (val >> 24) & 0xFF,
+                    "cdr_timeouts": (val >> 20) & 0xF,
+                    "cd_ram_rdy": (val >> 19) & 1,
+                    "cdr_busy": (val >> 18) & 1,
+                    "cd_ram_rd": (val >> 17) & 1,
+                    "adpcm_req": (val >> 16) & 1,
                     "rd_state": (val >> 14) & 0x3,
                     "rom_rd": (val >> 13) & 1,
                     "rom_rdy": (val >> 12) & 1,
@@ -217,6 +222,12 @@ def main():
         print(f"        rd_state={states.get(last['rd_state'], '?')} "
               f"rom_rdy={last['rom_rdy']} romb_wait={last['romb_wait']}  "
               f"ROM-read watchdog timeouts={last['timeouts']}")
+        print(f"        port-C: cd_ram_rdy={last['cd_ram_rdy']} "
+              f"busy={last['cdr_busy']} cd_ram_rd={last['cd_ram_rd']} "
+              f"adpcm_req={last['adpcm_req']} timeouts={last['cdr_timeouts']}")
+        if last["cd_ram_rdy"] == 0:
+            print("        *** cd_ram_rdy is LOW -- this is the other term of WAIT_N, so")
+            print("            the CPU is frozen by the port-C arbiter, not the ROM path.")
         if last["timeouts"] == 0 and last["rd_state"] != 2:
             print("        ROM read path healthy: no stalled reads, bridge not parked "
                   "in WAIT.")

@@ -618,7 +618,14 @@ architecture rtl of pcetang_console60k_cd is
 
    type cdr_state_t is (CDR_IDLE, CDR_SETTLE, CDR_HOLD);
    signal cdr_state      : cdr_state_t := CDR_IDLE;
-   signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
+   signal cdr_settle_cnt : unsigned(5 downto 0) := (others => '0');
+   signal cdr_seen_wait  : std_logic := '0';
+   signal cdr_wdog       : unsigned(11 downto 0) := (others => '0');
+   signal dbg_cdr_timeout_cnt : unsigned(7 downto 0) := (others => '0');
+   -- Plain signal, not an inline conditional in the trace concatenation: Gowin's VHDL
+   -- front-end rejects a conditional expression there (ERROR EX4155, "only supported
+   -- in VHDL 1076-2019").
+   signal cdr_busy_bit   : std_logic;
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
 
    -- Real SCSI target -- cd_bridge.vhd (shared across all 3 boards, 2026-08-31), see that
@@ -1388,6 +1395,8 @@ begin
                   cdr_owner <= OWNER_CDRAM;
                   cd_pend  <= '0';
                   cdr_settle_cnt <= (others => '0');
+                  cdr_seen_wait  <= '0';
+                  cdr_wdog       <= (others => '0');
                   cdr_state <= CDR_SETTLE;
                elsif adpcm_pend = '1' or adpcm_new = '1' then
                   cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
@@ -1398,33 +1407,56 @@ begin
                   cdr_owner <= OWNER_ADPCM;
                   adpcm_pend <= '0';
                   cdr_settle_cnt <= (others => '0');
+                  cdr_seen_wait  <= '0';
+                  cdr_wdog       <= (others => '0');
                   cdr_state <= CDR_SETTLE;
                end if;
 
             when CDR_SETTLE =>
                cdr_req <= '1';
-               if cdr_settle_cnt = "100" then
-                  if cdr_wait = '1' then
-                     cdr_state <= CDR_HOLD;
+               -- Real handshake, same fix as the ROM read/write bridges (696313d). This
+               -- FSM was MISSED by that commit and it is the one that matters most: it
+               -- owns cd_ram_rdy_i, the other term of pce_top's
+               -- `WAIT_N <= ROM_RDY and CD_RAM_RDY`. cd_ram_rdy_i is dropped the moment a
+               -- CD-RAM access starts and only restored when this FSM completes, so if it
+               -- mis-samples cdr_wait and hangs, the CPU is frozen FOREVER -- with the ROM
+               -- bridge sitting innocently in RB_IDLE, which is exactly what run 11
+               -- showed: ROM image byte-perfect, rd_state=IDLE, rom_rdy=1, 0 timeouts,
+               -- and the VDC write count stuck at 10 while video kept running.
+               -- The 2-flop cdr_wait synchroniser added in c9e936c made this strictly
+               -- worse by delaying WAIT two more cycles without widening the window.
+               if cdr_wait = '1' then
+                  cdr_seen_wait <= '1';
+                  cdr_state <= CDR_HOLD;
+               elsif cdr_settle_cnt = SETTLE_HIT then
+                  -- WAIT never rose in a generous window: sdram.sv served this from its
+                  -- line cache, which legitimately never asserts WAIT.
+                  if cdr_owner = OWNER_CDRAM then
+                     cd_ram_di_i  <= cdr_do;
+                     cd_ram_rdy_i <= '1';
                   else
-                     if cdr_owner = OWNER_CDRAM then
-                        cd_ram_di_i  <= cdr_do;
-                        cd_ram_rdy_i <= '1';
-                     else
-                        adpcm_ram_di_i    <= cdr_do(3 downto 0);
-                        adpcm_ram_ready_i <= '1';
-                     end if;
-                     cdr_req <= '0';
-                     cdr_owner <= OWNER_NONE;
-                     cdr_state <= CDR_IDLE;
+                     adpcm_ram_di_i    <= cdr_do(3 downto 0);
+                     adpcm_ram_ready_i <= '1';
                   end if;
+                  cdr_req <= '0';
+                  cdr_owner <= OWNER_NONE;
+                  cdr_state <= CDR_IDLE;
                else
                   cdr_settle_cnt <= cdr_settle_cnt + 1;
                end if;
 
             when CDR_HOLD =>
                cdr_req <= '1';
-               if cdr_wait = '0' then
+               cdr_wdog <= cdr_wdog + 1;
+               -- Watchdog, same rationale as the ROM read bridge's. cd_ram_rdy_i held low
+               -- here freezes the CPU outright, so this path must never be able to stall
+               -- forever on a WAIT that does not fall. On timeout, release the client with
+               -- whatever data is present and count it -- a wrong byte the CPU can survive
+               -- and we can see, rather than a silent freeze we cannot.
+               if cdr_wait = '0' or cdr_wdog = x"3FF" then
+                  if cdr_wdog = x"3FF" and dbg_cdr_timeout_cnt /= x"FF" then
+                     dbg_cdr_timeout_cnt <= dbg_cdr_timeout_cnt + 1;
+                  end if;
                   if cdr_owner = OWNER_CDRAM then
                      cd_ram_di_i  <= cdr_do;
                      cd_ram_rdy_i <= '1';
@@ -1713,8 +1745,17 @@ begin
                -- ROM read ever stalled, nonzero means the deadlock still happens and is
                -- merely being escaped. VBLANK keeps the low 11 bits, which is plenty to
                -- show video is alive.
+               -- [63:32] VDC writes | [31:24] ROM-read timeouts
+               -- | [23:16] port-C: cdr_timeouts(4) cd_ram_rdy cdr_busy cd_ram_rd adpcm_req
+               -- | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait | [10:0] VBLANK
+               -- Run 11 froze with the ROM path provably healthy, so the port-C side --
+               -- which owns cd_ram_rdy_i, the other term of WAIT_N -- is now visible too.
                dbg_trace_data <= std_logic_vector(dbg_vdc_cnt)
-                                 & std_logic_vector(dbg_rd_timeout_cnt)
+                                 & std_logic_vector(dbg_rd_timeout_cnt(7 downto 0))
+                                 & std_logic_vector(dbg_cdr_timeout_cnt(3 downto 0))
+                                 & cd_ram_rdy_i
+                                 & cdr_busy_bit
+                                 & cd_ram_rd & adpcm_ram_req_i
                                  & rd_state_bits
                                  & rom_rd_i & rom_rdy_i & romb_wait
                                  & std_logic_vector(dbg_vbl_cnt(10 downto 0));
@@ -1746,6 +1787,8 @@ begin
    end process;
 
    -- 2-bit encoding of the read bridge's state, for the heartbeat payload above.
+   cdr_busy_bit <= '0' when cdr_state = CDR_IDLE else '1';
+
    rd_state_bits <= "00" when rd_state = RB_IDLE else
                     "01" when rd_state = RB_SETTLE else
                     "10";   -- RB_WAIT
