@@ -1771,15 +1771,17 @@ begin
                -- | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait | [10:0] VBLANK
                -- Run 11 froze with the ROM path provably healthy, so the port-C side --
                -- which owns cd_ram_rdy_i, the other term of WAIT_N -- is now visible too.
-               -- Every memory and stall path is now proven healthy on hardware, so the
-               -- payload is repurposed to the only question left: is the CPU running,
-               -- and if so what is it running?
-               -- [63:48] VDC writes | [47:32] IRQ1 assertions | [31:16] CPU_CE count
-               -- | [15:11] CPU_A(20:16) | [10:0] VBLANK
+               -- Run 14: CPU_CE advances ~42441/heartbeat (full speed, continuous),
+               -- IRQ1 assertions 0, VDC writes stuck at 10, and CPU_A(20:16) pinned at
+               -- 0x1D for 30 straight samples -- physical banks $E8-$EF, which are
+               -- UNMAPPED on a PCE. So the CPU is not stalled and not interrupt-stormed;
+               -- it has jumped into nowhere and is fetching $FF forever. Five address
+               -- bits was enough to see that and not enough to say why, so the full
+               -- 21-bit CPU_A goes in the payload now. IRQ1 is dropped -- proven 0.
+               -- [63:48] VDC writes | [47:27] CPU_A(20:0) | [26:11] CPU_CE | [10:0] VBLANK
                dbg_trace_data <= std_logic_vector(dbg_vdc_cnt(15 downto 0))
-                                 & std_logic_vector(dbg_irq1_cnt)
+                                 & dbg_cpu_a
                                  & std_logic_vector(dbg_cpu_cyc)
-                                 & dbg_cpu_a(20 downto 16)
                                  & std_logic_vector(dbg_vbl_cnt(10 downto 0));
             end if;
          end if;

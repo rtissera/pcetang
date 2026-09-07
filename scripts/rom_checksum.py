@@ -84,9 +84,8 @@ def parse_log(path):
             if tag >= 0x80:
                 beats.append({
                     "vdc": (val >> 48) & 0xFFFF,
-                    "irq1": (val >> 32) & 0xFFFF,
-                    "cpu_ce": (val >> 16) & 0xFFFF,
-                    "cpu_a_hi": (val >> 11) & 0x1F,
+                    "cpu_a": (val >> 27) & 0x1FFFFF,
+                    "cpu_ce": (val >> 11) & 0xFFFF,
                     "vbl": val & 0x7FF,
                 })
                 continue
@@ -208,30 +207,28 @@ def main():
     if beats:
         vdc = [b["vdc"] for b in beats]
         ce  = [b["cpu_ce"] for b in beats]
-        irq = [b["irq1"] for b in beats]
-        last = beats[-1]
+        addrs = [b["cpu_a"] for b in beats]
         print()
         print(f"heartbeat: {len(beats)} samples")
-        print(f"  VDC writes  {vdc[0]} -> {vdc[-1]}")
-        print(f"  CPU_CE      {ce[0]} -> {ce[-1]}   (16-bit, wraps)")
-        print(f"  IRQ1 asserts{irq[0]:>7} -> {irq[-1]}")
-        print(f"  VBLANK      {beats[0]['vbl']} -> {last['vbl']}")
-        print(f"  CPU_A[20:16] last = 0x{last['cpu_a_hi']:02x}")
+        print(f"  VDC writes {vdc[0]} -> {vdc[-1]}")
+        print(f"  CPU_CE     {ce[0]} -> {ce[-1]}  (16-bit, wraps; delta per sample matters)")
+        print(f"  VBLANK     {beats[0]['vbl']} -> {beats[-1]['vbl']}")
         print()
-        moving = len(set(ce)) > 1
-        if not moving:
-            print("  CPU_CE IS NOT MOVING -- the CPU is genuinely halted, with nothing")
-            print("  asserting a stall. Look at clock/CE generation, not memory.")
-        elif len(set(vdc)) == 1:
-            if len(set(irq)) > 1:
-                print("  CPU IS RUNNING but VDC writes are flat while IRQ1 keeps asserting")
-                print("  -> INTERRUPT STORM. The CPU is stuck in a handler it cannot clear.")
-            else:
-                print("  CPU IS RUNNING, IRQ1 quiet, VDC writes flat -> the CPU is looping")
-                print("  in ordinary code. CPU_A[20:16] says which region; diff vs the sim.")
-        else:
-            print("  VDC writes CLIMBING and CPU running -- the core is executing the game.")
-            print("  Sim reference: 3335 VDC writes by 20ms, 17772 by 76ms.")
+        print("  CPU_A samples (physical, 21-bit):")
+        for k, a_ in enumerate(addrs):
+            bank = (a_ >> 13) & 0xFF
+            if bank <= 0x7F:      where = f"ROM offset {a_ & 0x1FFFFF:#07x}"
+            elif 0x80 <= bank <= 0x87: where = "CD-RAM"
+            elif bank == 0xF7:    where = "BRAM"
+            elif 0xF8 <= bank <= 0xFB: where = "work RAM"
+            elif bank == 0xFF:    where = "I/O"
+            else:                 where = "*** UNMAPPED ***"
+            if k < 6 or k >= len(addrs) - 3:
+                print(f"    [{k:02d}] {a_:#08x}  bank ${bank:02X}  {where}")
+            elif k == 6:
+                print("    ...")
+        banks = {(a_ >> 13) & 0xFF for a_ in addrs}
+        print(f"  distinct banks seen: {sorted(hex(b) for b in banks)}")
     return 1 if (bad_vs_file or disagree) else 0
 
 
