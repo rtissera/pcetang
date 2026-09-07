@@ -195,16 +195,28 @@ begin
          -- Refresh stays well in spec: 511 cycles @100 MHz = 5.11 us vs the 7.8 us/row
          -- requirement. RASCAS_DELAY/CAS_LATENCY are counted in CYCLES, so a slower
          -- clock only makes them more conservative.
-         -- 2026-09-06 second step: 100 -> 80 MHz (ODIV1 12 -> 15). Real read-back data,
-         -- same ROM, same board, only this divider changed:
-         --   120 MHz -- 66/128 bytes wrong, 15 of 16 DQ lines, odd AND even addresses
-         --   100 MHz -- 14/128 bytes wrong, ODD addresses only, only DQ[8],DQ[9],DQ[10]
-         -- Monotonic in clock period, every flip 0->1, and the residue collapsed onto
-         -- three physically adjacent pins (B21/A21/B20) of the upper byte lane. That is
-         -- a DQ-bus setup limit, not logic. 80 MHz gives a 6.25 ns half-period for the
-         -- round trip vs 5.0 ns at 100 MHz. Refresh still in spec: 511 cycles @80 MHz
-         -- = 6.39 us against the 7.8 us/row requirement.
-         ODIV1_SEL  => 15,    -- 1200/15 = 80.000 MHz (clk_sdram)
+         -- 2026-09-07 REAL FIX: clk_sdram is now EXACTLY 2x clk_pce.
+         --   clk_pce   = FVCO/ODIV0 = 1200/28 = 42.857142... MHz
+         --   clk_sdram = FVCO/ODIV1 = 1200/14 = 85.714285... MHz   (ratio exactly 2.000)
+         --
+         -- Why this matters more than the frequency itself. The previous 120 MHz gave a
+         -- ratio of 2.8 -- NON-INTEGER -- so although both clocks come from this one PLL,
+         -- every clk_pce<->clk_sdram path was a genuine asynchronous crossing. The .sdc
+         -- papered over that with `set_multicycle_path -setup 3` in both directions, which
+         -- is a PROMISE that the receiver samples only every 3rd cycle. The bridge state
+         -- machines sample romb_wait EVERY cycle, so the promise was never kept: STA
+         -- validated a constraint the design does not honour and reported "0 violations"
+         -- for paths it was effectively not checking. That is why builds with byte-
+         -- identical logic behaved completely differently on hardware all evening
+         -- (2 read timeouts in one, 65535 saturated in the next).
+         --
+         -- At an exact 2:1 ratio the two domains are SYNCHRONOUS: no metastability, and
+         -- the multicycle fiction can be deleted so STA actually verifies these paths.
+         -- Chosen over 120 MHz because 3:1 would need 128.57 MHz, and over 64.8 MHz
+         -- (nand2mario's proven sdram_nes operating point) because 2x lands closest to
+         -- the 80 MHz this board was already running.
+         -- Refresh stays in spec: 511 cycles @85.714 MHz = 5.96 us vs 7.8 us/row.
+         ODIV1_SEL  => 14,    -- 1200/14 = 85.714 MHz (clk_sdram) = EXACTLY 2x clk_pce
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE"
       )
