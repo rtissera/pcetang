@@ -177,6 +177,13 @@ entity pce_top is
 		-- (ROM_A drops CPU_A(19) on the 512K bucket and shows nothing for RAM/IO cycles).
 		DBG_CPU_A  : out std_logic_vector(20 downto 0);
 		DBG_VDC_WR : out std_logic;
+		-- PCE PORT (2026-09-07): the HuC6280's OTHER stall input. `RDY` below is
+		-- `VDC0_BUSY_N and VDC1_BUSY_N`, entirely separate from WAIT_N's
+		-- ROM_RDY/CD_RAM_RDY. A VDC holding BUSY low freezes the CPU while every memory
+		-- path looks perfectly healthy -- which is exactly the state real hardware
+		-- reached: ROM image byte-perfect, rd_state IDLE, cd_ram_rdy high, and the VDC
+		-- write count stuck at 10. Exposed so the board can trace it.
+		DBG_VDC_RDY : out std_logic;
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -1052,6 +1059,7 @@ ROM_CLKEN <= CPU_CLKEN;
 -- mean exactly the same thing and can be compared directly.
 DBG_CPU_A  <= CPU_A;
 DBG_VDC_WR <= CPU_CE and not CPU_WR_N and not CPU_VDC0_SEL_N;
+DBG_VDC_RDY <= VDC0_BUSY_N and VDC1_BUSY_N;
 
 process( CLK ) begin
 	if rising_edge( CLK ) then

@@ -591,6 +591,11 @@ architecture rtl of pcetang_console60k_cd is
    -- Debug taps from pce_top (see that file's DBG_CPU_A/DBG_VDC_WR port comments).
    signal dbg_cpu_a   : std_logic_vector(20 downto 0);
    signal dbg_vdc_wr  : std_logic;
+   -- VDC BUSY-derived CPU stall (pce_top RDY). Low = a VDC is holding the CPU, which
+   -- freezes it even with WAIT_N high. Latched sticky so a brief assertion cannot be
+   -- missed between 100 ms heartbeats.
+   signal dbg_vdc_rdy : std_logic;
+   signal dbg_vdc_stall : std_logic := '0';
    signal dbg_vdc_cnt : unsigned(31 downto 0) := (others => '0');
    signal dbg_vbl_r   : std_logic := '0';
    signal dbg_vbl_cnt : unsigned(15 downto 0) := (others => '0');
@@ -1566,7 +1571,7 @@ begin
 
       -- TEMP DEBUG (2026-09-06): see pce_top.vhd's own port comments and the trace
       -- process near the bottom of this file.
-      DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr,
+      DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr, DBG_VDC_RDY => dbg_vdc_rdy,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -1755,7 +1760,7 @@ begin
                                  & std_logic_vector(dbg_cdr_timeout_cnt(3 downto 0))
                                  & cd_ram_rdy_i
                                  & cdr_busy_bit
-                                 & cd_ram_rd & adpcm_ram_req_i
+                                 & cd_ram_rd & dbg_vdc_stall
                                  & rd_state_bits
                                  & rom_rd_i & rom_rdy_i & romb_wait
                                  & std_logic_vector(dbg_vbl_cnt(10 downto 0));
@@ -1778,6 +1783,9 @@ begin
          else
             if dbg_vdc_wr = '1' then
                dbg_vdc_cnt <= dbg_vdc_cnt + 1;
+            end if;
+            if dbg_vdc_rdy = '0' then
+               dbg_vdc_stall <= '1';   -- sticky: a VDC stalled the CPU at least once
             end if;
             if video_vbl = '1' and dbg_vbl_r = '0' then
                dbg_vbl_cnt <= dbg_vbl_cnt + 1;

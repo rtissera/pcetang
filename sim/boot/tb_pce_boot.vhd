@@ -445,10 +445,14 @@ begin
 						if VERBOSE /= 0 and printed < 400 then
 							printed := printed + 1;
 							write(l, now);
-							write(l, string'("  VDC0 WR a="));
+							write(l, string'("  VDC0 WR #"));
+							write(l, n_vdc0_wr);
+							write(l, string'(" reg="));
 							write(l, hex(cpu_a(4 downto 0)));
 							write(l, string'(" d="));
 							write(l, hex(cpu_do));
+							write(l, string'("  pc_a="));
+							write(l, hex(cpu_a));
 							writeline(output, l);
 						end if;
 					elsif vdc1_sel_n = '0' then

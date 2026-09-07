@@ -89,7 +89,7 @@ def parse_log(path):
                     "cd_ram_rdy": (val >> 19) & 1,
                     "cdr_busy": (val >> 18) & 1,
                     "cd_ram_rd": (val >> 17) & 1,
-                    "adpcm_req": (val >> 16) & 1,
+                    "vdc_stall": (val >> 16) & 1,
                     "rd_state": (val >> 14) & 0x3,
                     "rom_rd": (val >> 13) & 1,
                     "rom_rdy": (val >> 12) & 1,
@@ -224,7 +224,13 @@ def main():
               f"ROM-read watchdog timeouts={last['timeouts']}")
         print(f"        port-C: cd_ram_rdy={last['cd_ram_rdy']} "
               f"busy={last['cdr_busy']} cd_ram_rd={last['cd_ram_rd']} "
-              f"adpcm_req={last['adpcm_req']} timeouts={last['cdr_timeouts']}")
+              f"timeouts={last['cdr_timeouts']}")
+        print(f"        VDC stalled the CPU (RDY low, sticky): {last['vdc_stall']}")
+        if last["vdc_stall"]:
+            print("        *** a VDC held BUSY -- that is pce_top's RDY input, a stall")
+            print("            path SEPARATE from WAIT_N. The CPU can freeze here with")
+            print("            every memory path perfectly healthy. Prime suspect is VDC1")
+            print("            (LITE=0/SGX=1 keeps it and VRAM1 alive on a plain HuCard).")
         if last["cd_ram_rdy"] == 0:
             print("        *** cd_ram_rdy is LOW -- this is the other term of WAIT_N, so")
             print("            the CPU is frozen by the port-C arbiter, not the ROM path.")
