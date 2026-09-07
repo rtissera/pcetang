@@ -593,8 +593,8 @@ architecture rtl of pcetang_console60k_cd is
    -- Single-cycle write and read on port B, no handshake needed -- it is on-chip BSRAM.
    signal wram_en     : std_logic := '0';
    signal wram_a      : unsigned(14 downto 0) := (others => '0');
-   signal wram_d      : std_logic_vector(7 downto 0) := (others => '0');
-   signal wram_we     : std_logic := '0';
+   signal wram_d      : std_logic_vector(7 downto 0);
+   signal wram_we     : std_logic;
    signal wram_q      : std_logic_vector(7 downto 0);
    signal wram_errs   : unsigned(15 downto 0) := (others => '0');
    signal wram_first  : std_logic_vector(15 downto 0) := (others => '1');
@@ -1152,9 +1152,12 @@ begin
             -- ---- WORK RAM pattern test: write 8KB, then read it all back.
             -- Two separate passes (not write-then-read per address) so a byte that reads
             -- back only because it is still sitting in a pipeline register cannot pass.
+            -- wram_we and wram_d are CONCURRENT (see below), driven off the address
+            -- currently presented, so the write lands at the address in wram_a rather
+            -- than the next one. The first version registered all three together, which
+            -- wrote data(A) at address A+1 and reported 8192/8192 mismatches -- a pure
+            -- test bug that read back exactly the stray byte it had written.
             when WR_W =>
-               wram_we <= '1';
-               wram_d  <= std_logic_vector(wram_a(7 downto 0) xor x"A5");
                if wram_a = WRAM_BYTES-1 then
                   wram_a    <= (others => '0');
                   wram_dly  <= (others => '0');
@@ -1164,7 +1167,6 @@ begin
                end if;
 
             when WR_R =>
-               wram_we   <= '0';
                -- dpram registers q_b, so allow a cycle of read latency before comparing
                wram_dly  <= wram_dly + 1;
                if wram_dly = "010" then
@@ -1905,6 +1907,11 @@ begin
    end process;
 
    -- 2-bit encoding of the read bridge's state, for the heartbeat payload above.
+   -- Work-RAM test port B: assert the write strobe and data combinationally for the
+   -- address currently in wram_a, so address/data/we all present together.
+   wram_we <= '1' when vfy_state = WR_W else '0';
+   wram_d  <= std_logic_vector(wram_a(7 downto 0) xor x"A5");
+
    cdr_busy_bit <= '0' when cdr_state = CDR_IDLE else '1';
 
    rd_state_bits <= "00" when rd_state = RB_IDLE else
