@@ -61,6 +61,7 @@ def parse_log(path):
     beats = []
     dumps = {}
     pattern = {}
+    wram = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -70,6 +71,13 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if tag == 0xD1:
+                val = int.from_bytes(payload, "big")
+                wram["errs"] = (val >> 48) & 0xFFFF
+                wram["first_got"] = (val >> 40) & 0xFF
+                wram["first_addr"] = (val >> 32) & 0xFF
+                wram["tested"] = (val >> 16) & 0xFFFF
+                continue
             if tag == 0xD0:
                 val = int.from_bytes(payload, "big")
                 pattern["errs"] = (val >> 48) & 0xFFFF
@@ -91,7 +99,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern
+    return passes, beats, dumps, pattern, wram
 
 
 def main():
@@ -113,7 +121,21 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern = parse_log(args.log)
+    passes, beats, dumps, pattern, wram = parse_log(args.log)
+
+    if wram:
+        e, n = wram["errs"], wram["tested"]
+        print()
+        print(f"WORK RAM PATTERN TEST (on-chip BSRAM, port B): {e} mismatches in {n} bytes")
+        if e == 0:
+            print("  -> Work RAM stores and returns data correctly. Not the corruption source.")
+        else:
+            print(f"  -> first bad: addr 0x{wram['first_addr']:02x} "
+                  f"expected 0x{wram['first_addr'] ^ 0xA5:02x} got 0x{wram['first_got']:02x}")
+            print("     WORK RAM IS BROKEN. That explains everything: MPRs come from TAM")
+            print("     (accumulator <- RAM), and this game runs its TII trampoline FROM")
+            print("     RAM at $2480 with operands in RAM -- corrupt RAM = garbage bank.")
+
 
     if pattern:
         e, n = pattern["errs"], pattern["tested"]

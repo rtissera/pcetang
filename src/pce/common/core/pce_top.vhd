@@ -191,6 +191,21 @@ entity pce_top is
 		DBG_CPU_CE  : out std_logic;
 		DBG_IRQ1_N  : out std_logic;
 		DBG_IRQ2_N  : out std_logic;
+		-- PCE PORT (2026-09-07): work-RAM pattern-test hooks. Work RAM has never been
+		-- tested directly, and it is now the prime suspect: hardware shows the CPU
+		-- sweeping ADDRESSES inside nonexistent bank $ED, which is the signature of a
+		-- block transfer (TII/TAI) rather than a wild jump -- and this game assembles
+		-- its TII trampoline IN RAM at $2480 and takes its parameters from RAM. Corrupt
+		-- RAM therefore means executing garbage with garbage operands, exactly as seen.
+		-- Port B of the RAM is otherwise idle after the cold-reset clear sweep (q_b is
+		-- unconnected), so the board borrows it to write a known pattern and read it
+		-- back while the CPU is still held in reset. Same playbook as the SDRAM pattern
+		-- self-test, which is what finally cracked the memory path.
+		RAMTEST_EN : in  std_logic := '0';
+		RAMTEST_A  : in  std_logic_vector(14 downto 0) := (others => '0');
+		RAMTEST_D  : in  std_logic_vector(7 downto 0) := (others => '0');
+		RAMTEST_WE : in  std_logic := '0';
+		RAMTEST_Q  : out std_logic_vector(7 downto 0);
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -413,6 +428,11 @@ signal VRAM1_DI	: std_logic_vector(15 downto 0);
 signal VRAM1_DO	: std_logic_vector(15 downto 0);
 signal VRAM1_WE	: std_logic;
 signal CLR_A	   : std_logic_vector(14 downto 0);
+-- Work RAM port-B mux (clear sweep vs the board's pattern test). Separate signals
+-- because a VHDL-93 port map cannot take a conditional expression.
+signal RAMB_A	   : std_logic_vector(14 downto 0);
+signal RAMB_D	   : std_logic_vector(7 downto 0);
+signal RAMB_WE	   : std_logic;
 signal CLR_WE		: std_logic;
 signal VDC0_BORDER: std_logic;
 signal VDC0_GRID	: std_logic_vector(1 downto 0);
@@ -746,6 +766,10 @@ begin
 	end generate;
 
 end generate;
+
+RAMB_A  <= RAMTEST_A  when RAMTEST_EN = '1' else CLR_A;
+RAMB_D  <= RAMTEST_D  when RAMTEST_EN = '1' else (others => '0');
+RAMB_WE <= RAMTEST_WE when RAMTEST_EN = '1' else CLR_WE;
 
 CLR_A  <= CLR_A + 1  when rising_edge(CLK);
 CLR_WE <= COLD_RESET when rising_edge(CLK);
@@ -1109,9 +1133,12 @@ port map (
 	wren_a	=> CPU_CE and not CPU_RAM_SEL_N and not CPU_WR_N,
 	q_a		=> RAM_DO,
 
-	address_b=> CLR_A,
-	data_b	=> (others => '0'),
-	wren_b	=> CLR_WE
+	-- Port B: the cold-reset clear sweep normally, or the board's pattern test while
+	-- RAMTEST_EN is asserted (core held in reset, so the two never overlap).
+	address_b=> RAMB_A,
+	data_b	=> RAMB_D,
+	wren_b	=> RAMB_WE,
+	q_b		=> RAMTEST_Q
 );
 
 RAM_A(12 downto 0)  <= CPU_A(12 downto 0);

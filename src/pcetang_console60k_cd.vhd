@@ -509,6 +509,7 @@ architecture rtl of pcetang_console60k_cd is
    type vfy_state_t is (VF_IDLE,
                         -- SDRAM pattern self-test phase, runs first (see PAT_BASE)
                         PT_WA, PT_WR, PT_WS, PT_RA, PT_RR, PT_RS, PT_EMIT,
+                        WR_W, WR_R, WR_C, WR_EMIT,
                         VF_REQ, VF_ADDR, VF_SETTLE, VF_WAIT, VF_ACC,
                         VF_EMIT, VF_GAP, VF_RESUME, VF_DONE);
    signal vfy_state   : vfy_state_t := VF_IDLE;
@@ -584,6 +585,23 @@ architecture rtl of pcetang_console60k_cd is
    signal pat_errs    : unsigned(15 downto 0) := (others => '0');
    signal pat_first   : std_logic_vector(15 downto 0) := (others => '0');
    signal pat_done    : std_logic := '0';
+   -- WORK-RAM pattern test (2026-09-07). Runs right after the SDRAM one, still with the
+   -- core in reset, borrowing pce_top's otherwise-idle RAM port B. Work RAM has never
+   -- been verified, and it is now the prime suspect: the CPU is sweeping addresses inside
+   -- nonexistent bank $ED, which is a block transfer's signature, and this game builds
+   -- its TII trampoline in RAM at $2480 with operands from RAM.
+   -- Single-cycle write and read on port B, no handshake needed -- it is on-chip BSRAM.
+   signal wram_en     : std_logic := '0';
+   signal wram_a      : unsigned(14 downto 0) := (others => '0');
+   signal wram_d      : std_logic_vector(7 downto 0) := (others => '0');
+   signal wram_we     : std_logic := '0';
+   signal wram_q      : std_logic_vector(7 downto 0);
+   signal wram_errs   : unsigned(15 downto 0) := (others => '0');
+   signal wram_first  : std_logic_vector(15 downto 0) := (others => '1');
+   signal wram_phase  : unsigned(1 downto 0) := (others => '0');
+   signal wram_done   : std_logic := '0';
+   signal wram_dly    : unsigned(2 downto 0) := (others => '0');
+   constant WRAM_BYTES : integer := 8192;   -- the 8KB a plain HuCard actually uses
 
    signal vfy_pass     : std_logic := '0';
    signal vfy_pass_lat : std_logic := '0';
@@ -1122,9 +1140,60 @@ begin
             when PT_EMIT =>
                pat_active <= '0';
                pat_done   <= '1';
+               wram_en    <= '1';
+               wram_a     <= (others => '0');
+               wram_errs  <= (others => '0');
+               wram_first <= (others => '1');
+               wram_phase <= (others => '0');
                vfy_gap    <= (others => '0');
                vfy_emit   <= '1';
-               vfy_state  <= VF_GAP;   -- reuse the inter-trace gap, then the ROM sweep
+               vfy_state  <= VF_GAP;   -- emit the SDRAM result, then WR_W via VF_RESUME
+
+            -- ---- WORK RAM pattern test: write 8KB, then read it all back.
+            -- Two separate passes (not write-then-read per address) so a byte that reads
+            -- back only because it is still sitting in a pipeline register cannot pass.
+            when WR_W =>
+               wram_we <= '1';
+               wram_d  <= std_logic_vector(wram_a(7 downto 0) xor x"A5");
+               if wram_a = WRAM_BYTES-1 then
+                  wram_a    <= (others => '0');
+                  wram_dly  <= (others => '0');
+                  vfy_state <= WR_R;
+               else
+                  wram_a <= wram_a + 1;
+               end if;
+
+            when WR_R =>
+               wram_we   <= '0';
+               -- dpram registers q_b, so allow a cycle of read latency before comparing
+               wram_dly  <= wram_dly + 1;
+               if wram_dly = "010" then
+                  vfy_state <= WR_C;
+               end if;
+
+            when WR_C =>
+               if wram_q /= std_logic_vector(wram_a(7 downto 0) xor x"A5") then
+                  if wram_errs /= x"FFFF" then
+                     wram_errs <= wram_errs + 1;
+                  end if;
+                  if wram_first = x"FFFF" then
+                     wram_first <= wram_q & std_logic_vector(wram_a(7 downto 0));
+                  end if;
+               end if;
+               if wram_a = WRAM_BYTES-1 then
+                  vfy_state <= WR_EMIT;
+               else
+                  wram_a   <= wram_a + 1;
+                  wram_dly <= (others => '0');
+                  vfy_state <= WR_R;
+               end if;
+
+            when WR_EMIT =>
+               wram_en   <= '0';
+               wram_done <= '1';
+               vfy_gap   <= (others => '0');
+               vfy_emit  <= '1';
+               vfy_state <= VF_GAP;
 
             when VF_REQ =>
                -- Nothing loaded (or a zero-length load): don't sweep, just release.
@@ -1227,7 +1296,10 @@ begin
             when VF_RESUME =>
                if pat_done = '1' then
                   pat_done  <= '0';
-                  vfy_state <= VF_REQ;      -- pattern phase reported; now sweep the ROM
+                  vfy_state <= WR_W;        -- SDRAM reported; now test WORK RAM
+               elsif wram_done = '1' then
+                  wram_done <= '0';
+                  vfy_state <= VF_REQ;      -- work RAM reported; now sweep the ROM
                elsif vfy_is_dump = '1' then
                   vfy_is_dump <= '0';
                   vfy_state   <= VF_REQ;
@@ -1588,6 +1660,8 @@ begin
       -- process near the bottom of this file.
       DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr, DBG_VDC_RDY => dbg_vdc_rdy,
       DBG_CPU_CE => dbg_cpu_ce, DBG_IRQ1_N => dbg_irq1_n, DBG_IRQ2_N => dbg_irq2_n,
+      RAMTEST_EN => wram_en, RAMTEST_A => std_logic_vector(wram_a),
+      RAMTEST_D => wram_d, RAMTEST_WE => wram_we, RAMTEST_Q => wram_q,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -1719,7 +1793,9 @@ begin
             -- which is fine for a debug build but worth knowing before reusing this.
             -- Raw dump lines get tags 0xC0-0xCF, clear of the checksum tags (0x00-0x7F)
             -- and the runtime heartbeat (0x80+).
-            if pat_done = '1' then
+            if wram_done = '1' then
+               dbg_trace_tag <= x"D1";
+            elsif pat_done = '1' then
                dbg_trace_tag <= x"D0";
             elsif vfy_is_dump_lat = '1' then
                dbg_trace_tag <= x"C" & std_logic_vector(vfy_dump_idx_lat);
@@ -1727,7 +1803,14 @@ begin
                dbg_trace_tag <= '0' & vfy_pass_lat & std_logic_vector(vfy_blk_lat(5 downto 0));
             end if;
             -- [63:56] block | [55:24] checksum | [23:2] end address | [1:0] pad
-            if pat_done = '1' then
+            if wram_done = '1' then
+               -- WORK RAM: [63:48] mismatches | [47:32] first bad {got, addr}
+               -- | [31:16] bytes tested | [15:0] 0
+               dbg_trace_data <= std_logic_vector(wram_errs)
+                                 & wram_first
+                                 & std_logic_vector(to_unsigned(WRAM_BYTES,16))
+                                 & x"0000";
+            elsif pat_done = '1' then
                -- [63:48] mismatch count | [47:32] first bad {got, addr}
                -- | [31:16] bytes tested | [15:0] 0
                dbg_trace_data <= std_logic_vector(pat_errs)
