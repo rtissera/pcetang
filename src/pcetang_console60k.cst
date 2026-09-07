@@ -1,5 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// 2026-09-07: DQ pins moved PULL_MODE=NONE -> DOWN. Real hardware read-back of the ROM
+// image, with the SDRAM interface otherwise proven clean (pattern self-test 0/256, write
+// bridge drops 0), still showed 8 of 128 bytes wrong -- and every one of them was the
+// CORRECT byte with only low bits SET, never cleared, always at an odd address:
+//   0x19 e3->ef  0x23 c2->cf  0x3f 00->03  0x4b 85->87
+//   0x4f 64->67  0x5d a9->ab  0x7f 03->0f
+// Odd address = high byte lane, and bits 0-3 there are DQ[8],[9],[10],[11] -- four
+// adjacent pins (B21/A21/B20/A20). Correct-value-plus-set-bits rules out stale data
+// (that would be arbitrary); this is those lines failing to pull DOWN in time. A weak
+// pull-down assists exactly the 1->0 direction that is failing. If this does not help,
+// the next lever is the read capture phase, NOT more clock reduction.
+
 // Tang Console 60K pins for pcetang. clk/key_reset_n/leds_n and the HDMI TMDS pins are
 // real, cross-checked against ../TangNano60K's own Console 60K constraint file
 // (zxnext_console60k.cst, hardware-proven on this same board for a different core) --
@@ -28,37 +40,37 @@ IO_PORT "key_reset_n" IO_TYPE=LVCMOS15 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=1.5;
 // .cst despite the port existing on sdram.sv). Style (IO_TYPE/PULL_MODE only, no
 // DRIVE/BANK_VCCIO) matches pcetang_primer25k.cst's own SDRAM block for consistency.
 IO_LOC  "IO_sdram_dq[0]" E14;
-IO_PORT "IO_sdram_dq[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[0]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[1]" E13;
-IO_PORT "IO_sdram_dq[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[1]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[2]" C15;
-IO_PORT "IO_sdram_dq[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[2]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[3]" C14;
-IO_PORT "IO_sdram_dq[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[3]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[4]" B13;
-IO_PORT "IO_sdram_dq[4]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[4]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[5]" C13;
-IO_PORT "IO_sdram_dq[5]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[5]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[6]" A14;
-IO_PORT "IO_sdram_dq[6]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[6]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[7]" A13;
-IO_PORT "IO_sdram_dq[7]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[7]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[8]" B21;
-IO_PORT "IO_sdram_dq[8]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[8]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[9]" A21;
-IO_PORT "IO_sdram_dq[9]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[9]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[10]" B20;
-IO_PORT "IO_sdram_dq[10]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[10]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[11]" A20;
-IO_PORT "IO_sdram_dq[11]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[11]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[12]" A15;
-IO_PORT "IO_sdram_dq[12]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[12]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[13]" A16;
-IO_PORT "IO_sdram_dq[13]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[13]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[14]" B15;
-IO_PORT "IO_sdram_dq[14]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[14]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 IO_LOC  "IO_sdram_dq[15]" B16;
-IO_PORT "IO_sdram_dq[15]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "IO_sdram_dq[15]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
 
 IO_LOC  "O_sdram_addr[0]" D19;
 IO_PORT "O_sdram_addr[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
