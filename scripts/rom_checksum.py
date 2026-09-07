@@ -76,6 +76,7 @@ def parse_log(path):
                 pattern["first_got"] = (val >> 40) & 0xFF
                 pattern["first_addr"] = (val >> 32) & 0xFF
                 pattern["tested"] = (val >> 16) & 0xFFFF
+                pattern["wr_drops"] = val & 0xFFFF
                 continue
             if 0xC0 <= tag <= 0xCF:
                 dumps[tag - 0xC0] = payload
@@ -121,6 +122,11 @@ def main():
         e, n = pattern["errs"], pattern["tested"]
         print()
         print(f"SDRAM PATTERN SELF-TEST (FPGA-written, no UART): {e} mismatches in {n} bytes")
+        drops = pattern.get("wr_drops", 0)
+        print(f"ROM-LOAD BYTES DROPPED by the write bridge: {drops}")
+        if drops:
+            print("  -> bytes arrived faster than the bridge could write them AND the")
+            print("     holding slot was already full. That many ROM bytes are stale.")
         if e == 0:
             print("  -> The SDRAM interface round-trips its OWN data perfectly.")
             print("     So any ROM corruption is UPSTREAM: UART / iosys / the write bridge,")

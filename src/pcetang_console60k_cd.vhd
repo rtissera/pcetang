@@ -461,6 +461,23 @@ architecture rtl of pcetang_console60k_cd is
    signal rd_wdog        : unsigned(11 downto 0) := (others => '0');
    signal dbg_rd_timeout_cnt : unsigned(15 downto 0) := (others => '0');
 
+   -- ROM-load byte holding register + drop counter (2026-09-07). The write bridge only
+   -- samples rom_do_valid while it is in RB_IDLE. Any byte arriving while it is mid
+   -- transaction was SILENTLY DROPPED -- yet rom_wr_addr (in the other process) still
+   -- incremented, so that address kept whatever stale content SDRAM already held. That
+   -- reads back as a random byte, in BOTH bit directions, scattered through the image --
+   -- exactly what the run-8 dump shows now that the SDRAM interface itself is proven
+   -- clean (pattern self-test: 0 mismatches in 256 bytes).
+   -- One byte of holding is enough by a wide margin: the UART delivers a byte every
+   -- ~214 clk_pce cycles at 2 Mbaud while a write completes in ~25, so the bridge is
+   -- idle >90% of the time and only needs to cover the occasional overlap.
+   -- wr_drop_cnt counts any byte lost even WITH the holding register, so the next run
+   -- reports whether this was really the mechanism instead of leaving it assumed.
+   signal wr_hold_valid  : std_logic := '0';
+   signal wr_hold_data   : std_logic_vector(7 downto 0) := (others => '0');
+   signal wr_hold_addr   : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
+   signal wr_drop_cnt    : unsigned(15 downto 0) := (others => '0');
+
    signal wr_state       : romb_state_t := RB_IDLE;
    signal wr_settle_cnt  : unsigned(5 downto 0) := (others => '0');
    signal wr_seen_wait   : std_logic := '0';
@@ -911,9 +928,31 @@ begin
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
+         -- Capture EVERY incoming byte, whatever the bridge is doing. Sits before the
+         -- case below so a byte arriving in the cycle the bridge goes idle is still taken.
+         -- wr_drop_cnt only increments if a byte arrives while the single holding slot is
+         -- ALREADY occupied -- a real, counted loss instead of a silent one.
+         if rom_do_valid = '1' then
+            if wr_state = RB_IDLE and wr_hold_valid = '0' then
+               null;  -- goes straight into the bridge in the case below this cycle
+            elsif wr_hold_valid = '0' then
+               wr_hold_valid <= '1';
+               wr_hold_data  <= rom_do;
+               wr_hold_addr  <= rom_wr_addr;
+            elsif wr_drop_cnt /= x"FFFF" then
+               wr_drop_cnt <= wr_drop_cnt + 1;
+            end if;
+         end if;
+
          case wr_state is
             when RB_IDLE =>
-               if rom_do_valid = '1' then
+               if wr_hold_valid = '1' then
+                  -- drain the held byte first so ordering is preserved
+                  wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(wr_hold_addr, 25));
+                  wr_data <= wr_hold_data;
+                  wr_hold_valid <= '0';
+                  wr_state <= RB_ADDR;
+               elsif rom_do_valid = '1' then
                   wr_addr <= std_logic_vector(ROM_SDRAM_BASE + resize(rom_wr_addr, 25));
                   wr_data <= rom_do;
                   wr_state <= RB_ADDR;
@@ -1637,7 +1676,7 @@ begin
                dbg_trace_data <= std_logic_vector(pat_errs)
                                  & pat_first
                                  & std_logic_vector(to_unsigned(PAT_BYTES,16))
-                                 & x"0000";
+                                 & std_logic_vector(wr_drop_cnt);
             elsif vfy_is_dump_lat = '1' then
                -- 8 raw SDRAM bytes, MSB first = ascending address order.
                dbg_trace_data <= vfy_dump_lat;
