@@ -129,6 +129,14 @@ def main():
     passes, beats, dumps, pattern, wram, trap = parse_log(args.log)
 
     if trap:
+        entries = [e for pair in trap for e in pair]
+        if not any(entries):
+            print()
+            print("DERAILMENT TRAP: fired, but the capture buffer is ALL ZEROS -- nothing")
+            print("was ever recorded, so there is no verdict here. Do not read the byte")
+            print("comparison below as evidence; fix the capture trigger first.")
+            trap = []
+    if trap:
         print()
         print("DERAILMENT TRAP -- last ROM bytes the CPU actually received before it")
         print("entered a nonexistent bank (newest first):")

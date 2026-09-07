@@ -454,6 +454,11 @@ architecture rtl of pcetang_console60k_cd is
    signal rd_state       : romb_state_t := RB_IDLE;
    signal rd_settle_cnt  : unsigned(5 downto 0) := (others => '0');
    signal rd_seen_wait   : std_logic := '0';
+   -- One-cycle pulse when the bridge latches a byte for the CPU. The trap's first
+   -- version sampled on `rd_state = RB_SETTLE and rom_rdy_i = '1'`, which is never
+   -- true: rom_rdy_i is held LOW for the whole of RB_SETTLE and only rises at
+   -- completion. The buffer came back all zeros as a result.
+   signal rd_done        : std_logic := '0';
    signal rd_req         : std_logic := '0';
    signal rd_addr        : std_logic_vector(24 downto 0);
    -- Watchdog + its escape counter -- see the read bridge's header for why a CDC fix
@@ -1388,6 +1393,7 @@ begin
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
+         rd_done <= '0';
          case rd_state is
             when RB_IDLE =>
                rom_rdy_i <= '1';
@@ -1417,6 +1423,7 @@ begin
                   -- its 4-byte line cache, which legitimately never asserts WAIT.
                   rom_do_i  <= romb_do;
                   rom_rdy_i <= '1';
+                  rd_done   <= '1';
                   rd_state  <= RB_IDLE;
                else
                   rd_settle_cnt <= rd_settle_cnt + 1;
@@ -1427,6 +1434,7 @@ begin
                if romb_wait = '0' then
                   rom_do_i <= romb_do;
                   rom_rdy_i <= '1';
+                  rd_done  <= '1';
                   rd_state <= RB_IDLE;
                elsif rd_wdog = x"3FF" then
                   -- ~1024 clk_pce cycles (~24 us) is orders of magnitude beyond any real
@@ -1918,8 +1926,8 @@ begin
             trap_fired <= '0';
          else
             -- record each completed CPU ROM fetch until the trap fires
-            if trap_fired = '0' and rd_state = RB_SETTLE and rom_rdy_i = '1' then
-               trap_buf(0) <= rom_a(15 downto 0) & rom_do_i;
+            if trap_fired = '0' and rd_done = '1' then
+               trap_buf(0) <= rd_addr(15 downto 0) & romb_do;
                for i in 1 to 7 loop
                   trap_buf(i) <= trap_buf(i-1);
                end loop;
