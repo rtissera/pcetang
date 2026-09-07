@@ -600,6 +600,24 @@ architecture rtl of pcetang_console60k_cd is
    signal wram_first  : std_logic_vector(15 downto 0) := (others => '1');
    signal wram_phase  : unsigned(1 downto 0) := (others => '0');
    signal wram_done   : std_logic := '0';
+
+   -- DERAILMENT TRAP (2026-09-07). Every ROM verification so far runs with the CPU in
+   -- RESET -- no VDC, no video, no contention -- and passes. The CPU reads ROM under
+   -- completely different conditions, and that is the one path never checked. This keeps
+   -- a rolling window of the last 8 bytes the CPU actually RECEIVED from the ROM bridge,
+   -- and freezes it the instant CPU_A lands in a bank that does not exist on a PCE
+   -- (valid: $00-$7F ROM, $80-$87 CD-RAM, $F7 BRAM, $F8-$FB work RAM, $FF I/O).
+   -- Comparing those bytes against the .pce offline says whether the CPU was fed
+   -- corrupt data at the moment it went off the rails, or whether it was fed correct
+   -- data and mis-executed it.
+   type trap_arr is array (0 to 7) of std_logic_vector(23 downto 0);  -- addr(15:0) & data
+   signal trap_buf   : trap_arr := (others => (others => '0'));
+   signal trap_fired : std_logic := '0';
+   signal trap_sent  : unsigned(1 downto 0) := (others => '0');
+   signal trap_emit  : std_logic := '0';
+   signal trap_gap   : unsigned(19 downto 0) := (others => '0');
+   signal cpu_bank   : std_logic_vector(7 downto 0);
+   signal bank_bad   : std_logic;
    signal wram_dly    : unsigned(2 downto 0) := (others => '0');
    constant WRAM_BYTES : integer := 8192;   -- the 8KB a plain HuCard actually uses
 
@@ -1831,6 +1849,7 @@ begin
          elsif core_resetn = '0' then
             dbg_fetch_cnt <= (others => '0');
             dbg_hb_cnt    <= (others => '0');
+            trap_sent     <= (others => '0');
          else
             dbg_hb_cnt <= dbg_hb_cnt + 1;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
@@ -1838,7 +1857,18 @@ begin
             -- released, and the heartbeat comes LAST -- so if the log were ever
             -- truncated it is the VDC count, the more valuable half, that would be lost.
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
-            if dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
+            -- Once the trap has fired, spend the next three heartbeat slots emitting the
+            -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
+            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 3 then
+               trap_sent     <= trap_sent + 1;
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= x"E" & "00" & std_logic_vector(trap_sent);
+               case trap_sent is
+                  when "00" => dbg_trace_data <= trap_buf(0) & trap_buf(1) & "0000000000000000";
+                  when "01" => dbg_trace_data <= trap_buf(2) & trap_buf(3) & "0000000000000000";
+                  when others => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
+               end case;
+            elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
                -- 0x80+ so heartbeat tags can never be confused with a block checksum.
                dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt or x"80");
@@ -1877,6 +1907,30 @@ begin
    -- gated on core_resetn (the CPU actually running), NOT on reset_n -- earlier probe
    -- rounds produced false positives precisely because reset_n-gated counters latch
    -- during the SDRAM's own power-on init, before anything real has happened.
+   -- Rolling window of bytes actually delivered to the CPU, frozen on derailment.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         -- trap_sent is driven ONLY by the heartbeat process below (it is the emitter);
+         -- resetting it here too gave ERROR (EX2000) "constantly driven from multiple
+         -- places". Single driver per signal.
+         if core_resetn = '0' then
+            trap_fired <= '0';
+         else
+            -- record each completed CPU ROM fetch until the trap fires
+            if trap_fired = '0' and rd_state = RB_SETTLE and rom_rdy_i = '1' then
+               trap_buf(0) <= rom_a(15 downto 0) & rom_do_i;
+               for i in 1 to 7 loop
+                  trap_buf(i) <= trap_buf(i-1);
+               end loop;
+            end if;
+            if trap_fired = '0' and bank_bad = '1' then
+               trap_fired <= '1';   -- CPU just entered a nonexistent bank: freeze
+            end if;
+         end if;
+      end if;
+   end process;
+
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
@@ -1911,6 +1965,14 @@ begin
    -- address currently in wram_a, so address/data/we all present together.
    wram_we <= '1' when vfy_state = WR_W else '0';
    wram_d  <= std_logic_vector(wram_a(7 downto 0) xor x"A5");
+
+   cpu_bank <= dbg_cpu_a(20 downto 13);
+   bank_bad <= '0' when unsigned(cpu_bank) <= 16#7F#                                  -- ROM
+               else '0' when unsigned(cpu_bank) >= 16#80# and unsigned(cpu_bank) <= 16#87#  -- CD-RAM
+               else '0' when cpu_bank = x"F7"                                          -- BRAM
+               else '0' when unsigned(cpu_bank) >= 16#F8# and unsigned(cpu_bank) <= 16#FB#  -- work RAM
+               else '0' when cpu_bank = x"FF"                                          -- I/O
+               else '1';
 
    cdr_busy_bit <= '0' when cdr_state = CDR_IDLE else '1';
 

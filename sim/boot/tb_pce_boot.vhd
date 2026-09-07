@@ -38,6 +38,8 @@ entity tb_pce_boot is
 		TRACE_N    : integer := 0;
 		-- Skip this many CPU bus cycles before TRACE_N starts printing.
 		TRACE_SKIP : integer := 0;
+		-- Start dumping raw CPU bus cycles once this many VDC0 writes have happened.
+		DUMP_AFTER_VDC : integer := 0;
 		-- ROM read latency in clk_pce cycles. 0 = ideal zero-wait memory (ROM_RDY tied
 		-- '1'). Nonzero mimics the SHAPE of pcetang_console60k_cd.vhd's read bridge:
 		-- ROM_RDY drops while ROM_RD is asserted, the data is registered, and ROM_RDY
@@ -407,7 +409,12 @@ begin
 			if cpu_ce = '1' then
 				if cpu_rd_n = '0' or cpu_wr_n = '0' then
 					n_bus := n_bus + 1;
-					if n_bus > TRACE_SKIP and traced < TRACE_N then
+					-- Dump every bus cycle once the VDC write count reaches DUMP_AFTER_VDC.
+					-- Hardware stops at exactly 10 VDC writes and then runs off into
+					-- physical bank $ED, so this shows what the WORKING core does at the
+					-- same instant -- the one comparison that can name the divergence.
+					if DUMP_AFTER_VDC > 0 and n_vdc0_wr >= DUMP_AFTER_VDC
+					   and traced < TRACE_N then
 						traced := traced + 1;
 						write(l, string'("BUS "));
 						write(l, n_bus);

@@ -62,6 +62,7 @@ def parse_log(path):
     dumps = {}
     pattern = {}
     wram = {}
+    trap = []
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -71,6 +72,10 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if 0xE0 <= tag <= 0xE2:
+                val = int.from_bytes(payload, "big")
+                trap.append(((val >> 40) & 0xFFFFFF, (val >> 16) & 0xFFFFFF))
+                continue
             if tag == 0xD1:
                 val = int.from_bytes(payload, "big")
                 wram["errs"] = (val >> 48) & 0xFFFF
@@ -99,7 +104,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram
+    return passes, beats, dumps, pattern, wram, trap
 
 
 def main():
@@ -121,7 +126,34 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap = parse_log(args.log)
+
+    if trap:
+        print()
+        print("DERAILMENT TRAP -- last ROM bytes the CPU actually received before it")
+        print("entered a nonexistent bank (newest first):")
+        bad = 0
+        for pair in trap:
+            for entry in pair:
+                a_ = (entry >> 8) & 0xFFFF
+                d_ = entry & 0xFF
+                exp = data[a_] if a_ < len(data) else None
+                if exp is None:
+                    continue
+                mark = "" if d_ == exp else f"   <-- FILE HAS {exp:02x}"
+                if d_ != exp:
+                    bad += 1
+                print(f"    ROM {a_:#06x} -> CPU got {d_:02x}{mark}")
+        print()
+        if bad:
+            print(f"  {bad} of the delivered bytes are WRONG. The CPU was fed corrupt data")
+            print("  under load, even though the same ROM verifies perfectly when swept")
+            print("  with the CPU held in reset. The read path fails only under contention.")
+        else:
+            print("  Every delivered byte matches the file. The CPU received CORRECT data")
+            print("  and still derailed -- so the fault is in the core's execution, not")
+            print("  in the memory path.")
+
 
     if wram:
         e, n = wram["errs"], wram["tested"]
