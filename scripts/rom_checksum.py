@@ -83,17 +83,10 @@ def parse_log(path):
                 continue
             if tag >= 0x80:
                 beats.append({
-                    "vdc": (val >> 32) & MASK,
-                    "timeouts": (val >> 24) & 0xFF,
-                    "cdr_timeouts": (val >> 20) & 0xF,
-                    "cd_ram_rdy": (val >> 19) & 1,
-                    "cdr_busy": (val >> 18) & 1,
-                    "cd_ram_rd": (val >> 17) & 1,
-                    "vdc_stall": (val >> 16) & 1,
-                    "rd_state": (val >> 14) & 0x3,
-                    "rom_rd": (val >> 13) & 1,
-                    "rom_rdy": (val >> 12) & 1,
-                    "romb_wait": (val >> 11) & 1,
+                    "vdc": (val >> 48) & 0xFFFF,
+                    "irq1": (val >> 32) & 0xFFFF,
+                    "cpu_ce": (val >> 16) & 0xFFFF,
+                    "cpu_a_hi": (val >> 11) & 0x1F,
                     "vbl": val & 0x7FF,
                 })
                 continue
@@ -214,56 +207,31 @@ def main():
 
     if beats:
         vdc = [b["vdc"] for b in beats]
+        ce  = [b["cpu_ce"] for b in beats]
+        irq = [b["irq1"] for b in beats]
         last = beats[-1]
-        states = {0: "IDLE", 1: "SETTLE", 2: "WAIT"}
         print()
-        print(f"heartbeat: {len(beats)} samples, VDC write count "
-              f"{vdc[0]} -> {vdc[-1]}, VBLANK {last['vbl']}")
-        print(f"        rd_state={states.get(last['rd_state'], '?')} "
-              f"rom_rdy={last['rom_rdy']} romb_wait={last['romb_wait']}  "
-              f"ROM-read watchdog timeouts={last['timeouts']}")
-        print(f"        port-C: cd_ram_rdy={last['cd_ram_rdy']} "
-              f"busy={last['cdr_busy']} cd_ram_rd={last['cd_ram_rd']} "
-              f"timeouts={last['cdr_timeouts']}")
-        print(f"        VDC stalled the CPU (RDY low, sticky): {last['vdc_stall']}")
-        if last["vdc_stall"]:
-            print("        *** a VDC held BUSY -- that is pce_top's RDY input, a stall")
-            print("            path SEPARATE from WAIT_N. The CPU can freeze here with")
-            print("            every memory path perfectly healthy. Prime suspect is VDC1")
-            print("            (LITE=0/SGX=1 keeps it and VRAM1 alive on a plain HuCard).")
-        if last["cd_ram_rdy"] == 0:
-            print("        *** cd_ram_rdy is LOW -- this is the other term of WAIT_N, so")
-            print("            the CPU is frozen by the port-C arbiter, not the ROM path.")
-        if last["timeouts"] == 0 and last["rd_state"] != 2:
-            print("        ROM read path healthy: no stalled reads, bridge not parked "
-                  "in WAIT.")
-        elif last["timeouts"]:
-            print(f"        *** {last['timeouts']} ROM reads STALLED and were escaped by "
-                  f"the watchdog.\n        The deadlock is NOT fixed. The watchdog "
-                  f"released the CPU with whatever byte\n        was on the bus, so it "
-                  f"kept running ON CORRUPT DATA -- treat EVERYTHING else\n        in "
-                  f"this run (VDC count, checksums, picture) as untrustworthy.")
-        if last["rd_state"] == 2 and last["romb_wait"]:
-            print("        *** bridge parked in RB_WAIT with romb_wait high -- SDRAM "
-                  "read never completed.")
-        if vdc[-1] == 0:
-            print("        VDC write count is FLAT ZERO -- the CPU never reached the "
-                  "code that\n        programs the VDC. The fault is UPSTREAM of the "
-                  "video path.")
+        print(f"heartbeat: {len(beats)} samples")
+        print(f"  VDC writes  {vdc[0]} -> {vdc[-1]}")
+        print(f"  CPU_CE      {ce[0]} -> {ce[-1]}   (16-bit, wraps)")
+        print(f"  IRQ1 asserts{irq[0]:>7} -> {irq[-1]}")
+        print(f"  VBLANK      {beats[0]['vbl']} -> {last['vbl']}")
+        print(f"  CPU_A[20:16] last = 0x{last['cpu_a_hi']:02x}")
+        print()
+        moving = len(set(ce)) > 1
+        if not moving:
+            print("  CPU_CE IS NOT MOVING -- the CPU is genuinely halted, with nothing")
+            print("  asserting a stall. Look at clock/CE generation, not memory.")
         elif len(set(vdc)) == 1:
-            print(f"        VDC write count is FROZEN at {vdc[-1]} across every sample "
-                  f"-- the CPU\n        started programming the VDC and then STOPPED. "
-                  f"For reference the GHDL\n        sim reaches 3335 by 20ms and 17772 "
-                  f"by 76ms, still climbing.")
+            if len(set(irq)) > 1:
+                print("  CPU IS RUNNING but VDC writes are flat while IRQ1 keeps asserting")
+                print("  -> INTERRUPT STORM. The CPU is stuck in a handler it cannot clear.")
+            else:
+                print("  CPU IS RUNNING, IRQ1 quiet, VDC writes flat -> the CPU is looping")
+                print("  in ordinary code. CPU_A[20:16] says which region; diff vs the sim.")
         else:
-            print("        VDC write count is CLIMBING -- the CPU is running and "
-                  "programming the\n        VDC, so the fault is DOWNSTREAM (video path "
-                  "/ HDMI).\n        For reference the GHDL sim reaches 3335 by 20ms, "
-                  "17772 by 76ms.")
-    else:
-        print("\nheartbeat: no RTL[80+] samples in the log -- the core may never have "
-              "been released.")
-
+            print("  VDC writes CLIMBING and CPU running -- the core is executing the game.")
+            print("  Sim reference: 3335 VDC writes by 20ms, 17772 by 76ms.")
     return 1 if (bad_vs_file or disagree) else 0
 
 

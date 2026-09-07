@@ -184,6 +184,13 @@ entity pce_top is
 		-- reached: ROM image byte-perfect, rd_state IDLE, cd_ram_rdy high, and the VDC
 		-- write count stuck at 10. Exposed so the board can trace it.
 		DBG_VDC_RDY : out std_logic;
+		-- CPU execution heartbeat + IRQ visibility. "VDC writes stopped" does NOT mean
+		-- the CPU stopped -- it can be running full speed inside an interrupt handler it
+		-- can never leave. DBG_CPU_CE counting while DBG_VDC_WR stays flat says exactly
+		-- that, and DBG_IRQ1_N/DBG_IRQ2_N name which line is doing it.
+		DBG_CPU_CE  : out std_logic;
+		DBG_IRQ1_N  : out std_logic;
+		DBG_IRQ2_N  : out std_logic;
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -1060,6 +1067,9 @@ ROM_CLKEN <= CPU_CLKEN;
 DBG_CPU_A  <= CPU_A;
 DBG_VDC_WR <= CPU_CE and not CPU_WR_N and not CPU_VDC0_SEL_N;
 DBG_VDC_RDY <= VDC0_BUSY_N and VDC1_BUSY_N;
+DBG_CPU_CE  <= CPU_CE;
+DBG_IRQ1_N  <= VDC0_IRQ_N and VDC1_IRQ_N;
+DBG_IRQ2_N  <= CD_IRQ_N;
 
 process( CLK ) begin
 	if rising_edge( CLK ) then

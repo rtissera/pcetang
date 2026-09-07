@@ -596,6 +596,12 @@ architecture rtl of pcetang_console60k_cd is
    -- missed between 100 ms heartbeats.
    signal dbg_vdc_rdy : std_logic;
    signal dbg_vdc_stall : std_logic := '0';
+   signal dbg_cpu_ce    : std_logic;
+   signal dbg_irq1_n    : std_logic;
+   signal dbg_irq2_n    : std_logic;
+   signal dbg_cpu_cyc   : unsigned(15 downto 0) := (others => '0');
+   signal dbg_irq1_cnt  : unsigned(15 downto 0) := (others => '0');
+   signal dbg_irq1_r    : std_logic := '1';
    signal dbg_vdc_cnt : unsigned(31 downto 0) := (others => '0');
    signal dbg_vbl_r   : std_logic := '0';
    signal dbg_vbl_cnt : unsigned(15 downto 0) := (others => '0');
@@ -1557,7 +1563,16 @@ begin
    );
 
    core: entity work.pce_top
-   generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => 0)
+   -- LITE => 1 (2026-09-07): drop SuperGrafx for HuCard bring-up. LITE=0 keeps VDC1 and
+   -- its 32K-word VRAM1 alive, and BOTH of VDC1's control lines are ANDed into the CPU's:
+   -- `RDY => VDC0_BUSY_N and VDC1_BUSY_N` and `IRQ1_N => VDC0_IRQ_N and VDC1_IRQ_N`. A
+   -- plain HuCard never programs VDC1 and its handler at $E065 reads VDC0's status only,
+   -- so it can never clear a VDC1 interrupt -- the same failure class as the CD_EN/IRQ2
+   -- storm found at the start of this investigation, one AND gate over.
+   -- generate_NOSGX ties both to '1', and this also frees VRAM1 from a build already at
+   -- 112/118 BSRAM, which session notes flag as a real Gowin inference hazard here.
+   -- Costs SuperGrafx support: five games, none of which run today.
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
@@ -1572,6 +1587,7 @@ begin
       -- TEMP DEBUG (2026-09-06): see pce_top.vhd's own port comments and the trace
       -- process near the bottom of this file.
       DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr, DBG_VDC_RDY => dbg_vdc_rdy,
+      DBG_CPU_CE => dbg_cpu_ce, DBG_IRQ1_N => dbg_irq1_n, DBG_IRQ2_N => dbg_irq2_n,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -1755,14 +1771,15 @@ begin
                -- | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait | [10:0] VBLANK
                -- Run 11 froze with the ROM path provably healthy, so the port-C side --
                -- which owns cd_ram_rdy_i, the other term of WAIT_N -- is now visible too.
-               dbg_trace_data <= std_logic_vector(dbg_vdc_cnt)
-                                 & std_logic_vector(dbg_rd_timeout_cnt(7 downto 0))
-                                 & std_logic_vector(dbg_cdr_timeout_cnt(3 downto 0))
-                                 & cd_ram_rdy_i
-                                 & cdr_busy_bit
-                                 & cd_ram_rd & dbg_vdc_stall
-                                 & rd_state_bits
-                                 & rom_rd_i & rom_rdy_i & romb_wait
+               -- Every memory and stall path is now proven healthy on hardware, so the
+               -- payload is repurposed to the only question left: is the CPU running,
+               -- and if so what is it running?
+               -- [63:48] VDC writes | [47:32] IRQ1 assertions | [31:16] CPU_CE count
+               -- | [15:11] CPU_A(20:16) | [10:0] VBLANK
+               dbg_trace_data <= std_logic_vector(dbg_vdc_cnt(15 downto 0))
+                                 & std_logic_vector(dbg_irq1_cnt)
+                                 & std_logic_vector(dbg_cpu_cyc)
+                                 & dbg_cpu_a(20 downto 16)
                                  & std_logic_vector(dbg_vbl_cnt(10 downto 0));
             end if;
          end if;
@@ -1786,6 +1803,14 @@ begin
             end if;
             if dbg_vdc_rdy = '0' then
                dbg_vdc_stall <= '1';   -- sticky: a VDC stalled the CPU at least once
+            end if;
+            -- Is the CPU executing at all, and is it being interrupted to death?
+            if dbg_cpu_ce = '1' then
+               dbg_cpu_cyc <= dbg_cpu_cyc + 1;
+            end if;
+            dbg_irq1_r <= dbg_irq1_n;
+            if dbg_irq1_n = '0' and dbg_irq1_r = '1' then
+               dbg_irq1_cnt <= dbg_irq1_cnt + 1;
             end if;
             if video_vbl = '1' and dbg_vbl_r = '0' then
                dbg_vbl_cnt <= dbg_vbl_cnt + 1;

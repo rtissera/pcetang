@@ -827,6 +827,7 @@ begin
       -- port comments). Explicitly `open` here rather than omitted, matching this
       -- file's style for every other unused pce_top output.
       DBG_CPU_A => open, DBG_VDC_WR => open, DBG_VDC_RDY => open,
+      DBG_CPU_CE => open, DBG_IRQ1_N => open, DBG_IRQ2_N => open,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
