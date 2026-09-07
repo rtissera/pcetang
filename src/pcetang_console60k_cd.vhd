@@ -928,22 +928,6 @@ begin
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
-         -- Capture EVERY incoming byte, whatever the bridge is doing. Sits before the
-         -- case below so a byte arriving in the cycle the bridge goes idle is still taken.
-         -- wr_drop_cnt only increments if a byte arrives while the single holding slot is
-         -- ALREADY occupied -- a real, counted loss instead of a silent one.
-         if rom_do_valid = '1' then
-            if wr_state = RB_IDLE and wr_hold_valid = '0' then
-               null;  -- goes straight into the bridge in the case below this cycle
-            elsif wr_hold_valid = '0' then
-               wr_hold_valid <= '1';
-               wr_hold_data  <= rom_do;
-               wr_hold_addr  <= rom_wr_addr;
-            elsif wr_drop_cnt /= x"FFFF" then
-               wr_drop_cnt <= wr_drop_cnt + 1;
-            end if;
-         end if;
-
          case wr_state is
             when RB_IDLE =>
                if wr_hold_valid = '1' then
@@ -986,6 +970,26 @@ begin
                   wr_state <= RB_IDLE;
                end if;
          end case;
+
+         -- Capture the incoming byte AFTER the case above, deliberately. Placed before
+         -- it (as first written) this raced: when the bridge sat in RB_IDLE draining the
+         -- held byte and a new byte arrived the same cycle, the capture saw the stale
+         -- wr_hold_valid='1', counted a drop, and the byte really was lost -- RB_IDLE
+         -- takes the HELD byte, not the new one. That race is what saturated
+         -- wr_drop_cnt at 65535 on run 9. Ordered after the case, RB_IDLE's
+         -- `wr_hold_valid <= '0'` is overridden here in the same cycle, so the slot is
+         -- freed and refilled atomically and nothing is lost.
+         if rom_do_valid = '1' then
+            if wr_state = RB_IDLE and wr_hold_valid = '0' then
+               null;   -- the case above took it straight into the bridge
+            elsif wr_hold_valid = '0' or wr_state = RB_IDLE then
+               wr_hold_valid <= '1';
+               wr_hold_data  <= rom_do;
+               wr_hold_addr  <= rom_wr_addr;
+            elsif wr_drop_cnt /= x"FFFF" then
+               wr_drop_cnt <= wr_drop_cnt + 1;
+            end if;
+         end if;
       end if;
    end process;
 
