@@ -434,8 +434,26 @@ architecture rtl of pcetang_console60k_cd is
    -- cycle of setup before the request toggles.
    type romb_state_t is (RB_IDLE, RB_ADDR, RB_SETTLE, RB_WAIT);
 
+   -- REAL FIX 2026-09-06/07: the "toggle request, count 5 cycles, then sample romb_wait"
+   -- handshake every bridge here used is UNSOUND, and the 2-flop WAIT synchroniser added
+   -- earlier made it worse by delaying WAIT another 2 clk_pce without the settle being
+   -- extended to match. If WAIT has not risen yet when the counter expires, the bridge
+   -- concludes "done", latches stale data, and immediately toggles the request again --
+   -- and on sdram.sv's XOR-detected port B that second toggle CANCELS the still-pending
+   -- first request. The FPGA-written pattern self-test caught it outright: 88 of 256
+   -- bytes wrong with no UART or loader in the path at all, first failure "wrote 0x5A,
+   -- read 0x00" (i.e. the write never landed). The loader was never the problem -- it
+   -- only looked healthier because UART pacing spaces its writes ~214 cycles apart,
+   -- while the self-test issues them back to back.
+   --
+   -- Replaced by a real handshake: latch the fact that WAIT was ever observed HIGH, and
+   -- only call the transaction complete when it has gone high and come back low. The
+   -- cache-hit path in sdram.sv never raises WAIT at all, so that case is covered by a
+   -- generous fixed delay instead (SETTLE_HIT) rather than by a 5-cycle guess.
+   constant SETTLE_HIT : unsigned(5 downto 0) := "010000";  -- 16 clk_pce, hit-path only
    signal rd_state       : romb_state_t := RB_IDLE;
-   signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal rd_settle_cnt  : unsigned(5 downto 0) := (others => '0');
+   signal rd_seen_wait   : std_logic := '0';
    signal rd_req         : std_logic := '0';
    signal rd_addr        : std_logic_vector(24 downto 0);
    -- Watchdog + its escape counter -- see the read bridge's header for why a CDC fix
@@ -444,7 +462,8 @@ architecture rtl of pcetang_console60k_cd is
    signal dbg_rd_timeout_cnt : unsigned(15 downto 0) := (others => '0');
 
    signal wr_state       : romb_state_t := RB_IDLE;
-   signal wr_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal wr_settle_cnt  : unsigned(5 downto 0) := (others => '0');
+   signal wr_seen_wait   : std_logic := '0';
    signal wr_req         : std_logic := '0';
    signal wr_addr        : std_logic_vector(24 downto 0);
    signal wr_data        : std_logic_vector(7 downto 0);
@@ -482,7 +501,8 @@ architecture rtl of pcetang_console60k_cd is
    signal vfy_len     : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal vfy_sum     : unsigned(31 downto 0) := (others => '0');
    signal vfy_blk     : unsigned(7 downto 0) := (others => '0');
-   signal vfy_settle  : unsigned(2 downto 0) := (others => '0');
+   signal vfy_settle  : unsigned(5 downto 0) := (others => '0');
+   signal vfy_seen_wait : std_logic := '0';
    -- Bounded so a stuck SDRAM can never keep the core in reset forever: on timeout the
    -- sweep gives up, emits what it has, and releases the core anyway.
    signal vfy_timeout : unsigned(11 downto 0) := (others => '0');
@@ -541,7 +561,8 @@ architecture rtl of pcetang_console60k_cd is
    signal pat_addr    : unsigned(8 downto 0) := (others => '0');
    signal pat_data    : std_logic_vector(7 downto 0) := (others => '0');
    signal pat_req     : std_logic := '0';
-   signal pat_settle  : unsigned(2 downto 0) := (others => '0');
+   signal pat_settle  : unsigned(5 downto 0) := (others => '0');
+   signal pat_seen_wait : std_logic := '0';
    signal pat_wdog    : unsigned(11 downto 0) := (others => '0');
    signal pat_errs    : unsigned(15 downto 0) := (others => '0');
    signal pat_first   : std_logic_vector(15 downto 0) := (others => '0');
@@ -905,15 +926,18 @@ begin
             when RB_ADDR =>
                wr_req  <= not wr_req;
                wr_settle_cnt <= (others => '0');
+               wr_seen_wait  <= '0';
                wr_state <= RB_SETTLE;
 
             when RB_SETTLE =>
-               if wr_settle_cnt = "100" then
-                  if romb_wait = '1' then
-                     wr_state <= RB_WAIT;
-                  else
-                     wr_state <= RB_IDLE;
-                  end if;
+               -- Same real handshake as the read bridge. A write NEVER hits the cache
+               -- path (sdram.sv excludes RAM_B_WE from it), so WAIT must rise; the
+               -- SETTLE_HIT arm here is a safety net, not an expected path.
+               if romb_wait = '1' then
+                  wr_seen_wait <= '1';
+                  wr_state     <= RB_WAIT;
+               elsif wr_settle_cnt = SETTLE_HIT then
+                  wr_state <= RB_IDLE;
                else
                   wr_settle_cnt <= wr_settle_cnt + 1;
                end if;
@@ -968,14 +992,18 @@ begin
             when PT_WR =>
                pat_req   <= not pat_req;
                pat_settle<= (others => '0');
+               pat_seen_wait <= '0';
                pat_wdog  <= (others => '0');
                vfy_state <= PT_WS;
 
             when PT_WS =>
-               if pat_settle = "100" then
-                  pat_wdog <= pat_wdog + 1;
-                  if romb_wait = '0' then
+               if romb_wait = '1' then
+                  pat_seen_wait <= '1';
+               end if;
+               if (pat_seen_wait = '1' and romb_wait = '0')
+                  or (pat_seen_wait = '0' and pat_settle = SETTLE_HIT) then
                      pat_we <= '0';
+                     pat_seen_wait <= '0';
                      if pat_addr = PAT_BYTES-1 then
                         pat_addr  <= (others => '0');
                         vfy_state <= PT_RA;      -- writes done, read them back
@@ -983,12 +1011,12 @@ begin
                         pat_addr  <= pat_addr + 1;
                         vfy_state <= PT_WA;
                      end if;
-                  elsif pat_wdog = x"FFF" then
-                     pat_we <= '0';
-                     vfy_state <= PT_EMIT;       -- SDRAM never answered; report
-                  end if;
+               elsif pat_wdog = x"FFF" then
+                  pat_we <= '0';
+                  vfy_state <= PT_EMIT;       -- SDRAM never answered; report
                else
                   pat_settle <= pat_settle + 1;
+                  pat_wdog   <= pat_wdog + 1;
                end if;
 
             -- ---- pattern READ-BACK and compare
@@ -999,13 +1027,17 @@ begin
             when PT_RR =>
                pat_req   <= not pat_req;
                pat_settle<= (others => '0');
+               pat_seen_wait <= '0';
                pat_wdog  <= (others => '0');
                vfy_state <= PT_RS;
 
             when PT_RS =>
-               if pat_settle = "100" then
-                  pat_wdog <= pat_wdog + 1;
-                  if romb_wait = '0' then
+               if romb_wait = '1' then
+                  pat_seen_wait <= '1';
+               end if;
+               if (pat_seen_wait = '1' and romb_wait = '0')
+                  or (pat_seen_wait = '0' and pat_settle = SETTLE_HIT) then
+                     pat_seen_wait <= '0';
                      if romb_do /= std_logic_vector(pat_addr(7 downto 0) xor x"5A") then
                         pat_errs <= pat_errs + 1;
                         if pat_first = x"FFFF" then
@@ -1019,11 +1051,11 @@ begin
                         pat_addr  <= pat_addr + 1;
                         vfy_state <= PT_RA;
                      end if;
-                  elsif pat_wdog = x"FFF" then
-                     vfy_state <= PT_EMIT;
-                  end if;
+               elsif pat_wdog = x"FFF" then
+                  vfy_state <= PT_EMIT;
                else
                   pat_settle <= pat_settle + 1;
+                  pat_wdog   <= pat_wdog + 1;
                end if;
 
             when PT_EMIT =>
@@ -1046,16 +1078,16 @@ begin
             when VF_ADDR =>
                vfy_req     <= not vfy_req;
                vfy_settle  <= (others => '0');
+               vfy_seen_wait <= '0';
                vfy_timeout <= (others => '0');
                vfy_state   <= VF_SETTLE;
 
             when VF_SETTLE =>
-               if vfy_settle = "100" then
-                  if romb_wait = '1' then
-                     vfy_state <= VF_WAIT;
-                  else
-                     vfy_state <= VF_ACC;
-                  end if;
+               if romb_wait = '1' then
+                  vfy_seen_wait <= '1';
+                  vfy_state     <= VF_WAIT;
+               elsif vfy_settle = SETTLE_HIT then
+                  vfy_state <= VF_ACC;
                else
                   vfy_settle <= vfy_settle + 1;
                end if;
@@ -1217,18 +1249,22 @@ begin
                -- Address settled last cycle; only now toggle the request.
                rd_req <= not rd_req;
                rd_settle_cnt <= (others => '0');
+               rd_seen_wait  <= '0';
                rd_wdog <= (others => '0');
                rd_state <= RB_SETTLE;
 
             when RB_SETTLE =>
-               if rd_settle_cnt = "100" then
-                  if romb_wait = '1' then
-                     rd_state <= RB_WAIT;
-                  else
-                     rom_do_i <= romb_do;
-                     rom_rdy_i <= '1';
-                     rd_state <= RB_IDLE;
-                  end if;
+               -- Latch WAIT ever going high: that is the only positive evidence the
+               -- request was actually accepted. See SETTLE_HIT's declaration.
+               if romb_wait = '1' then
+                  rd_seen_wait <= '1';
+                  rd_state     <= RB_WAIT;
+               elsif rd_settle_cnt = SETTLE_HIT then
+                  -- WAIT never rose in a generous window -> sdram.sv served this from
+                  -- its 4-byte line cache, which legitimately never asserts WAIT.
+                  rom_do_i  <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state  <= RB_IDLE;
                else
                   rd_settle_cnt <= rd_settle_cnt + 1;
                end if;
