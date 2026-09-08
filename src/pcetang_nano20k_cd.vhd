@@ -828,7 +828,7 @@ begin
       -- file's style for every other unused pce_top output.
       DBG_CPU_A => open, DBG_VDC_WR => open, DBG_VDC_RDY => open,
       DBG_CPU_CE => open, DBG_IRQ1_N => open, DBG_IRQ2_N => open,
-      RAMTEST_EN => '0', RAMTEST_Q => open, DBG_MPR => open,
+      RAMTEST_EN => '0', RAMTEST_Q => open, DBG_MPR => open, DBG_TAM => open,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,

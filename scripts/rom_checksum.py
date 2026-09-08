@@ -64,6 +64,7 @@ def parse_log(path):
     wram = {}
     trap = []
     mpr = []
+    tam = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -73,6 +74,13 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if tag == 0xE4:
+                # TAM_CNT | IR | T | A, then 4 pad bytes.
+                tam["cnt"] = payload[0]
+                tam["ir"] = payload[1]
+                tam["t"] = payload[2]
+                tam["a"] = payload[3]
+                continue
             if tag == 0xE3:
                 mpr[:] = list(payload)[::-1]   # payload is MPR7..MPR0
                 continue
@@ -108,7 +116,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram, trap, mpr
+    return passes, beats, dumps, pattern, wram, trap, mpr, tam
 
 
 def main():
@@ -130,7 +138,7 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram, trap, mpr = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap, mpr, tam = parse_log(args.log)
 
     if mpr:
         print()
@@ -145,6 +153,31 @@ def main():
         print()
         print("  (expected values are what 1943 Kai's boot code sets: MPR0=$FF I/O,")
         print("   MPR1=$F8 work RAM, MPR2..6 = ROM banks 1..5 via LE454, MPR7=0 ROM bank 0)")
+
+    if tam:
+        print()
+        print("TAM EXECUTION EVIDENCE at the moment of derailment:")
+        print(f"    TAM writes since reset : {tam['cnt']}  (expected 7)")
+        print(f"    IR = {tam['ir']:02X}   T = {tam['t']:02X}   A = {tam['a']:02X}")
+        print()
+        # This is the whole point of the tag: it splits the two hypotheses the MPR
+        # dump on its own cannot separate.
+        if tam["cnt"] == 0:
+            print("  VERDICT: the TAM write-enable NEVER fired. `IR = x\"53\" and LAST_CYCLE`")
+            print("           never went true on hardware, so the MPRs hold their reset")
+            print("           value and the fault is in instruction decode, not storage.")
+        elif tam["cnt"] == 7:
+            print("  VERDICT: all 7 TAMs fired. The write-enable decode is correct, so the")
+            print("           corruption is in the MPR flops themselves or in the read")
+            print("           select -- which is what the explicit-mux change targets.")
+        else:
+            print(f"  VERDICT: {tam['cnt']} TAMs fired, not 7. Neither 'never decoded' nor")
+            print("           'decoded correctly' -- the CPU took a different path through")
+            print("           the boot code than the simulation does. Chase the count first.")
+        print()
+        print("  NOTE: $A0 appears in the MPR dump but the boot path writes only $FF, $F8")
+        print("        and $01..$05 -- no A value in it can be $A0. $A0 was not produced by")
+        print("        masking a written value; it came from a write this code did not make.")
 
 
     if trap:

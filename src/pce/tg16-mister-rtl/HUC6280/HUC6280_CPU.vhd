@@ -31,7 +31,14 @@ entity HUC6280_CPU is
 		-- $4000-$5FFF maps through MPR2, which `lda #$01 / tam #$04` set five instructions
 		-- earlier, and MPR resets to all zeros -- so something WROTE $ED there. This makes
 		-- the register file directly observable instead of inferred from CPU_A.
-		MPR_DBG	: out std_logic_vector(63 downto 0));
+		MPR_DBG	: out std_logic_vector(63 downto 0);
+		-- PCE PORT (2026-09-07): TAM execution evidence. The boot path executes EXACTLY
+		-- 7 TAMs before `jsr $4003` (2 in the reset stub, 5 in LE454), and every A value
+		-- it writes is <= $05 -- so the $A0 seen in the MPR readback CANNOT come from this
+		-- code. TAM_CNT says whether the write-enable fired at all and how often, which
+		-- separates "the write never lands" from "the write lands and the storage or the
+		-- read select is wrong".
+		TAM_DBG	: out std_logic_vector(31 downto 0));
 end HUC6280_CPU;
 
 architecture rtl of HUC6280_CPU is
@@ -69,6 +76,7 @@ architecture rtl of HUC6280_CPU is
 	signal MPR_OUT 		: std_logic_vector(7 downto 0);
 	signal MPR_LAST 		: std_logic_vector(7 downto 0);
 	signal MPR_SEL 		: std_logic_vector(7 downto 0);
+	signal TAM_CNT 		: unsigned(7 downto 0);
 
 	--ALU
 	signal ALU_CTRL 		: ALUCtrl_r;
@@ -389,6 +397,7 @@ begin
 			MPR(5) <= (others=>'0');
 			MPR(6) <= (others=>'0');
 			MPR(7) <= (others=>'0');
+			TAM_CNT <= (others=>'0');
 		elsif rising_edge(CLK) then
 			if EN = '1' then
 				if IR = x"53" and LAST_CYCLE = '1' then	--TAMi
@@ -398,12 +407,14 @@ begin
 						end if;
 					end loop;
 					MPR_LAST <= A;
+					TAM_CNT <= TAM_CNT + 1;
 				end if;
 			end if; 
 		end if;
 	end process;
 	
 	MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
+	TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
 
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else
