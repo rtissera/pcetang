@@ -24,7 +24,14 @@ entity HUC6280_CPU is
 
 		MCYCLE  	: out std_logic;
 		CS  		: out std_logic
-	);
+	;
+		-- PCE PORT (2026-09-07): the MPR bank registers, exposed read-only.
+		-- Hardware executes `jsr $4003` correctly (verified: the CPU received the exact
+		-- bytes 20 03 40 from ROM 0x0477-0x0479) but lands in physical bank $ED. Logical
+		-- $4000-$5FFF maps through MPR2, which `lda #$01 / tam #$04` set five instructions
+		-- earlier, and MPR resets to all zeros -- so something WROTE $ED there. This makes
+		-- the register file directly observable instead of inferred from CPU_A.
+		MPR_DBG	: out std_logic_vector(63 downto 0));
 end HUC6280_CPU;
 
 architecture rtl of HUC6280_CPU is
@@ -395,6 +402,8 @@ begin
 		end if;
 	end process;
 	
+	MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
+
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else
 				  MPR(2) when T(2) = '1' else

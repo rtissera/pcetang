@@ -206,6 +206,8 @@ entity pce_top is
 		RAMTEST_D  : in  std_logic_vector(7 downto 0) := (others => '0');
 		RAMTEST_WE : in  std_logic := '0';
 		RAMTEST_Q  : out std_logic_vector(7 downto 0);
+		-- PCE PORT (2026-09-07): MPR bank registers, for the board's derailment trace.
+		DBG_MPR    : out std_logic_vector(63 downto 0);
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -534,6 +536,7 @@ port map(
 	O			=> CPU_IO_DO,
 
 	VDCNUM   => VDCNUM,
+	MPR_DBG  => DBG_MPR,
 
 	AUD_LDATA=> PCE_SL,
 	AUD_RDATA=> PCE_SR

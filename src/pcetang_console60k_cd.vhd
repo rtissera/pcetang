@@ -623,6 +623,12 @@ architecture rtl of pcetang_console60k_cd is
    signal trap_gap   : unsigned(19 downto 0) := (others => '0');
    signal cpu_bank   : std_logic_vector(7 downto 0);
    signal bank_bad   : std_logic;
+   -- MPR register file, latched at the instant the CPU derails. jsr $4003 goes through
+   -- MPR2; the trap says which MPR actually holds the bogus bank and what the others
+   -- contain, which separates "TAM never wrote it" from "TAM wrote the wrong value"
+   -- from "TAM wrote the wrong register".
+   signal dbg_mpr     : std_logic_vector(63 downto 0);
+   signal trap_mpr    : std_logic_vector(63 downto 0) := (others => '0');
    signal wram_dly    : unsigned(2 downto 0) := (others => '0');
    constant WRAM_BYTES : integer := 8192;   -- the 8KB a plain HuCard actually uses
 
@@ -1690,6 +1696,7 @@ begin
       DBG_CPU_CE => dbg_cpu_ce, DBG_IRQ1_N => dbg_irq1_n, DBG_IRQ2_N => dbg_irq2_n,
       RAMTEST_EN => wram_en, RAMTEST_A => std_logic_vector(wram_a),
       RAMTEST_D => wram_d, RAMTEST_WE => wram_we, RAMTEST_Q => wram_q,
+      DBG_MPR => dbg_mpr,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -1867,14 +1874,15 @@ begin
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
             -- Once the trap has fired, spend the next three heartbeat slots emitting the
             -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
-            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 3 then
+            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 4 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"E" & "00" & std_logic_vector(trap_sent);
                case trap_sent is
                   when "00" => dbg_trace_data <= trap_buf(0) & trap_buf(1) & "0000000000000000";
                   when "01" => dbg_trace_data <= trap_buf(2) & trap_buf(3) & "0000000000000000";
-                  when others => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
+                  when "10" => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
+                  when others => dbg_trace_data <= trap_mpr;   -- MPR7..MPR0, tag 0xE3
                end case;
             elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
@@ -1934,6 +1942,7 @@ begin
             end if;
             if trap_fired = '0' and bank_bad = '1' then
                trap_fired <= '1';   -- CPU just entered a nonexistent bank: freeze
+               trap_mpr   <= dbg_mpr;
             end if;
          end if;
       end if;

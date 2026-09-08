@@ -63,6 +63,7 @@ def parse_log(path):
     pattern = {}
     wram = {}
     trap = []
+    mpr = []
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -72,6 +73,9 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if tag == 0xE3:
+                mpr[:] = list(payload)[::-1]   # payload is MPR7..MPR0
+                continue
             if 0xE0 <= tag <= 0xE2:
                 val = int.from_bytes(payload, "big")
                 trap.append(((val >> 40) & 0xFFFFFF, (val >> 16) & 0xFFFFFF))
@@ -104,7 +108,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram, trap
+    return passes, beats, dumps, pattern, wram, trap, mpr
 
 
 def main():
@@ -126,7 +130,22 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram, trap = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap, mpr = parse_log(args.log)
+
+    if mpr:
+        print()
+        print("MPR BANK REGISTERS at the moment of derailment:")
+        expect = {0: 0xFF, 1: 0xF8, 2: 0x01, 3: 0x02, 4: 0x03, 5: 0x04, 6: 0x05, 7: 0x00}
+        for i, v in enumerate(mpr):
+            exp = expect.get(i)
+            note = ""
+            if exp is not None:
+                note = "  ok" if v == exp else f"  <-- expected {exp:02X}"
+            print(f"    MPR{i} = {v:02X}{note}")
+        print()
+        print("  (expected values are what 1943 Kai's boot code sets: MPR0=$FF I/O,")
+        print("   MPR1=$F8 work RAM, MPR2..6 = ROM banks 1..5 via LE454, MPR7=0 ROM bank 0)")
+
 
     if trap:
         entries = [e for pair in trap for e in pair]

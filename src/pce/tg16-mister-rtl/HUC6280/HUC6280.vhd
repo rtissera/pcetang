@@ -41,7 +41,9 @@ entity HUC6280 is
 		
 		AUD_LDATA: out std_logic_vector(23 downto 0);
 		AUD_RDATA: out std_logic_vector(23 downto 0)
-	);
+	;
+		-- PCE PORT (2026-09-07): MPR register file, straight through from the core.
+		MPR_DBG	: out std_logic_vector(63 downto 0));
 end HUC6280;
 
 architecture rtl of HUC6280 is
@@ -145,7 +147,8 @@ begin
 		NMI_N 	=> NMI_N,
 		MCYCLE	=> CPU_MCYCLE,
 		CS 		=> CPU_CS,
-		VDCNUM   => VDCNUM
+		VDCNUM   => VDCNUM,
+		MPR_DBG  => MPR_DBG
 	);
 	
 	CPU_IRQ1_N <= IRQ1_N or INT_MASK(1);
