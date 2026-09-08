@@ -618,7 +618,10 @@ architecture rtl of pcetang_console60k_cd is
    type trap_arr is array (0 to 7) of std_logic_vector(23 downto 0);  -- addr(15:0) & data
    signal trap_buf   : trap_arr := (others => (others => '0'));
    signal trap_fired : std_logic := '0';
-   signal trap_sent  : unsigned(1 downto 0) := (others => '0');
+   -- 3 bits, not 2: at 2 bits `trap_sent < 4` is always true, so the emitter looped
+   -- forever and flooded debug.log with 36 copies of each trap tag, crowding out the
+   -- runtime heartbeat entirely.
+   signal trap_sent  : unsigned(2 downto 0) := (others => '0');
    signal trap_emit  : std_logic := '0';
    signal trap_gap   : unsigned(19 downto 0) := (others => '0');
    signal cpu_bank   : std_logic_vector(7 downto 0);
@@ -1877,8 +1880,8 @@ begin
             if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 4 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
-               dbg_trace_tag <= x"E" & "00" & std_logic_vector(trap_sent);
-               case trap_sent is
+               dbg_trace_tag <= x"E" & "0" & std_logic_vector(trap_sent);
+               case trap_sent(1 downto 0) is
                   when "00" => dbg_trace_data <= trap_buf(0) & trap_buf(1) & "0000000000000000";
                   when "01" => dbg_trace_data <= trap_buf(2) & trap_buf(3) & "0000000000000000";
                   when "10" => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
