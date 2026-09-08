@@ -68,6 +68,7 @@ architecture rtl of HUC6280_CPU is
 	signal ADDR_BUS 		: std_logic_vector(15 downto 0);
 	signal MPR_OUT 		: std_logic_vector(7 downto 0);
 	signal MPR_LAST 		: std_logic_vector(7 downto 0);
+	signal MPR_SEL 		: std_logic_vector(7 downto 0);
 
 	--ALU
 	signal ALU_CTRL 		: ALUCtrl_r;
@@ -559,7 +560,27 @@ begin
 	end process;
 	
 	A_OUT(12 downto 0) <= ADDR_BUS(12 downto 0);
-	A_OUT(20 downto 13) <= x"FF" when MC.ADDR_BUS = "101" else MPR(to_integer(unsigned(ADDR_BUS(15 downto 13))));
+	-- PCE PORT (2026-09-07): explicit 8-way mux instead of
+	--     MPR(to_integer(unsigned(ADDR_BUS(15 downto 13))))
+	-- The donor form is a DYNAMICALLY INDEXED read of an 8x8 array that is written by
+	-- eight one-hot enables -- a register-file shape that synthesis tools infer
+	-- inconsistently (distributed RAM, LUT-ROM, or flops). It simulates perfectly in
+	-- GHDL, and on real GW5A hardware the bank registers read back masked: the CPU
+	-- writes MPR0=$FF/MPR1=$F8/MPR2=$01/MPR3=$02 and the trace shows A0/A0/00/00, so
+	-- `jsr $4003` lands in nonexistent bank $ED instead of ROM bank 1.
+	-- MPR_OUT below reads the SAME array through an explicit mux and is not implicated,
+	-- which is what points at the indexed form rather than at the array itself.
+	-- Same function, no dynamic index, nothing for the inference heuristics to guess at.
+	MPR_SEL <= MPR(0) when ADDR_BUS(15 downto 13) = "000" else
+	           MPR(1) when ADDR_BUS(15 downto 13) = "001" else
+	           MPR(2) when ADDR_BUS(15 downto 13) = "010" else
+	           MPR(3) when ADDR_BUS(15 downto 13) = "011" else
+	           MPR(4) when ADDR_BUS(15 downto 13) = "100" else
+	           MPR(5) when ADDR_BUS(15 downto 13) = "101" else
+	           MPR(6) when ADDR_BUS(15 downto 13) = "110" else
+	           MPR(7);
+
+	A_OUT(20 downto 13) <= x"FF" when MC.ADDR_BUS = "101" else MPR_SEL;
 
 	process(CLK, RST_N)
 	begin
