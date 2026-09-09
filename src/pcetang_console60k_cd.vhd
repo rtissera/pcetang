@@ -1688,7 +1688,12 @@ begin
    -- generate_NOSGX ties both to '1', and this also frees VRAM1 from a build already at
    -- 112/118 BSRAM, which session notes flag as a real Gowin inference hazard here.
    -- Costs SuperGrafx support: five games, none of which run today.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0)
+   -- AC_BUILD => 0 (2026-09-09): omit the Arcade Card. Post-PnR timing showed seven of
+   -- the eight worst setup paths in this design running from the CPU microcode through
+   -- core/CPU/CORE/MPR_SEL -- the MPR bank-register read mux, the exact signal the
+   -- black-screen fault is localised to -- into core/AC/port[N].base_*, at 0.224 ns
+   -- slack on a 23.33 ns period. See pce_top.vhd's AC_BUILD comment.
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
@@ -1749,6 +1754,10 @@ begin
       -- PCE PORT (2026-08-29): '0'->'1' -- real, non-aliasing 2MB SDRAM window now
       -- exists (AC_SDRAM_BASE, see that constant's own comment) -- see this file's
       -- header for the updated real gw_sh result.
+      -- PCE PORT (2026-09-09): AC_EN is the RUNTIME enable and does not remove the
+      -- Arcade Card's load on the CPU physical address bus. AC_BUILD => 0 (below, in
+      -- the generic map) omits the instance outright. TRADEOFF: this bitstream can no
+      -- longer run Arcade Card CD titles. Set AC_BUILD => 1 to restore them.
       AC_EN => '1',
 
       CD_STAT => cd_stat_i, CD_MSG => cd_msg_i, CD_STAT_GET => cd_stat_get_i,

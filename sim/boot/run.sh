@@ -27,6 +27,7 @@ TRACE_N="${6:-0}"
 TRACE_SKIP="${7:-0}"
 ROM_LAT="${8:-0}"
 DUMP_AFTER_VDC="${9:-0}"
+AC_BUILD="${10:-1}"
 
 mkdir -p "$WORK"
 rm -f "$WORK"/*.o "$WORK"/*.cf "$WORK"/tb_pce_boot 2>/dev/null || true
@@ -84,4 +85,5 @@ ghdl -r "${GHDL_FLAGS[@]}" tb_pce_boot \
 	-gTRACE_SKIP="$TRACE_SKIP" \
 	-gROM_LAT="$ROM_LAT" \
 	-gDUMP_AFTER_VDC="$DUMP_AFTER_VDC" \
+	-gAC_BUILD_G="$AC_BUILD" \
 	--ieee-asserts=disable

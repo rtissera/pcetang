@@ -40,6 +40,19 @@ entity pce_top is
 		-- MCODE and vram0_cache's own metadata into logic fallback too and leaves 1545
 		-- setup violations. See NECTang's docs/PORTING.md's "VRAM0 external memory" section.
 		NO_CD : integer := 0;
+		-- PCE PORT (2026-09-09): omit the Arcade Card ENTIRELY (default 1 = present,
+		-- donor behaviour). This is a BUILD-TIME generic, not the runtime AC_EN port,
+		-- and the difference is the whole point: AC_EN only gates the card's EN input,
+		-- so with AC_EN='0' the hardware and -- critically -- its LOAD on the CPU's
+		-- physical address bus still exist. Post-PnR timing on Console 60K showed
+		-- SEVEN of the eight worst setup paths in the whole design running from the
+		-- CPU microcode through core/CPU/CORE/MPR_SEL (the MPR bank-register read mux)
+		-- into core/AC/port[N].base_*, the Arcade Card's port base registers, with as
+		-- little as 0.224 ns slack on a 23.33 ns period -- under 1% margin. 24 of the
+		-- 50 reported paths went through MPR_SEL. A plain HuCard never touches the
+		-- Arcade Card, so on a HuCard build that load is pure cost on the exact signal
+		-- the black-screen investigation has localised the fault to.
+		AC_BUILD : integer := 1;
 		-- PCE PORT (2026-08-28): 4-word VRAM0 line-refill (see vram0_cache.vhd's own
 		-- G_LINE_REFILL generic and sdram.sv's "line refill" header note). Only
 		-- meaningful when EXT_VRAM0 /= 0 AND the board's own external controller
@@ -1246,6 +1259,7 @@ CD_RAM_DO <= CPU_DO;
 CD_RAM_RD <= CPU_PRE_RD and not (CD_RAM_CS_N and AC_RAM_CS_N);
 CD_RAM_WR <= CPU_PRE_WR and not (CD_RAM_CS_N and AC_RAM_CS_N);
 
+gen_ac : if AC_BUILD /= 0 generate
 AC : ARCADE_CARD
 port map(
 	CLK     => CLK,
@@ -1262,6 +1276,18 @@ port map(
 	RAM_CS_N=> AC_RAM_CS_N,
 	RAM_A   => AC_RAM_A
 );
+end generate;
+
+gen_no_ac : if AC_BUILD = 0 generate
+	-- Deselected constants, matching what the card drives when it is not addressed.
+	-- Every consumer (the CPU_DI mux, ROM_RD, CD_RAM_A/RD/WR) reads these as
+	-- "Arcade Card not selected", so behaviour is identical to a build whose AC is
+	-- present but never addressed -- minus the logic and the address-bus load.
+	AC_DO       <= (others => '1');
+	AC_SEL_N    <= '1';
+	AC_RAM_CS_N <= '1';
+	AC_RAM_A    <= (others => '0');
+end generate;
 
 PSG_SR <= signed(PCE_SR(23 downto 8));
 PSG_SL <= signed(PCE_SL(23 downto 8));
