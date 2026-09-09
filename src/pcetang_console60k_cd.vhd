@@ -395,6 +395,14 @@ architecture rtl of pcetang_console60k_cd is
    -- the byte it asked for. From the next cycle on, a still-asserted rom_rd_i means a new
    -- fetch and ready drops immediately -- with no stale window.
    signal rom_rdy_comb : std_logic;
+   -- Previous cycle's rom_rd_i, and the address of the last request actually started.
+   -- Together these turn a level into a real "new request" event -- see RB_IDLE.
+   signal rom_rd_prev  : std_logic := '0';
+   signal rd_a_last    : std_logic_vector(21 downto 0) := (others => '1');
+   -- Single definition of "a new ROM read is pending". Used BOTH by the FSM's start
+   -- condition and by rom_rdy_comb: if those two ever disagreed, ROM_RDY could sit low
+   -- waiting for a fetch the FSM has decided not to start, and the CPU would hang.
+   signal rd_new_req   : std_logic;
    signal rom_rd_i    : std_logic;
    signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
@@ -1445,21 +1453,56 @@ begin
    -- running (with one bad byte) instead of freezing, and dbg_rd_timeout_cnt reports how
    -- often over the trace channel -- a live count is far better evidence than another
    -- silent freeze.
+   rd_new_req <= '1' when rom_rd_i = '1' and (rom_rd_prev = '0' or rom_a /= rd_a_last)
+                 else '0';
+
+   -- Low the instant a NEW read is pending, so the CPU cannot sample the previous byte
+   -- in the cycle before the registered rom_rdy_i catches up. The rd_done term is
+   -- load-bearing: on the completion cycle the FSM is back in RB_IDLE with the new byte
+   -- in rom_do_i, so ready must be '1' there for the CPU to consume it, even though
+   -- rom_rd_i is still asserted for that same bus cycle.
    rom_rdy_comb <= '0' when rd_state /= RB_IDLE
-                   else '0' when (rom_rd_i = '1' and rd_done = '0')
+                   else '0' when (rd_new_req = '1' and rd_done = '0')
                    else '1';
 
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
          rd_done <= '0';
+         rom_rd_prev <= rom_rd_i;
          case rd_state is
             when RB_IDLE =>
                rom_rdy_i <= '1';
-               if rom_rd_i = '1' then
+               -- PCE PORT (2026-09-09): start on a NEW request, not on a level.
+               --
+               -- rom_rd_i is a LEVEL held for the whole CPU bus cycle. Starting whenever
+               -- it is high means that the instant this FSM returns to RB_IDLE it
+               -- re-triggers on the SAME still-asserted read and the SAME unchanged
+               -- rom_a -- fetching every byte twice, which is exactly what the
+               -- derailment trap shows (0476, 0476, 0477, 0477).
+               --
+               -- That duplicate is what corrupts the CPU. While it is in flight the CPU
+               -- advances to the next byte; when it completes the bridge presents the
+               -- PREVIOUS byte and raises ROM_RDY, so the CPU accepts byte(N-1) as its
+               -- byte(N). Measured: at the instant the CPU committed its fetch of ROM
+               -- offset 0475 the bridge was presenting $53, the byte at 0474.
+               -- Simulation of the identical cycle returns $40.
+               --
+               -- Everything downstream is that one byte: T took $53 (the TAM opcode)
+               -- instead of the operand mask, so every TAM wrote MPR0/1/4/6 -- exactly
+               -- the set bits of $53 -- leaving MPR1 = $A0 instead of $F8, and the CPU
+               -- died on its first zero-page/stack access through MPR1.
+               --
+               -- Two independent conditions, deliberately OR'd rather than picking one:
+               -- a rising edge of rom_rd_i catches a genuinely new bus cycle, and a
+               -- change of rom_a catches back-to-back fetches where the CPU never lets
+               -- the read line drop. Requiring BOTH would stall on whichever case the
+               -- CPU does not exhibit; requiring either cannot miss a real request.
+               if rd_new_req = '1' then
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
                              resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
+                  rd_a_last <= rom_a;
                   rd_state <= RB_ADDR;
                end if;
 
