@@ -375,6 +375,26 @@ architecture rtl of pcetang_console60k_cd is
    signal rom_a       : std_logic_vector(21 downto 0);
    signal rom_do_i    : std_logic_vector(7 downto 0) := (others => '0');
    signal rom_rdy_i   : std_logic := '1';
+   -- PCE PORT (2026-09-09): ROM_RDY as pce_top actually sees it. rom_rdy_i is a REGISTER,
+   -- so on the cycle a new read is requested it still carries the PREVIOUS transaction's
+   -- '1' -- one cycle in which the CPU sees "ready" sitting next to the previous byte in
+   -- rom_do_i. Whether the CPU samples in that window depends on CPU_CE alignment, which
+   -- is why most fetches were fine and only some were not.
+   --
+   -- MEASURED on hardware (trace tags 0xE9/0xEA, latched on the CPU's own T-load strobe):
+   -- at the instant the CPU committed its fetch of ROM offset 0475 the bridge was
+   -- presenting $53, the byte at 0474. Simulation of the identical cycle returns $40.
+   -- The CPU consumed the previous byte because nothing held it. Every TAM then took $53
+   -- as its MPR write-enable mask and wrote MPR0/1/4/6 -- exactly the set bits of $53 --
+   -- which is precisely the hardware MPR dump, and MPR2 never being written is why
+   -- `jsr $4003` left for a bank that does not exist.
+   --
+   -- The `rd_done` term is what keeps this from deadlocking: on the completion cycle the
+   -- FSM is back in RB_IDLE with the NEW byte in rom_do_i and rd_done high, so ready must
+   -- be '1' there even though rom_rd_i is still asserted, or the CPU could never consume
+   -- the byte it asked for. From the next cycle on, a still-asserted rom_rd_i means a new
+   -- fetch and ready drops immediately -- with no stale window.
+   signal rom_rdy_comb : std_logic;
    signal rom_rd_i    : std_logic;
    signal rom_wr_addr : unsigned(ROM_SDRAM_ABITS-1 downto 0) := (others => '0');
    signal rom_loading_r : std_logic := '0';
@@ -1423,6 +1443,10 @@ begin
    -- running (with one bad byte) instead of freezing, and dbg_rd_timeout_cnt reports how
    -- often over the trace channel -- a live count is far better evidence than another
    -- silent freeze.
+   rom_rdy_comb <= '0' when rd_state /= RB_IDLE
+                   else '0' when (rom_rd_i = '1' and rd_done = '0')
+                   else '1';
+
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
@@ -1759,7 +1783,7 @@ begin
       DBG_WAIT_EVER => dbg_wait_ever,
 
       ROM_RD    => rom_rd_i,
-      ROM_RDY   => rom_rdy_i,
+      ROM_RDY   => rom_rdy_comb,
       ROM_A     => rom_a,
       ROM_DO    => rom_do_i,
       ROM_SZ    => rom_sz_r,       -- dynamic 128K-1MB real HuCard bucket, see rom_sz_r above
