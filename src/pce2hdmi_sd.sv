@@ -222,44 +222,87 @@ always @(posedge clk_pixel) begin
 		rgb <= 24'h101010;
 end
 
-// Observability wiring, not a real mixer -- summed with wraparound, no clipping, no
-// real resampling to AUDIO_RATE. Enough to make PSG/CDDA/ADPCM live logic for a real
-// gw_sh resource measurement; audio correctness is unstarted work (see
-// docs/ARCHITECTURE.md).
+//
+// ==================== Audio ====================
+//
+// clk_audio was previously tied to clk_pixel, which is why there was no sound at all.
+// Despite the name, hdmi2 never uses this as a clock -- every consumer edge-detects it
+// in the clk_pixel domain:
+//     always_ff @(posedge clk_pixel) if (clk_audio & ~clk_audio_old) ...
+// (audio_clock_regeneration_packet.sv:28-31, packet_picker.sv:71-72; the one
+// `posedge clk_audio` in the tree is commented out). So tying it to clk_pixel made that
+// edge fire every other pixel clock -- an effective sample rate of ~37 MHz instead of
+// 48 kHz, which puts the HDMI audio clock regeneration wildly out and produces silence.
+//
+// It only has to be a STROBE at the sample rate, so no divided clock net is needed.
+// MUST track clk_pixel: at 73.75 MHz (the genlock-friendly rate, see the HDMI PLL)
+// 73.75e6 / 48000 = 1536.46, so a period of 1536 gives 48.01 kHz, 0.03% high -- far
+// inside what the ACR N/CTS mechanism absorbs. If the pixel clock is ever retuned this
+// constant has to move with it, or the sample rate silently drifts off 48 kHz.
+localparam int AUDIO_DIV = 1536;
+logic [11:0] audio_div_cnt = 12'd0;
 logic clk_audio;
-assign clk_audio = clk_pixel;
+always_ff @(posedge clk_pixel) begin
+	if (audio_div_cnt == AUDIO_DIV-1) audio_div_cnt <= 12'd0;
+	else                              audio_div_cnt <= audio_div_cnt + 1'b1;
+end
+// One clk_pixel cycle high per period: exactly one rising edge per sample, which is all
+// the consumers look for.
+assign clk_audio = (audio_div_cnt == 12'd0);
+
+// Sampled on the strobe rather than clocked by it. psg_sl/sr are continuous values in
+// the clk_pce domain, so this is a multi-bit crossing taken without a handshake: a
+// sample straddling a PSG update can be momentarily wrong. That is a fraction of one
+// sample at 48 kHz and inaudible, and the alternative (a full handshake per sample) is
+// not worth the logic here -- but it is a real approximation, not a clean crossing.
+// Summed with wraparound and no clipping, unchanged from before; with NO_CD=1 the cdda
+// and adpcm terms are hard zero, so today this is PSG only.
 reg [15:0] audio_sample_word [1:0];
-always_ff @(posedge clk_audio) begin
-	audio_sample_word[0] <= psg_sl + cdda_sl + adpcm_s;
-	audio_sample_word[1] <= psg_sr + cdda_sr + adpcm_s;
+always_ff @(posedge clk_pixel) begin
+	if (clk_audio) begin
+		audio_sample_word[0] <= psg_sl + cdda_sl + adpcm_s;
+		audio_sample_word[1] <= psg_sr + cdda_sr + adpcm_s;
+	end
 end
 
 logic[2:0] tmds;
 wire tmdsClk;
 
-// VSYNC GENLOCK -- ATTEMPTED AND BACKED OUT 2026-09-09, do not just re-add it.
 //
-// The picture rolls because this raster free-runs: .reset(0) below is never asserted, so
-// the output frame and the PCE's frame are independent and slip past each other at the
-// beat frequency between them (core ~59.92 Hz, output ~60.10 Hz at 74.375 MHz).
+// ==================== VSYNC genlock ====================
 //
-// The fix is to restart the raster on the core's VSYNC -- hdmi.sv's `reset` is a
-// synchronous return to (0,0), exactly right -- and the pixel clock must be set so the
-// output frame is slightly SLOWER than the source, so VSYNC lands inside the 30-line
-// vertical blanking and the reset truncates blanking rather than picture.
+// Without this the raster free-runs and the output frame slips past the PCE's
+// continuously, which is the rolling picture.
 //
-// THE COST, measured: asserting `reset` at all MATERIALISES hdmi.sv's entire reset
-// network. With the constant .reset(0) Gowin optimises every one of those resets away.
-// Turning it on cost 3 setup violations, and registering the `cy` comparison ahead of it
-// did NOT help -- so it is the reset fanout itself, not the comparator. Much of that
-// network is the audio packet logic (audio_clock_regeneration_packet,
-// audio_sample_word_transfer_control), which is dead weight today anyway since audio is
-// unimplemented (clk_audio = clk_pixel, no resampler).
+// Restarting the raster on the core's VSYNC forces the output frame period to equal the
+// source's. The FIRST attempt drove hdmi.sv's module-wide `reset` and cost 3 setup
+// violations: asserting it materialises every reset in that module, all of which the
+// constant .reset(0) had let the synthesiser delete. Registering the cy comparison ahead
+// of it did not help, so it was the reset fanout itself. hdmi.sv now has a `sync_reset`
+// that touches ONLY the cx/cy counters -- one extra term, nothing else.
 //
-// So genlock is worth doing WITH the audio rework, not before it: implement audio
-// properly (real clk_audio, real resampling), and the reset network gets paid for by
-// logic that is actually doing something.
+// DIRECTION MATTERS and is easy to get backwards. The pixel clock is deliberately set so
+// the output frame is slightly SLOWER than the source (see the HDMI PLL's comment):
+//     core   ~59.92 Hz   output  ~59.60 Hz at 73.75 MHz
+// so the core's VSYNC arrives while the output still has ~4 lines to run, i.e. inside
+// 720p's 30-line vertical blanking, and the restart truncates blanking only. Were the
+// output FASTER it would already have wrapped and the restart would cut lines off the
+// TOP of the visible picture.
 //
+// The cy guard makes that a property rather than an assumption: if the raster is not in
+// blanking when VSYNC arrives, the resync is skipped. A wrong clock choice therefore
+// degrades to "still rolls", never to a corrupted picture.
+reg vs_meta, vs_sync, vs_prev;
+reg in_vblank;
+reg hdmi_resync;
+always_ff @(posedge clk_pixel) begin
+	vs_meta <= video_vs;      // clk (clk_pce) -> clk_pixel, standard 2-flop synchroniser
+	vs_sync <= vs_meta;
+	vs_prev <= vs_sync;
+	in_vblank <= (cy >= frameHeight - 10'd28);
+	hdmi_resync <= vs_sync & ~vs_prev & in_vblank;
+end
+
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
         .DVI_OUTPUT(0),
         .VIDEO_REFRESH_RATE(VIDEO_REFRESH),
@@ -273,6 +316,7 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
         .reset(0),
+        .sync_reset(hdmi_resync),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
         .tmds_clock(tmdsClk),
