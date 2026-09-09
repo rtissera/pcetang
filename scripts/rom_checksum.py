@@ -157,7 +157,7 @@ def main():
     if tam:
         print()
         print("TAM EXECUTION EVIDENCE at the moment of derailment:")
-        print(f"    TAM writes since reset : {tam['cnt']}  (expected 7)")
+        print(f"    TAM writes since reset : {tam['cnt']}  (expected 7 at this point)")
         print(f"    IR = {tam['ir']:02X}   T = {tam['t']:02X}   A = {tam['a']:02X}")
         print()
         # This is the whole point of the tag: it splits the two hypotheses the MPR
@@ -170,10 +170,19 @@ def main():
             print("  VERDICT: all 7 TAMs fired. The write-enable decode is correct, so the")
             print("           corruption is in the MPR flops themselves or in the read")
             print("           select -- which is what the explicit-mux change targets.")
+        elif tam["cnt"] > 7:
+            print(f"  VERDICT: {tam['cnt']} TAMs fired -- MORE than the 7 that precede")
+            print("           `jsr $4003`. The CPU got PAST the jsr and derailed later, so")
+            print("           the bank fault is not where the trap window suggests.")
         else:
             print(f"  VERDICT: {tam['cnt']} TAMs fired, not 7. Neither 'never decoded' nor")
             print("           'decoded correctly' -- the CPU took a different path through")
             print("           the boot code than the simulation does. Chase the count first.")
+        print()
+        print("  Ground truth from sim/boot (real ROM, 20 ms): the boot code executes 7")
+        print("  TAMs before `jsr $4003`, leaving MPR = FF F8 01 02 03 04 05 00, and a")
+        print("  further 5 AFTER it (12 total) which zero MPR2..MPR6 again. Hardware never")
+        print("  completes the jsr, so 7 is the expected count AT THE TRAP.")
         print()
         print("  NOTE: $A0 appears in the MPR dump but the boot path writes only $FF, $F8")
         print("        and $01..$05 -- no A value in it can be $A0. $A0 was not produced by")

@@ -298,6 +298,10 @@ begin
 		alias vdc0_irq_n  is << signal dut.VDC0_IRQ_N     : std_logic >>;
 		alias vdc1_irq_n  is << signal dut.VDC1_IRQ_N     : std_logic >>;
 		alias cd_irq_n    is << signal dut.CD_IRQ_N       : std_logic >>;
+		-- Same two probes the hardware trace carries (tags 0xE3/0xE4), so the sim and
+		-- the board are answering the identical question with the identical wiring.
+		alias mpr_dbg     is << signal dut.CPU.CORE.MPR_DBG : std_logic_vector(63 downto 0) >>;
+		alias tam_dbg     is << signal dut.CPU.CORE.TAM_DBG : std_logic_vector(31 downto 0) >>;
 
 		variable l : line;
 
@@ -316,6 +320,17 @@ begin
 		variable n_dbg_vdc : integer := 0;
 		variable traced    : integer := 0;
 		variable vdc_reg   : std_logic_vector(4 downto 0) := (others => '0');
+
+		-- MPR/TAM evidence, mirroring the board's derailment trap. `bad_bank` is the
+		-- hardware failure signature: CPU_A entering physical bank $E8-$EF, none of
+		-- which exist. If the sim never sets it, the sim does not reproduce the fault.
+		variable tam_max   : integer := 0;
+		variable bad_bank  : boolean := false;
+		variable mpr_at_7  : std_logic_vector(63 downto 0) := (others => '0');
+		variable mpr_final : std_logic_vector(63 downto 0) := (others => '0');
+		variable mpr_bad   : std_logic_vector(63 downto 0) := (others => '0');
+		variable tam_bad   : std_logic_vector(31 downto 0) := (others => '0');
+		variable bad_addr  : std_logic_vector(20 downto 0) := (others => '0');
 
 		-- bank coverage of ROM reads, one bit per 8K physical bank 0..127
 		type bankhit_t is array (0 to 127) of boolean;
@@ -359,6 +374,22 @@ begin
 			-- park here forever and the summary below would never print.
 			wait until rising_edge(clk) or not running;
 			exit when not running;
+
+			-- MPR/TAM evidence. Sampled every clock, not on cpu_ce, so a TAM that
+			-- fires and is immediately overwritten still raises the count.
+			if to_integer(unsigned(tam_dbg(31 downto 24))) > tam_max then
+				tam_max := to_integer(unsigned(tam_dbg(31 downto 24)));
+				if tam_max = 7 then
+					mpr_at_7 := mpr_dbg;
+				end if;
+			end if;
+			mpr_final := mpr_dbg;
+			if not bad_bank and cpu_a(20 downto 16) = "11101" then
+				bad_bank := true;
+				bad_addr := cpu_a;
+				mpr_bad  := mpr_dbg;
+				tam_bad  := tam_dbg;
+			end if;
 
 			-- IRQ edges (falling = asserted)
 			if vdc0_irq_n = '0' and prev_v0i = '1' then n_vdc0_irq := n_vdc0_irq + 1; end if;
@@ -498,6 +529,38 @@ begin
 		write(l, string'("  VBLANK edges        : ")); write(l, vbl_edges);  writeline(output, l);
 		write(l, string'("  VSYNC edges         : ")); write(l, vs_edges);   writeline(output, l);
 		write(l, string'("  CPU bus cycles      : ")); write(l, n_bus);      writeline(output, l);
+		-- The two lines that matter for the black screen. Hardware sees TAM writes land
+		-- masked and the CPU enter bank $ED; this says whether the sim does the same.
+		write(l, string'("  TAM writes executed : ")); write(l, tam_max);
+		if tam_max = 7 then
+			write(l, string'("   (matches the boot path's expected 7)"));
+		else
+			write(l, string'("   *** expected 7 ***"));
+		end if;
+		writeline(output, l);
+		write(l, string'("  MPR at 7th TAM      : "));
+		for i in 0 to 7 loop
+			write(l, hex(mpr_at_7((i*8+7) downto (i*8)))); write(l, string'(" "));
+		end loop;
+		write(l, string'(" (MPR0..MPR7)")); writeline(output, l);
+		write(l, string'("  MPR at end of run   : "));
+		for i in 0 to 7 loop
+			write(l, hex(mpr_final((i*8+7) downto (i*8)))); write(l, string'(" "));
+		end loop;
+		writeline(output, l);
+		if bad_bank then
+			write(l, string'("  *** REPRODUCED the hardware fault: CPU entered bank $E8-$EF at "));
+			write(l, hex(bad_addr)); writeline(output, l);
+			write(l, string'("      MPR there : "));
+			for i in 0 to 7 loop
+				write(l, hex(mpr_bad((i*8+7) downto (i*8)))); write(l, string'(" "));
+			end loop;
+			writeline(output, l);
+			write(l, string'("      TAM_CNT/IR/T/A : ")); write(l, hex(tam_bad)); writeline(output, l);
+		else
+			write(l, string'("  bank $E8-$EF entry  : never (sim does NOT reproduce the hardware fault)"));
+			writeline(output, l);
+		end if;
 		write(l, string'("  CD_RAM_RD pulses    : ")); write(l, n_cdram_rd);  writeline(output, l);
 		write(l, string'("  CD_RAM_WR pulses    : ")); write(l, n_cdram_wr);  writeline(output, l);
 		write(l, string'("  ADPCM_RAM_REQ pulses: ")); write(l, n_adpcm_req); writeline(output, l);
