@@ -807,7 +807,14 @@ begin
                 -- violations). Direct user choice: keep SF2', drop back to
                 -- the old BRAM-based VT here instead. See psg.vhd's own
                 -- VT_PATH_A generic header and pcetang_status_matrix.md.
-                VT_PATH_A => 0)
+                VT_PATH_A => 0,
+                -- 2026-09-09, direct user decision: the Arcade Card is not a priority
+                -- until HuCard is right on all three boards, so it comes out here. It
+                -- was not free -- all 4 of this board's setup violations ended at
+                -- core/gen_ac.AC/port[N].base_22 (worst -0.141 ns), on the MCODE -> AC
+                -- MPR path that 8dc83df already identified as the one the Arcade Card
+                -- owns. Console 60K dropped it for the same reason.
+                AC_BUILD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

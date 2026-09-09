@@ -1869,7 +1869,7 @@ begin
    -- core/CPU/CORE/MPR_SEL -- the MPR bank-register read mux, the exact signal the
    -- black-screen fault is localised to -- into core/AC/port[N].base_*, at 0.224 ns
    -- slack on a 23.33 ns period. See pce_top.vhd's AC_BUILD comment.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 1, AC_BUILD => 0)
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 1, AC_BUILD => 0, DBG_PROBES => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

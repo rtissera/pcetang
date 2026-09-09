@@ -126,7 +126,10 @@ entity pce_top is
 		-- there (see pcetang_status_matrix.md lever 19/20's real isolation
 		-- record: SF2' widening and PSG Path A each pass clean alone on that
 		-- board, but their combination real-fails timing).
-		VT_PATH_A : integer := 1
+		VT_PATH_A : integer := 1;
+		-- Pass-through to HUC6280_CPU's DBG_PROBES (via HUC6280.vhd). Default 0.
+		-- Only Console 60K's debug build turns these on; they cost real timing.
+		DBG_PROBES : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -529,7 +532,7 @@ generate_NOCHEAT: if (LITE /= 0) generate begin
 end generate;
 
 CPU : entity work.HUC6280
-generic map ( VT_PATH_A => VT_PATH_A )
+generic map ( VT_PATH_A => VT_PATH_A, DBG_PROBES => DBG_PROBES )
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,

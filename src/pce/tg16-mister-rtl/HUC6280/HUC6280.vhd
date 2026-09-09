@@ -8,7 +8,11 @@ entity HUC6280 is
 	generic (
 		-- Pass-through to the inner PSG's own VT_PATH_A generic -- see psg.vhd's
 		-- entity header for the real rationale. Default 1 (Path A on).
-		VT_PATH_A : integer := 1
+		VT_PATH_A : integer := 1;
+		-- Pass-through to HUC6280_CPU's DBG_PROBES -- see that entity's header. Default
+		-- 0: the probes are off unless a board explicitly asks, because they cost real
+		-- timing on the microcode -> PSG path.
+		DBG_PROBES : integer := 0
 	);
 	port(
 		CLK		: in std_logic;
@@ -135,6 +139,7 @@ begin
 	
 	
 	CORE : entity work.HUC6280_CPU
+	generic map ( DBG_PROBES => DBG_PROBES )
 	port map (
 		CLK 		=> CLK,
 		RST_N 	=> RST_N,

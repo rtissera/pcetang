@@ -970,7 +970,15 @@ begin
    -- see this session's own build log for the real result.
    core: entity work.pce_top
    generic map (LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, VRAM0_LINE_REFILL => 1,
-                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1)
+                VRAM0_PREFETCH => 1, VRAM0_CG_PREFETCH => 1,
+                -- 2026-09-09: Arcade Card out here too. Same user decision as Nano 20K
+                -- (not a priority until HuCard is right on all three boards), and this
+                -- board is where it costs the most -- 428 setup violations, on the
+                -- MCODE -> PSG / MCODE -> AC paths. Confirmed RTL, not PnR: the same
+                -- tree at place_option 1 still gives 422, while baseline 98df148 at
+                -- place_option 1 is 0/0. Set AC_BUILD => 1 to restore Arcade Card CD
+                -- titles once HuCard is solid.
+                AC_BUILD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

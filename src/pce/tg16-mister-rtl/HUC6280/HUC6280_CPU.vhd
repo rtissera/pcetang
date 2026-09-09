@@ -5,6 +5,20 @@ library work;
 use work.HUC6280_PKG.all;
 
 entity HUC6280_CPU is
+	generic (
+		-- Debug probes (MPR_DBG / TAM_DBG / TLOAD_DBG / SEL_DBG and the 192-bit
+		-- TLOAD_BUF shift register behind them) cost real timing: they hang heavy
+		-- fanout off the microcode outputs MC.LOAD_T, ALU_OUT, IR and STATE, and on
+		-- Primer 25K CD that pushed the MCODE -> PSG write path to -0.938 ns and 428
+		-- setup violations. They were built for the HuCard black-screen hunt, which is
+		-- closed (777ba38), so they are OFF unless a board asks for them.
+		--
+		-- This is a GENERIC and not a top-level tie-off on purpose: 984d3ce established
+		-- on this exact repo that tying an unused debug path off at the top level does
+		-- NOT prune it (it cost Primer 25K 721 and Nano 20K 20 violations). A generic
+		-- constant folds at elaboration and the logic genuinely disappears.
+		DBG_PROBES : integer := 0
+	);
 	port( 
 		CLK		: in std_logic;
 		RST_N		: in std_logic;
@@ -330,6 +344,7 @@ begin
 			TLOAD_STB_I <= '0';
 		elsif rising_edge(CLK) then
 			TLOAD_STB_I <= '0';
+			-- synthesis folds this away entirely when DBG_PROBES = 0
 			if EN = '1' then 
 				case MC.LOAD_T is
 					when "001" => T <= ALU_OUT;
@@ -346,7 +361,7 @@ begin
 				-- suspects: DI wrong means the fetch returned stale data; ALU_OUT wrong
 				-- while DI is right means the ALU passthrough or its control is at fault.
 				-- ADDR_BUS says which byte the CPU was addressing when it committed.
-				if MC.LOAD_T /= "000" then
+				if DBG_PROBES = 1 and MC.LOAD_T /= "000" then
 					TLOAD_STB_I <= '1';
 					TLOAD_BUF(0) <= IR & DI & ADDR_BUS & ALU_OUT & std_logic_vector(STATE) & MC.LOAD_T;
 					for k in 1 to 3 loop
@@ -458,17 +473,28 @@ begin
 						end if;
 					end loop;
 					MPR_LAST <= A;
-					TAM_CNT <= TAM_CNT + 1;
+					if DBG_PROBES = 1 then
+						TAM_CNT <= TAM_CNT + 1;
+					end if;
 				end if;
 			end if; 
 		end if;
 	end process;
 	
-	MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
-	TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
-	TLOAD_DBG <= TLOAD_BUF(3) & TLOAD_BUF(2) & TLOAD_BUF(1) & TLOAD_BUF(0);
-	TLOAD_STB <= TLOAD_STB_I;
-	SEL_DBG <= MPR_SEL & ADDR_BUS(15 downto 13) & MC.ADDR_BUS & A_OUT_BANK;
+	gen_dbg_probes : if DBG_PROBES = 1 generate
+		MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
+		TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
+		TLOAD_DBG <= TLOAD_BUF(3) & TLOAD_BUF(2) & TLOAD_BUF(1) & TLOAD_BUF(0);
+		TLOAD_STB <= TLOAD_STB_I;
+		SEL_DBG <= MPR_SEL & ADDR_BUS(15 downto 13) & MC.ADDR_BUS & A_OUT_BANK;
+	end generate;
+	gen_no_dbg_probes : if DBG_PROBES /= 1 generate
+		MPR_DBG   <= (others => '0');
+		TAM_DBG   <= (others => '0');
+		TLOAD_DBG <= (others => '0');
+		TLOAD_STB <= '0';
+		SEL_DBG   <= (others => '0');
+	end generate;
 
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else

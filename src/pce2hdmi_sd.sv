@@ -243,12 +243,16 @@ end
 // 48 kHz, which puts the HDMI audio clock regeneration wildly out and produces silence.
 //
 // It only has to be a STROBE at the sample rate, so no divided clock net is needed.
-// MUST track clk_pixel: at 74.375 MHz (see the HDMI PLL) 74.375e6 / 48000 = 1549.48,
-// so a period of 1549 gives 48.015 kHz, 0.03% high -- far inside what the ACR N/CTS
-// mechanism absorbs. This constant has already had to move twice as the pixel clock was
-// retuned; if it is ever retuned again this must move with it or the sample rate
-// silently drifts off 48 kHz.
-localparam int AUDIO_DIV = 1549;   // 74.375e6/48000 = 1549.48
+// DERIVED from CLKFRQ, never hardcoded. This constant went stale twice as the Console
+// 60K pixel clock was retuned, and then a hardcoded 1549 (right for that board's
+// 74.375 MHz) silently broke the other two: Nano 20K and Primer 25K instantiate this
+// module with NO generic map, so they run the defaults -- CLKFRQ = 27000 kHz -- and
+// 27e6/1549 is 17.4 kHz, not 48 kHz. Deriving it from the parameter each board already
+// passes correctly makes that class of mistake impossible:
+//   Console 60K  74375 kHz / 48000 = 1549.47 -> 1549 -> 48.02 kHz  (+0.03%)
+//   Nano/Primer  27000 kHz / 48000 =  562.50 ->  562 -> 48.04 kHz  (+0.09%)
+// Both are far inside what the HDMI ACR N/CTS mechanism absorbs.
+localparam int AUDIO_DIV = (CLKFRQ * 1000) / AUDIO_RATE;
 logic [11:0] audio_div_cnt = 12'd0;
 logic clk_audio;
 always_ff @(posedge clk_pixel) begin
