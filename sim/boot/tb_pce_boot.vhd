@@ -41,6 +41,7 @@ entity tb_pce_boot is
 		-- Start dumping raw CPU bus cycles once this many VDC0 writes have happened.
 		DUMP_AFTER_VDC : integer := 0;
 		AC_BUILD_G : integer := 1;
+		NO_CD_G : integer := 0;
 		-- ROM read latency in clk_pce cycles. 0 = ideal zero-wait memory (ROM_RDY tied
 		-- '1'). Nonzero mimics the SHAPE of pcetang_console60k_cd.vhd's read bridge:
 		-- ROM_RDY drops while ROM_RD is asserted, the data is registered, and ROM_RDY
@@ -212,7 +213,7 @@ begin
 
 	-- ------------------------------------------------------------------- DUT
 	dut : entity work.pce_top
-	generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => AC_BUILD_G)
+	generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => NO_CD_G, AC_BUILD => AC_BUILD_G)
 	port map (
 		RESET      => reset,
 		COLD_RESET => reset,

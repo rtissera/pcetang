@@ -631,6 +631,9 @@ architecture rtl of pcetang_console60k_cd is
    -- contain, which separates "TAM never wrote it" from "TAM wrote the wrong value"
    -- from "TAM wrote the wrong register".
    signal dbg_mpr     : std_logic_vector(63 downto 0);
+   -- See gen_cd_bridge below for what this switches off and why.
+   constant HUCARD_ONLY : boolean := true;
+
    signal trap_mpr    : std_logic_vector(63 downto 0) := (others => '0');
    -- TAM evidence frozen at the same instant as trap_mpr. The boot path runs EXACTLY
    -- 7 TAMs before `jsr $4003`; every A it writes is <= $05, so the $A0 in the MPR
@@ -1601,6 +1604,14 @@ begin
 
    -- Real SCSI target, wired to the real MCU-side mount/TOC/sector protocol via
    -- iosys_bl616.v (see pcetang_cd_scsi_plan.md for the full wire-protocol design).
+   -- PCE PORT (2026-09-09): HuCard-only build. CD, Arcade Card (which needs CD) and
+   -- SuperGrafx are all deferred until a plain HuCard boots and runs, so everything they
+   -- pull in is removed rather than merely disabled at runtime -- disabled logic still
+   -- costs area and, more importantly, still loads the timing paths that matter. The
+   -- previous build's overall worst setup path was cd_bridge_inst -> read_lba_23_s4 at
+   -- 0.050 ns slack. Flip HUCARD_ONLY to false (and NO_CD => 0, AC_BUILD => 1 at the
+   -- pce_top instance) to get CD back.
+   gen_cd_bridge : if not HUCARD_ONLY generate
    cd_bridge_inst: entity work.cd_bridge
    port map (
       CLK          => clk_pce,
@@ -1628,6 +1639,22 @@ begin
       SECTOR_DATA_VALID => cd_sector_data_valid_i,
       SECTOR_DATA_LAST  => cd_sector_data_last_i
    );
+   end generate;
+
+   gen_no_cd_bridge : if HUCARD_ONLY generate
+      -- The ten signals cd_bridge drives, held inactive. pce_top is built NO_CD => 1 so
+      -- it ignores them anyway; these exist so the board still elaborates with no bridge.
+      cd_stat_i            <= (others => '0');
+      cd_msg_i             <= (others => '0');
+      cd_stat_get_i        <= '0';
+      cd_data_i            <= (others => '0');
+      cd_data_wr_i         <= '0';
+      cd_sector_req_i      <= '0';
+      cd_sector_lba_i      <= (others => '0');
+      cd_audio_wr_i        <= '0';
+      cd_dm_i              <= '0';
+      cd_sector_is_audio_i <= '0';
+   end generate;
 
    sdram_inst: sdram
    port map (
@@ -1693,7 +1720,7 @@ begin
    -- core/CPU/CORE/MPR_SEL -- the MPR bank-register read mux, the exact signal the
    -- black-screen fault is localised to -- into core/AC/port[N].base_*, at 0.224 ns
    -- slack on a 23.33 ns period. See pce_top.vhd's AC_BUILD comment.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0)
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 1, AC_BUILD => 0)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
