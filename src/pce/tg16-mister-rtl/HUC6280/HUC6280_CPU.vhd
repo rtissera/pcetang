@@ -38,7 +38,20 @@ entity HUC6280_CPU is
 		-- code. TAM_CNT says whether the write-enable fired at all and how often, which
 		-- separates "the write never lands" from "the write lands and the storage or the
 		-- read select is wrong".
-		TAM_DBG	: out std_logic_vector(31 downto 0));
+		TAM_DBG	: out std_logic_vector(31 downto 0);
+		-- PCE PORT (2026-09-09): the measurement that separates the last two candidate
+		-- mechanisms for the T corruption. Run 21 proved T holds $53 (the TAM OPCODE)
+		-- instead of the operand bitmask, but that has two readings and the MPR/TAM dump
+		-- cannot tell them apart:
+		--   (a) control fired EARLY -- MC.LOAD_T asserted on the opcode-fetch cycle
+		--   (b) data arrived LATE   -- LOAD_T fired correctly but DI still held the
+		--                              opcode because the fetch had not completed
+		-- Recording A_OUT alongside DI settles it: if the captured address is the OPCODE
+		-- address, it is (a) and the microcode is at fault; if it is the OPERAND address,
+		-- it is (b) and the memory bridge handed over stale data without stalling the CPU.
+		-- Four most recent T-loads, newest in the low slot, 48 bits each:
+		-- IR | DI | ADDR_BUS(15:0) | ALU_OUT | STATE(4:0) | LOAD_T(2:0).
+		TLOAD_DBG	: out std_logic_vector(191 downto 0));
 end HUC6280_CPU;
 
 architecture rtl of HUC6280_CPU is
@@ -77,6 +90,8 @@ architecture rtl of HUC6280_CPU is
 	signal MPR_LAST 		: std_logic_vector(7 downto 0);
 	signal MPR_SEL 		: std_logic_vector(7 downto 0);
 	signal TAM_CNT 		: unsigned(7 downto 0);
+	type TLOAD_ENTRY_t is array(0 to 3) of std_logic_vector(47 downto 0);
+	signal TLOAD_BUF 	: TLOAD_ENTRY_t := (others => (others => '0'));
 
 	--ALU
 	signal ALU_CTRL 		: ALUCtrl_r;
@@ -293,15 +308,30 @@ begin
 	begin
 		if RST_N = '0' then
 			T <= (others=>'0');
+			TLOAD_BUF <= (others => (others => '0'));
 		elsif rising_edge(CLK) then
 			if EN = '1' then 
 				case MC.LOAD_T is
 					when "001" => T <= ALU_OUT;
 					when "010" => T <= X;
 					when "011" => T <= Y;
-					when "100" => T <= DI; 
+					when "100" => T <= DI;
 					when others => null;
 				end case;
+				-- Record EVERY commit into T, not just the DI case. TAM's own microcode
+				-- row (IR=$53, STATE=1, "[PC]->T") uses LOAD_T="001", which this CPU
+				-- decodes as T <= ALU_OUT -- so a probe watching only "100" would never
+				-- fire for the instruction under investigation.
+				-- DI and ALU_OUT are captured together because they are different
+				-- suspects: DI wrong means the fetch returned stale data; ALU_OUT wrong
+				-- while DI is right means the ALU passthrough or its control is at fault.
+				-- ADDR_BUS says which byte the CPU was addressing when it committed.
+				if MC.LOAD_T /= "000" then
+					TLOAD_BUF(0) <= IR & DI & ADDR_BUS & ALU_OUT & std_logic_vector(STATE) & MC.LOAD_T;
+					for k in 1 to 3 loop
+						TLOAD_BUF(k) <= TLOAD_BUF(k-1);
+					end loop;
+				end if;
 			end if; 
 		end if;
 	end process;
@@ -415,6 +445,7 @@ begin
 	
 	MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
 	TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
+	TLOAD_DBG <= TLOAD_BUF(3) & TLOAD_BUF(2) & TLOAD_BUF(1) & TLOAD_BUF(0);
 
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else

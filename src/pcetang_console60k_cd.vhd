@@ -621,7 +621,7 @@ architecture rtl of pcetang_console60k_cd is
    -- 3 bits, not 2: at 2 bits `trap_sent < 4` is always true, so the emitter looped
    -- forever and flooded debug.log with 36 copies of each trap tag, crowding out the
    -- runtime heartbeat entirely.
-   signal trap_sent  : unsigned(2 downto 0) := (others => '0');
+   signal trap_sent  : unsigned(3 downto 0) := (others => '0');
    signal trap_emit  : std_logic := '0';
    signal trap_gap   : unsigned(19 downto 0) := (others => '0');
    signal cpu_bank   : std_logic_vector(7 downto 0);
@@ -641,6 +641,11 @@ architecture rtl of pcetang_console60k_cd is
    -- which separates "the write-enable never fired" from "it fired and the storage or
    -- the read select is wrong" -- the two hypotheses the MPR dump alone cannot tell apart.
    signal trap_tam    : std_logic_vector(31 downto 0) := (others => '0');
+   -- Four most recent T-loads, frozen with the rest of the trap. Tags 0xE5..0xE8.
+   signal dbg_tload   : std_logic_vector(191 downto 0);
+   signal trap_tload  : std_logic_vector(191 downto 0) := (others => '0');
+   signal dbg_wait_ever : std_logic;
+   signal trap_wait_ever : std_logic := '0';
    signal dbg_tam     : std_logic_vector(31 downto 0);
    signal wram_dly    : unsigned(2 downto 0) := (others => '0');
    constant WRAM_BYTES : integer := 8192;   -- the 8KB a plain HuCard actually uses
@@ -1740,6 +1745,8 @@ begin
       RAMTEST_D => wram_d, RAMTEST_WE => wram_we, RAMTEST_Q => wram_q,
       DBG_MPR => dbg_mpr,
       DBG_TAM => dbg_tam,
+      DBG_TLOAD => dbg_tload,
+      DBG_WAIT_EVER => dbg_wait_ever,
 
       ROM_RD    => rom_rd_i,
       ROM_RDY   => rom_rdy_i,
@@ -1921,17 +1928,24 @@ begin
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
             -- Once the trap has fired, spend the next three heartbeat slots emitting the
             -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
-            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 5 then
+            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 9 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
-               dbg_trace_tag <= x"E" & "0" & std_logic_vector(trap_sent);
-               case trap_sent is
-                  when "000" => dbg_trace_data <= trap_buf(0) & trap_buf(1) & "0000000000000000";
-                  when "001" => dbg_trace_data <= trap_buf(2) & trap_buf(3) & "0000000000000000";
-                  when "010" => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
-                  when "011" => dbg_trace_data <= trap_mpr;   -- MPR7..MPR0, tag 0xE3
+               dbg_trace_tag <= x"E" & std_logic_vector(trap_sent);
+               case std_logic_vector(trap_sent) is
+                  when "0000" => dbg_trace_data <= trap_buf(0) & trap_buf(1) & "0000000000000000";
+                  when "0001" => dbg_trace_data <= trap_buf(2) & trap_buf(3) & "0000000000000000";
+                  when "0010" => dbg_trace_data <= trap_buf(4) & trap_buf(5) & "0000000000000000";
+                  when "0011" => dbg_trace_data <= trap_mpr;   -- MPR7..MPR0, tag 0xE3
                   -- tag 0xE4: TAM_CNT | IR | T | A, all frozen at the trap.
-                  when others => dbg_trace_data <= trap_tam & x"00000000";
+                  when "0100" => dbg_trace_data <= trap_tam & x"00000000";
+                  -- 0xE5..0xE8: the four T-loads, newest first. 48 bits used of 64:
+                  -- IR | DI | ADDR_BUS(15:0) | A | STATE(4:0) | LOAD_T(2:0), then the
+                  -- sticky WAIT_N-ever-low flag in the LSB so it rides along with each.
+                  when "0101" => dbg_trace_data <= trap_tload(47 downto 0)    & "000000000000000" & trap_wait_ever;
+                  when "0110" => dbg_trace_data <= trap_tload(95 downto 48)   & "000000000000000" & trap_wait_ever;
+                  when "0111" => dbg_trace_data <= trap_tload(143 downto 96)  & "000000000000000" & trap_wait_ever;
+                  when others => dbg_trace_data <= trap_tload(191 downto 144) & "000000000000000" & trap_wait_ever;
                end case;
             elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
@@ -1993,6 +2007,8 @@ begin
                trap_fired <= '1';   -- CPU just entered a nonexistent bank: freeze
                trap_mpr   <= dbg_mpr;
                trap_tam   <= dbg_tam;
+               trap_tload <= dbg_tload;
+               trap_wait_ever <= dbg_wait_ever;
             end if;
          end if;
       end if;

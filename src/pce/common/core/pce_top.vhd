@@ -222,6 +222,11 @@ entity pce_top is
 		-- PCE PORT (2026-09-07): MPR bank registers, for the board's derailment trace.
 		DBG_MPR    : out std_logic_vector(63 downto 0);
 		DBG_TAM    : out std_logic_vector(31 downto 0);
+		DBG_TLOAD  : out std_logic_vector(191 downto 0);
+		-- Sticky: has WAIT_N EVER been low since reset? The previous "WAIT_N never asserted"
+		-- claim came from a heartbeat sample, which can miss a stall entirely. If the CPU is
+		-- never stalled while ROM reads are outstanding, mechanism (b) -- stale DI -- is live.
+		DBG_WAIT_EVER : out std_logic;
 
 		ROM_RD		: out std_logic;
 		ROM_RDY		: in  std_logic;
@@ -464,6 +469,8 @@ signal AC_SEL_N   : std_logic;
 signal AC_RAM_CS_N: std_logic;
 signal AC_RAM_A   : std_logic_vector(20 downto 0);
 signal AC_DO      : std_logic_vector(7 downto 0);
+signal CPU_WAIT_N_I : std_logic;
+signal WAIT_EVER_LOW : std_logic := '0';
 
 component ARCADE_CARD is
 	port(
@@ -524,7 +531,7 @@ generic map ( VT_PATH_A => VT_PATH_A )
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,
-	WAIT_N	=> ROM_RDY and CD_RAM_RDY and not CPU_PAUSE_EN,
+	WAIT_N	=> CPU_WAIT_N_I,
 
 	IRQ1_N	=> VDC0_IRQ_N and VDC1_IRQ_N,
 	IRQ2_N	=> CD_IRQ_N,
@@ -552,6 +559,7 @@ port map(
 	VDCNUM   => VDCNUM,
 	MPR_DBG  => DBG_MPR,
 	TAM_DBG  => DBG_TAM,
+	TLOAD_DBG => DBG_TLOAD,
 
 	AUD_LDATA=> PCE_SL,
 	AUD_RDATA=> PCE_SR
@@ -1288,6 +1296,22 @@ gen_no_ac : if AC_BUILD = 0 generate
 	AC_RAM_CS_N <= '1';
 	AC_RAM_A    <= (others => '0');
 end generate;
+
+CPU_WAIT_N_I <= ROM_RDY and CD_RAM_RDY and not CPU_PAUSE_EN;
+DBG_WAIT_EVER <= WAIT_EVER_LOW;
+
+-- Sticky, not sampled. A heartbeat sample of WAIT_N can sit entirely between stalls and
+-- report "never asserted" on a design that stalls constantly, which is how the earlier
+-- claim was produced. This latches the first stall and never clears.
+process (CLK) begin
+	if rising_edge(CLK) then
+		if RESET_N = '0' then
+			WAIT_EVER_LOW <= '0';
+		elsif CPU_WAIT_N_I = '0' then
+			WAIT_EVER_LOW <= '1';
+		end if;
+	end if;
+end process;
 
 PSG_SR <= signed(PCE_SR(23 downto 8));
 PSG_SL <= signed(PCE_SL(23 downto 8));

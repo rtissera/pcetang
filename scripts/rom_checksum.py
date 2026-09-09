@@ -65,6 +65,7 @@ def parse_log(path):
     trap = []
     mpr = []
     tam = {}
+    tloads = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -74,6 +75,19 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if 0xE5 <= tag <= 0xE8:
+                # IR | DI | ADDR_BUS(15:0) | A | STATE(5) LOAD_T(3) | pad | wait_ever
+                v = val
+                tloads[tag - 0xE5] = {
+                    "ir": (v >> 56) & 0xFF,
+                    "di": (v >> 48) & 0xFF,
+                    "addr": (v >> 32) & 0xFFFF,
+                    "alu": (v >> 24) & 0xFF,
+                    "state": (v >> 19) & 0x1F,
+                    "load_t": (v >> 16) & 0x7,
+                    "wait_ever": v & 1,
+                }
+                continue
             if tag == 0xE4:
                 # TAM_CNT | IR | T | A, then 4 pad bytes.
                 tam["cnt"] = payload[0]
@@ -116,7 +130,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram, trap, mpr, tam
+    return passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads
 
 
 def main():
@@ -138,7 +152,7 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram, trap, mpr, tam = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads = parse_log(args.log)
 
     if mpr:
         print()
@@ -187,6 +201,38 @@ def main():
         print("  NOTE: $A0 appears in the MPR dump but the boot path writes only $FF, $F8")
         print("        and $01..$05 -- no A value in it can be $A0. $A0 was not produced by")
         print("        masking a written value; it came from a write this code did not make.")
+
+    if tloads:
+        print()
+        print("T-LOAD HISTORY (last 4 commits of DI into T, newest first).")
+        print("This is the measurement that separates the two live mechanisms:")
+        print("  DI captured at the OPCODE address  -> control fired EARLY (microcode)")
+        print("  DI captured at the OPERAND address -> data arrived LATE (memory bridge)")
+        print()
+        print("   #  IR  DI  ADDR  ALU_OUT STATE LOAD_T   (LOAD_T 1=ALU_OUT 2=X 3=Y 4=DI)")
+        for i in sorted(tloads):
+            e = tloads[i]
+            print(f"   {i}  {e['ir']:02X}  {e['di']:02X}  {e['addr']:04X}    {e['alu']:02X}"
+                  f"     {e['state']:02X}     {e['load_t']}")
+        we = [e["wait_ever"] for e in tloads.values()]
+        print()
+        print(f"  WAIT_N ever asserted since reset (sticky): {'YES' if any(we) else 'NO'}")
+        if not any(we):
+            print("    -> the CPU was NEVER stalled. If a ROM fetch ever took longer than")
+            print("       the bus cycle, DI would have been stale and nothing held the CPU.")
+        # The decisive automatic call, where the data allows one.
+        for i in sorted(tloads):
+            e = tloads[i]
+            if e["di"] == 0x53 or e["alu"] == 0x53:
+                print()
+                src = "ALU_OUT" if e["alu"] == 0x53 else "DI"
+                print(f"  Entry {i} carries $53 (the TAM opcode) on {src}, at ADDR {e['addr']:04X},")
+                print(f"  committed via LOAD_T={e['load_t']}. TAM's microcode row uses 1 = ALU_OUT.")
+                print("  Compare that against the TAM instruction's own address in the ROM:")
+                print("  equal -> the opcode byte was re-read or never replaced (mechanism b);")
+                print("  one greater -> the operand address was driven but stale data came")
+                print("  back (also b, bridge side); anything else -> chase the microcode.")
+                break
 
 
     if trap:
