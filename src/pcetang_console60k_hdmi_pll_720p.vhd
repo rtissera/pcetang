@@ -196,7 +196,21 @@ begin
          FCLKIN     => "50",
          IDIV_SEL   => 1,     -- /1 -> PFD 50 MHz (within 19-87.5 MHz)
          FBDIV_SEL  => 1,
-         MDIV_SEL   => 14,    -- x14.75 -> FVCO 737.5 MHz, in the 700-1400 range
+         -- PCE PORT (2026-09-09, second pass): 22 + 2/8 with ODIV 15/3, not 14 + 6/8 with
+         -- ODIV 10/2. The first genlock build used 73.75 MHz, which is 4.06 output lines
+         -- per frame SLOWER than the core -- so every resync truncated 4 lines and the TV
+         -- saw a 746-line frame instead of 750. It locked, rejected the non-standard
+         -- vertical timing, and re-locked, over and over.
+         --
+         --   core          59.9183 Hz   (42.857 MHz / 2, 262 lines x 1365 dots)
+         --   73.75 MHz     59.5960 Hz   -4.06 lines/frame   <- rejected by the TV
+         --   74.1667 MHz   59.9327 Hz   +0.18 lines/frame   <- this
+         --
+         -- At +0.18 lines the resync lands essentially on the frame boundary, so almost
+         -- every frame is a full 750 lines and the raster stays standard. Searched over
+         -- every legal MDIV/MDIV_FRAC/ODIV combination with FVCO in 700-1400 and
+         -- ODIV0 = 5 x ODIV1; this is the closest match available from a 50 MHz input.
+         MDIV_SEL   => 22,    -- x22.25 -> FVCO 1112.5 MHz, in the 700-1400 range
          -- PCE PORT (2026-09-09): .875 -> .75, deliberately making the output frame rate
          -- slightly SLOWER than the core's, which is what the VSYNC genlock in
          -- pce2hdmi_sd.sv requires. The direction matters and is easy to get backwards:
@@ -209,10 +223,9 @@ begin
          -- genlock reset therefore truncates only blanking. Were the output FASTER (as
          -- it was at 74.375 MHz, 60.10 Hz) the raster would already have wrapped and the
          -- reset would cut lines off the TOP of the picture instead.
-         MDIV_FRAC_SEL => 6,  -- the .75 (eighths)
-         ODIV0_SEL  => 10,    -- 737.5/10 = 73.75 MHz (clk_pixel, -0.67% vs 74.25 -- this
-                              -- exact value ran with valid sync on this TV previously)
-         ODIV1_SEL  => 2,     -- 737.5/2 = 368.75 MHz (clk_5x_pixel, exact 5x ratio)
+         MDIV_FRAC_SEL => 2,  -- the .25 (eighths)
+         ODIV0_SEL  => 15,    -- 1112.5/15 = 74.1667 MHz (clk_pixel, -0.11% vs 74.25)
+         ODIV1_SEL  => 3,     -- 1112.5/3 = 370.833 MHz (clk_5x_pixel, exact 5x ratio)
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE"
       )

@@ -235,11 +235,12 @@ end
 // 48 kHz, which puts the HDMI audio clock regeneration wildly out and produces silence.
 //
 // It only has to be a STROBE at the sample rate, so no divided clock net is needed.
-// MUST track clk_pixel: at 73.75 MHz (the genlock-friendly rate, see the HDMI PLL)
-// 73.75e6 / 48000 = 1536.46, so a period of 1536 gives 48.01 kHz, 0.03% high -- far
-// inside what the ACR N/CTS mechanism absorbs. If the pixel clock is ever retuned this
-// constant has to move with it, or the sample rate silently drifts off 48 kHz.
-localparam int AUDIO_DIV = 1536;
+// MUST track clk_pixel: at 74.1667 MHz (see the HDMI PLL) 74.1667e6 / 48000 = 1545.14,
+// so a period of 1545 gives 48.00 kHz, 0.01% high -- far inside what the ACR N/CTS
+// mechanism absorbs. This constant has already had to move twice as the pixel clock was
+// retuned; if it is ever retuned again this must move with it or the sample rate
+// silently drifts off 48 kHz.
+localparam int AUDIO_DIV = 1545;
 logic [11:0] audio_div_cnt = 12'd0;
 logic clk_audio;
 always_ff @(posedge clk_pixel) begin
@@ -281,17 +282,19 @@ wire tmdsClk;
 // of it did not help, so it was the reset fanout itself. hdmi.sv now has a `sync_reset`
 // that touches ONLY the cx/cy counters -- one extra term, nothing else.
 //
-// DIRECTION MATTERS and is easy to get backwards. The pixel clock is deliberately set so
-// the output frame is slightly SLOWER than the source (see the HDMI PLL's comment):
-//     core   ~59.92 Hz   output  ~59.60 Hz at 73.75 MHz
-// so the core's VSYNC arrives while the output still has ~4 lines to run, i.e. inside
-// 720p's 30-line vertical blanking, and the restart truncates blanking only. Were the
-// output FASTER it would already have wrapped and the restart would cut lines off the
-// TOP of the visible picture.
+// HOW CLOSE the rates are is what decides whether this works. The first build ran the
+// output 4.06 lines/frame slower than the core (73.75 MHz), so every resync truncated 4
+// lines, the TV got a 746-line frame instead of 750, and it locked / dropped / re-locked
+// continuously. The pixel clock is now the closest match a 50 MHz input can produce:
+//     core 59.9183 Hz    output 59.9327 Hz at 74.1667 MHz    +0.18 lines/frame
+// so the resync lands essentially ON the frame boundary and almost every frame stays a
+// full 750 lines.
 //
-// The cy guard makes that a property rather than an assumption: if the raster is not in
-// blanking when VSYNC arrives, the resync is skipped. A wrong clock choice therefore
-// degrades to "still rolls", never to a corrupted picture.
+// That also means VSYNC now arrives just AFTER the wrap rather than before it, so the
+// guard has to accept BOTH sides of the boundary -- a blanking-only test would reject
+// every resync and leave it free-running. The window is deliberately a few lines wide on
+// each side to absorb jitter in the crossing, and outside it the resync is skipped, so a
+// bad clock choice still degrades to "rolls slowly" rather than a corrupted picture.
 reg vs_meta, vs_sync, vs_prev;
 reg in_vblank;
 reg hdmi_resync;
@@ -299,7 +302,7 @@ always_ff @(posedge clk_pixel) begin
 	vs_meta <= video_vs;      // clk (clk_pce) -> clk_pixel, standard 2-flop synchroniser
 	vs_sync <= vs_meta;
 	vs_prev <= vs_sync;
-	in_vblank <= (cy >= frameHeight - 10'd28);
+	in_vblank <= (cy >= frameHeight - 10'd4) || (cy <= 10'd4);
 	hdmi_resync <= vs_sync & ~vs_prev & in_vblank;
 end
 
