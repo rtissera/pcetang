@@ -156,3 +156,24 @@ IO_LOC  "uart_txd" U15;
 IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC  "uart_rxd" V14;
 IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=3.3;
+
+// DS2 (PlayStation-style) pads on PMOD1, both players. Pins taken verbatim from
+// tangcore monitor/src/boards/console.cst -- the monitor core reads these same pads for
+// the TangCore menu, so these assignments are known-good on this hardware.
+// ds_miso needs PULL_MODE=UP: it is the pad's open-drain data line.
+IO_LOC  "ds_cs"    W19;   // PMOD1_IO0
+IO_PORT "ds_cs"    PULL_MODE=NONE IO_TYPE=LVCMOS33;
+IO_LOC  "ds_mosi"  F19;   // PMOD1_IO2
+IO_PORT "ds_mosi"  PULL_MODE=NONE IO_TYPE=LVCMOS33;
+IO_LOC  "ds_miso"  E22;   // PMOD1_IO4
+IO_PORT "ds_miso"  PULL_MODE=UP IO_TYPE=LVCMOS33;
+IO_LOC  "ds_clk"   E21;   // PMOD1_IO6
+IO_PORT "ds_clk"   PULL_MODE=NONE IO_TYPE=LVCMOS33;
+IO_LOC  "ds_cs2"   W20;   // PMOD1_IO1
+IO_PORT "ds_cs2"   PULL_MODE=NONE IO_TYPE=LVCMOS33;
+IO_LOC  "ds_mosi2" F20;   // PMOD1_IO3
+IO_PORT "ds_mosi2" PULL_MODE=NONE IO_TYPE=LVCMOS33;
+IO_LOC  "ds_miso2" D22;   // PMOD1_IO5
+IO_PORT "ds_miso2" PULL_MODE=UP IO_TYPE=LVCMOS33;
+IO_LOC  "ds_clk2"  D21;   // PMOD1_IO7
+IO_PORT "ds_clk2"  PULL_MODE=NONE IO_TYPE=LVCMOS33;

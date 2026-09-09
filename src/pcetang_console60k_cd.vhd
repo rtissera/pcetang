@@ -111,6 +111,20 @@ entity pcetang_console60k_cd is
       key_reset_n : in    std_logic;                       -- S2, active low
       leds_n      : out   std_logic_vector(1 downto 0);
 
+      -- DS2 (PlayStation-style) pads on PMOD1, both players. Pins and wiring copied from
+      -- tangcore's monitor core (monitor/src/boards/console.cst), which is the bitstream
+      -- that reads these pads for the TangCore menu -- that is why the menu responds to a
+      -- pad while a game core does not: the reader lives in the monitor, and any core
+      -- that does not implement one gets nothing.
+      ds_cs       : out   std_logic;                      -- PMOD1_IO0
+      ds_mosi     : out   std_logic;                      -- PMOD1_IO2
+      ds_miso     : in    std_logic;                      -- PMOD1_IO4
+      ds_clk      : out   std_logic;                      -- PMOD1_IO6
+      ds_cs2      : out   std_logic;                      -- PMOD1_IO1
+      ds_mosi2    : out   std_logic;                      -- PMOD1_IO3
+      ds_miso2    : in    std_logic;                      -- PMOD1_IO5
+      ds_clk2     : out   std_logic;                      -- PMOD1_IO7
+
       O_sdram_clk   : out   std_logic;
       O_sdram_cke   : out   std_logic;
       O_sdram_cs_n  : out   std_logic;
@@ -321,10 +335,26 @@ architecture rtl of pcetang_console60k_cd is
    signal overlay_x     : std_logic_vector(7 downto 0);
    signal overlay_y     : std_logic_vector(7 downto 0);
    signal overlay_color : std_logic_vector(14 downto 0);
+   -- Verilog reader, vendored from tangcore's monitor core (src/input/). Outputs are
+   -- ACTIVE HIGH in the same 12-bit DS2/SNES order iosys_bl616.v documents:
+   -- (R L X A RT LT DN UP START SELECT Y B).
+   component controller_ds2 is
+      generic ( FREQ : integer := 21_600_000 );
+      port (
+         clk          : in  std_logic;
+         snes_buttons : out std_logic_vector(11 downto 0);
+         ds_clk       : out std_logic;
+         ds_miso      : in  std_logic;
+         ds_mosi      : out std_logic;
+         ds_cs        : out std_logic
+      );
+   end component;
+
    signal joy1_ds2      : std_logic_vector(11 downto 0);
    signal hid1, hid2    : std_logic_vector(15 downto 0);
    signal joy1          : std_logic_vector(11 downto 0);
    signal joy2          : std_logic_vector(11 downto 0);
+   signal joy2_ds2      : std_logic_vector(11 downto 0);
 
    -- Real multitap/2-player support (2026-08-31) -- see joy_active's own
    -- header comment further down for the full derivation.
@@ -858,9 +888,28 @@ begin
    -- START SELECT Y B. Not wired to a real controller in this first cut -- tied
    -- inactive (all 1, active-low-style unpressed per that convention) so iosys_bl616
    -- still has something well-formed to poll.
-   joy1_ds2 <= (others => '0');
+   -- PCE PORT (2026-09-09): REAL pad readers. joy1_ds2 used to be tied to zero with the
+   -- note "not wired to a real controller in this first cut", which meant the core had NO
+   -- pad input at all: joy1 collapsed to hid1, itself only populated by USB gamepads.
+   -- The board's pads are DS2 over PMOD1 and were never read by this bitstream.
+   --
+   -- Note the data flow, which is easy to get backwards: the FPGA reads the pads and
+   -- SENDS them to the BL616 (iosys opcode 3, main.cpp:441 fills joy1_state from it).
+   -- The MCU does not read these pads. So a core without a reader breaks menu navigation
+   -- too -- the menu only kept working because it runs on monitor.bin, a different
+   -- bitstream that has one.
+   ds2_p1 : controller_ds2
+      generic map ( FREQ => 42_857_000 )      -- clk_pce
+      port map ( clk => clk_pce, snes_buttons => joy1_ds2,
+                 ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
+
+   ds2_p2 : controller_ds2
+      generic map ( FREQ => 42_857_000 )
+      port map ( clk => clk_pce, snes_buttons => joy2_ds2,
+                 ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
+
    joy1     <= joy1_ds2 or hid1(11 downto 0);
-   joy2     <= hid2(11 downto 0);
+   joy2     <= joy2_ds2 or hid2(11 downto 0);
 
    sys_inst: iosys_bl616
    generic map (
@@ -875,7 +924,7 @@ begin
 
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
-      joy1 => joy1, joy2 => (others => '0'),
+      joy1 => joy1, joy2 => joy2,
       hid1 => hid1, hid2 => hid2,
 
       rom_loading => rom_loading, rom_do => rom_do, rom_do_valid => rom_do_valid,
