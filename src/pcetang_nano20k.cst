@@ -42,3 +42,24 @@ IO_LOC  "leds_n[0]" 15;
 IO_PORT "leds_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 IO_LOC  "leds_n[1]" 16;
 IO_PORT "leds_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
+// DualShock 2 pads -- copied verbatim from nand2mario's monitor/src/boards/nano20k.cst
+// so a pad that works in the TangCore menu works in this core too.
+IO_LOC "ds_clk" 17;
+IO_PORT "ds_clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "ds_miso" 19;
+IO_PORT "ds_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "ds_mosi" 20;
+IO_PORT "ds_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "ds_cs" 18;
+IO_PORT "ds_cs" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+IO_LOC "ds_clk2" 52;
+IO_PORT "ds_clk2" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "ds_miso2" 71;
+IO_PORT "ds_miso2" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "ds_mosi2" 53;
+IO_PORT "ds_mosi2" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "ds_cs2" 72;
+IO_PORT "ds_cs2" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+

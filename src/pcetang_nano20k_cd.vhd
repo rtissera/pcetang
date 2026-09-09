@@ -84,6 +84,18 @@ entity pcetang_nano20k_cd is
       O_sdram_ba    : out   std_logic_vector(1 downto 0);
       IO_sdram_dq   : inout std_logic_vector(31 downto 0);
 
+      -- DualShock 2 pads. Pin assignment taken verbatim from nand2mario's own
+      -- monitor/src/boards/nano20k.cst. Nano 20K has no PMOD connector -- these are raw
+      -- GPIO header pins (17/18/19/20 for pad 1, 52/53/71/72 for pad 2), which is how
+      -- the whole TangCore ecosystem wires pads on this board.
+      ds_cs       : out   std_logic;                      -- pin 18
+      ds_mosi     : out   std_logic;                      -- pin 20
+      ds_miso     : in    std_logic;                      -- pin 19
+      ds_clk      : out   std_logic;                      -- pin 17
+      ds_cs2      : out   std_logic;                      -- pin 72
+      ds_mosi2    : out   std_logic;                      -- pin 53
+      ds_miso2    : in    std_logic;                      -- pin 71
+      ds_clk2     : out   std_logic;                      -- pin 52
       tmds_clk_n  : out   std_logic;
       tmds_clk_p  : out   std_logic;
       tmds_d_n    : out   std_logic_vector(2 downto 0);
@@ -263,7 +275,23 @@ architecture rtl of pcetang_nano20k_cd is
    signal overlay_x     : std_logic_vector(7 downto 0);
    signal overlay_y     : std_logic_vector(7 downto 0);
    signal overlay_color : std_logic_vector(14 downto 0);
+   -- Real DS2 pad reader, vendored from nand2mario's monitor core. Without this the
+   -- joypad signals were tied to zero and NOTHING read the pads at all -- the menus
+   -- only ever worked because monitor.bin is a different bitstream with its own reader.
+   component controller_ds2 is
+      generic ( FREQ : integer := 21_600_000 );
+      port (
+         clk          : in  std_logic;
+         snes_buttons : out std_logic_vector(11 downto 0);
+         ds_clk       : out std_logic;
+         ds_miso      : in  std_logic;
+         ds_mosi      : out std_logic;
+         ds_cs        : out std_logic
+      );
+   end component;
+
    signal joy1_ds2      : std_logic_vector(11 downto 0);
+   signal joy2_ds2      : std_logic_vector(11 downto 0);
    signal hid1, hid2    : std_logic_vector(15 downto 0);
    signal joy1          : std_logic_vector(11 downto 0);
    signal joy2          : std_logic_vector(11 downto 0);
@@ -474,9 +502,19 @@ begin
       RAM_B_WAIT => ram_b_wait
    );
 
-   joy1_ds2 <= (others => '0');
+   ds2_p1 : controller_ds2
+      generic map ( FREQ => 43_200_000 )      -- clk_pce
+      port map ( clk => clk_pce, snes_buttons => joy1_ds2,
+                 ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
+
+   ds2_p2 : controller_ds2
+      generic map ( FREQ => 43_200_000 )
+      port map ( clk => clk_pce, snes_buttons => joy2_ds2,
+                 ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
+
+   -- OR'd with the MCU's HID report so a USB pad and a DS2 pad both work.
    joy1     <= joy1_ds2 or hid1(11 downto 0);
-   joy2     <= hid2(11 downto 0);
+   joy2     <= joy2_ds2 or hid2(11 downto 0);
 
    sys_inst: iosys_bl616
    generic map (
@@ -490,7 +528,7 @@ begin
 
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
-      joy1 => joy1, joy2 => (others => '0'),
+      joy1 => joy1, joy2 => joy2,
       hid1 => hid1, hid2 => hid2,
 
       rom_loading => rom_loading, rom_do => rom_do, rom_do_valid => rom_do_valid,
@@ -895,8 +933,22 @@ begin
    -- Reads from joy_active (real per-player mux, see its own header comment
    -- above), not directly from joy1 -- joy_port selects which real player's
    -- HID state is currently active.
-   joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
-             joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
+   -- PCE PORT (2026-09-09), ported from Console 60K where it was proven on hardware.
+   -- Two real bugs in the line this replaces:
+   --   1. Missing inversion. iosys_bl616's joy1/joy2 are active HIGH; the PCE pad
+   --      protocol is active LOW (pce_top defaults joy_in to 16#0FFF#). Without the
+   --      `not`, every button read as permanently pressed.
+   --   2. Wrong d-pad bits. joy1[11:0] is (R L X A RT LT DN UP START SELECT Y B), so
+   --      the d-pad is bits 4/5/6/7 -- bits 10/11 are the SHOULDER buttons, which is
+   --      what the old code was reading for left/right.
+   -- I/II also accept either face-button pair (A or B, X or Y), so the pad's natural
+   -- two-button cluster works whichever way round the user holds it.
+   joy_in <= not (joy_active(6) & joy_active(5) & joy_active(7) & joy_active(4))
+                when joy_out(0) = '1'
+             else not (joy_active(3)
+                       & joy_active(2)
+                       & (joy_active(9) or joy_active(1))    -- II  <- X or Y
+                       & (joy_active(8) or joy_active(0)));  -- I   <- A or B
 
    hdmi_out: pce2hdmi_sd
    port map (

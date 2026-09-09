@@ -97,6 +97,17 @@ entity pcetang_primer25k_cd is
       O_sdram_ba    : out   std_logic_vector(1 downto 0);
       IO_sdram_dq   : inout std_logic_vector(15 downto 0);
 
+      -- DualShock 2 pads. Pin assignment taken verbatim from nand2mario's own
+      -- monitor/src/boards/primer25k.cst -- the same ecosystem this core loads under --
+      -- rather than guessed, so a pad that works in the TangCore menu works here too.
+      ds_cs       : out   std_logic;                      -- A11
+      ds_mosi     : out   std_logic;                      -- E11
+      ds_miso     : in    std_logic;                      -- K11
+      ds_clk      : out   std_logic;                      -- L5
+      ds_cs2      : out   std_logic;                      -- A10
+      ds_mosi2    : out   std_logic;                      -- E10
+      ds_miso2    : in    std_logic;                      -- L11
+      ds_clk2     : out   std_logic;                      -- K5
       tmds_clk_n  : out   std_logic;
       tmds_clk_p  : out   std_logic;
       tmds_d_n    : out   std_logic_vector(2 downto 0);
@@ -295,7 +306,23 @@ architecture rtl of pcetang_primer25k_cd is
    signal overlay_x     : std_logic_vector(7 downto 0);
    signal overlay_y     : std_logic_vector(7 downto 0);
    signal overlay_color : std_logic_vector(14 downto 0);
+   -- Real DS2 pad reader, vendored from nand2mario's monitor core. Without this the
+   -- joypad signals were tied to zero and NOTHING read the pads at all -- the menus
+   -- only ever worked because monitor.bin is a different bitstream with its own reader.
+   component controller_ds2 is
+      generic ( FREQ : integer := 21_600_000 );
+      port (
+         clk          : in  std_logic;
+         snes_buttons : out std_logic_vector(11 downto 0);
+         ds_clk       : out std_logic;
+         ds_miso      : in  std_logic;
+         ds_mosi      : out std_logic;
+         ds_cs        : out std_logic
+      );
+   end component;
+
    signal joy1_ds2      : std_logic_vector(11 downto 0);
+   signal joy2_ds2      : std_logic_vector(11 downto 0);
    signal hid1, hid2    : std_logic_vector(15 downto 0);
    signal joy1          : std_logic_vector(11 downto 0);
    signal joy2          : std_logic_vector(11 downto 0);
@@ -390,11 +417,27 @@ architecture rtl of pcetang_primer25k_cd is
    signal romb_do   : std_logic_vector(7 downto 0);
    signal romb_wait : std_logic;
 
-   type romb_state_t is (RB_IDLE, RB_SETTLE, RB_WAIT);
+   -- RB_ADDR: let RAM_B_ADDR settle a full cycle BEFORE toggling the request, so
+   -- sdram.sv can never sample a half-updated address. Ported from Console 60K, which
+   -- is the only board whose bridge has been proven on real hardware.
+   type romb_state_t is (RB_IDLE, RB_ADDR, RB_SETTLE, RB_WAIT);
 
    -- Read side (gameplay fetch, one pce_top ROM_RD per byte)
    signal rd_state       : romb_state_t := RB_IDLE;
-   signal rd_settle_cnt  : unsigned(2 downto 0) := (others => '0');
+   signal rd_settle_cnt  : unsigned(5 downto 0) := (others => '0');
+   -- Hit path only: a port-B line-cache hit legitimately never raises romb_wait, so the
+   -- FSM needs a generous window before concluding "this was a hit" -- see RB_SETTLE.
+   constant SETTLE_HIT   : unsigned(5 downto 0) := "010000";  -- 16 clk_pce
+   signal rd_seen_wait   : std_logic := '0';
+   signal rd_done        : std_logic := '0';
+   signal rd_wdog        : unsigned(11 downto 0) := (others => '0');
+   signal dbg_rd_timeout_cnt : unsigned(15 downto 0) := (others => '0');
+   -- Combinational ROM_RDY. See its assignment below for why the registered rom_rdy_i
+   -- alone is not enough.
+   signal rom_rdy_comb   : std_logic;
+   signal rom_rd_prev    : std_logic := '0';
+   signal rd_a_last      : std_logic_vector(rom_a'range) := (others => '1');
+   signal rd_new_req     : std_logic;
    signal rd_req         : std_logic := '0';
    signal rd_addr        : std_logic_vector(24 downto 0);
 
@@ -606,9 +649,19 @@ begin
    -- 25K hardware -- same code, same hazard).
    romb_req  <= wr_req xor rd_req;
 
-   joy1_ds2 <= (others => '0');
+   ds2_p1 : controller_ds2
+      generic map ( FREQ => 42_857_000 )      -- clk_pce
+      port map ( clk => clk_pce, snes_buttons => joy1_ds2,
+                 ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
+
+   ds2_p2 : controller_ds2
+      generic map ( FREQ => 42_857_000 )
+      port map ( clk => clk_pce, snes_buttons => joy2_ds2,
+                 ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
+
+   -- OR'd with the MCU's HID report so a USB pad and a DS2 pad both work.
    joy1     <= joy1_ds2 or hid1(11 downto 0);
-   joy2     <= hid2(11 downto 0);
+   joy2     <= joy2_ds2 or hid2(11 downto 0);
 
    sys_inst: iosys_bl616
    generic map (
@@ -622,7 +675,7 @@ begin
 
       overlay => overlay, overlay_x => overlay_x, overlay_y => overlay_y,
       overlay_color => overlay_color,
-      joy1 => joy1, joy2 => (others => '0'),
+      joy1 => joy1, joy2 => joy2,
       hid1 => hid1, hid2 => hid2,
 
       rom_loading => rom_loading, rom_do => rom_do, rom_do_valid => rom_do_valid,
@@ -776,39 +829,90 @@ begin
    -- byte). ROM_RDY is held low (stalling the CPU via pce_top's WAIT_N path -- see
    -- HUC6280.vhd's WAIT_N handling, no timeout, verified architecturally sound) until the
    -- byte is ready.
+   -- PCE PORT (2026-09-09): start on a NEW request, not on a level. This is the bug
+   -- that black-screened Console 60K, and this board had the identical shape.
+   --
+   -- rom_rd_i is a LEVEL held for the whole CPU bus cycle. Starting whenever it is high
+   -- means that the instant the FSM returns to RB_IDLE it re-triggers on the SAME
+   -- still-asserted read and the SAME unchanged rom_a -- fetching every byte twice.
+   -- While the duplicate is in flight the CPU advances; when it completes the bridge
+   -- presents the PREVIOUS byte and raises ROM_RDY, so the CPU accepts byte(N-1) as its
+   -- byte(N). On Console 60K that one byte made every TAM write the wrong MPR set and
+   -- the CPU died on its first stack access. Nano 20K never had this -- its arbiter
+   -- already edge-detects (see its rom_rd_new).
+   --
+   -- Two conditions OR'd, deliberately: a rising edge catches a genuinely new bus cycle,
+   -- a change of rom_a catches back-to-back fetches where the read line never drops.
+   -- Requiring BOTH would stall on whichever case the CPU does not exhibit.
+   rd_new_req <= '1' when rom_rd_i = '1' and (rom_rd_prev = '0' or rom_a /= rd_a_last)
+                 else '0';
+
+   -- Low the instant a NEW read is pending, so the CPU cannot sample the previous byte
+   -- in the cycle before the registered rom_rdy_i catches up. The rd_done term is
+   -- load-bearing: on the completion cycle the FSM is back in RB_IDLE with the new byte
+   -- in rom_do_i, so ready must be '1' there for the CPU to consume it, even though
+   -- rom_rd_i is still asserted for that same bus cycle.
+   rom_rdy_comb <= '0' when rd_state /= RB_IDLE
+                   else '0' when (rd_new_req = '1' and rd_done = '0')
+                   else '1';
+
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
+         rd_done <= '0';
+         rom_rd_prev <= rom_rd_i;
          case rd_state is
             when RB_IDLE =>
                rom_rdy_i <= '1';
-               if rom_rd_i = '1' then
+               if rd_new_req = '1' then
                   rd_addr <= std_logic_vector(ROM_SDRAM_BASE +
                              resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 25));
                   rom_rdy_i <= '0';
-                  rd_req <= not rd_req;
-                  rd_settle_cnt <= (others => '0');
-                  rd_state <= RB_SETTLE;
+                  rd_a_last <= rom_a;
+                  rd_state <= RB_ADDR;
                end if;
 
+            when RB_ADDR =>
+               -- Address settled last cycle; only now toggle the request.
+               rd_req <= not rd_req;
+               rd_settle_cnt <= (others => '0');
+               rd_seen_wait  <= '0';
+               rd_wdog <= (others => '0');
+               rd_state <= RB_SETTLE;
+
             when RB_SETTLE =>
-               if rd_settle_cnt = "100" then
-                  if romb_wait = '1' then
-                     rd_state <= RB_WAIT;
-                  else
-                     rom_do_i <= romb_do;
-                     rom_rdy_i <= '1';
-                     rd_state <= RB_IDLE;
-                  end if;
+               -- romb_wait ever going high is the only positive evidence the request was
+               -- actually accepted; if it never rises in a generous window, sdram.sv
+               -- served this from its 4-byte line cache, which never asserts WAIT.
+               if romb_wait = '1' then
+                  rd_seen_wait <= '1';
+                  rd_state     <= RB_WAIT;
+               elsif rd_settle_cnt = SETTLE_HIT then
+                  rom_do_i  <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_done   <= '1';
+                  rd_state  <= RB_IDLE;
                else
                   rd_settle_cnt <= rd_settle_cnt + 1;
                end if;
 
             when RB_WAIT =>
+               rd_wdog <= rd_wdog + 1;
                if romb_wait = '0' then
                   rom_do_i <= romb_do;
                   rom_rdy_i <= '1';
+                  rd_done  <= '1';
                   rd_state <= RB_IDLE;
+               elsif rd_wdog = x"3FF" then
+                  -- ~1024 clk_pce cycles (~24 us) is orders of magnitude beyond any real
+                  -- SDRAM read. Release the CPU with one bad byte rather than freeze,
+                  -- and count it -- a live count is better evidence than a silent hang.
+                  rom_do_i <= romb_do;
+                  rom_rdy_i <= '1';
+                  rd_state  <= RB_IDLE;
+                  if dbg_rd_timeout_cnt /= x"FFFF" then
+                     dbg_rd_timeout_cnt <= dbg_rd_timeout_cnt + 1;
+                  end if;
                end if;
          end case;
       end if;
@@ -1004,7 +1108,7 @@ begin
       RAMTEST_EN => '0', RAMTEST_Q => open, DBG_MPR => open, DBG_TAM => open, DBG_TLOAD => open, DBG_TLOAD_STB => open, DBG_SEL => open, DBG_WAIT_EVER => open,
 
       ROM_RD    => rom_rd_i,
-      ROM_RDY   => rom_rdy_i,
+      ROM_RDY   => rom_rdy_comb,
       ROM_A     => rom_a,
       ROM_DO    => rom_do_i,
       ROM_SZ    => rom_sz_r,  -- dynamic 128K-1MB real HuCard bucket, see rom_sz_r above
@@ -1063,8 +1167,22 @@ begin
    -- Reads from joy_active (real per-player mux, see its own header comment
    -- above), not directly from joy1 -- joy_port selects which real player's
    -- HID state is currently active.
-   joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
-             joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
+   -- PCE PORT (2026-09-09), ported from Console 60K where it was proven on hardware.
+   -- Two real bugs in the line this replaces:
+   --   1. Missing inversion. iosys_bl616's joy1/joy2 are active HIGH; the PCE pad
+   --      protocol is active LOW (pce_top defaults joy_in to 16#0FFF#). Without the
+   --      `not`, every button read as permanently pressed.
+   --   2. Wrong d-pad bits. joy1[11:0] is (R L X A RT LT DN UP START SELECT Y B), so
+   --      the d-pad is bits 4/5/6/7 -- bits 10/11 are the SHOULDER buttons, which is
+   --      what the old code was reading for left/right.
+   -- I/II also accept either face-button pair (A or B, X or Y), so the pad's natural
+   -- two-button cluster works whichever way round the user holds it.
+   joy_in <= not (joy_active(6) & joy_active(5) & joy_active(7) & joy_active(4))
+                when joy_out(0) = '1'
+             else not (joy_active(3)
+                       & joy_active(2)
+                       & (joy_active(9) or joy_active(1))    -- II  <- X or Y
+                       & (joy_active(8) or joy_active(0)));  -- I   <- A or B
 
    hdmi_out: pce2hdmi_sd
    port map (

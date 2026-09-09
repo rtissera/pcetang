@@ -40,6 +40,8 @@ add_file src/pce/common/core/pce_top.vhd
 add_file src/iosys/uart_fixed.v
 add_file src/iosys/gowin_dpb_menu.v
 add_file src/iosys/textdisp.v
+add_file src/input/dualshock_controller.v
+add_file src/input/controller_ds2.sv
 add_file src/iosys/iosys_bl616.v
 add_file src/hdmi2/audio_clock_regeneration_packet.sv
 add_file src/hdmi2/audio_info_frame.sv
