@@ -67,6 +67,7 @@ def parse_log(path):
     tam = {}
     tloads = {}
     bviews = {}
+    sel = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -76,6 +77,13 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if tag == 0xEB:
+                v = (val >> 32) & 0x3FFFFF
+                sel["mpr_sel"]  = (v >> 14) & 0xFF
+                sel["idx"]      = (v >> 11) & 0x7
+                sel["mc_addr"]  = (v >> 8) & 0x7
+                sel["a_out"]    = v & 0xFF
+                continue
             if 0xE9 <= tag <= 0xEA:
                 v = val
                 bviews[tag - 0xE9] = {
@@ -138,7 +146,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews
+    return passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews, sel
 
 
 def main():
@@ -160,7 +168,7 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews, sel = parse_log(args.log)
 
     if mpr:
         print()
@@ -175,6 +183,29 @@ def main():
         print()
         print("  (expected values are what 1943 Kai's boot code sets: MPR0=$FF I/O,")
         print("   MPR1=$F8 work RAM, MPR2..6 = ROM banks 1..5 via LE454, MPR7=0 ROM bank 0)")
+
+    if sel:
+        print()
+        print("MPR READ-SELECT at the moment of derailment:")
+        print(f"    MPR_SEL (mux output) = {sel['mpr_sel']:02X}")
+        print(f"    index ADDR_BUS(15:13) = {sel['idx']}   MC.ADDR_BUS = {sel['mc_addr']}")
+        print(f"    A_OUT(20:13) actually driven = {sel['a_out']:02X}")
+        if mpr:
+            held = mpr[sel['idx']] if sel['idx'] < len(mpr) else None
+            print(f"    MPR{sel['idx']} in the array = "
+                  + (f"{held:02X}" if held is not None else "?"))
+            print()
+            if held is not None and sel['mpr_sel'] != held:
+                print("  VERDICT: the MUX OUTPUT DISAGREES with the array at its own index.")
+                print("           The read select is broken -- the array is not the problem.")
+            elif sel['a_out'] != sel['mpr_sel'] and sel['mc_addr'] != 5:
+                print("  VERDICT: MPR_SEL matches the array, but A_OUT does NOT match")
+                print("           MPR_SEL. The fault is AFTER the mux, on the address bus.")
+            else:
+                print("  VERDICT: mux, array and A_OUT all agree. Then the $ED bank seen by")
+                print("           the trap came from a DIFFERENT cycle than this snapshot --")
+                print("           i.e. the trap is firing on a transient, not on real")
+                print("           execution, and the derailment narrative needs rechecking.")
 
     if bviews:
         print()

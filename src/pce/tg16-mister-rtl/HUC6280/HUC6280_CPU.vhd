@@ -55,7 +55,19 @@ entity HUC6280_CPU is
 		-- One-cycle strobe on every commit into T. Lets the BOARD latch its own view of
 		-- the ROM bridge at the exact instant the CPU commits, so "what the CPU took" and
 		-- "what the bridge was presenting" can be compared directly instead of inferred.
-		TLOAD_STB	: out std_logic);
+		TLOAD_STB	: out std_logic;
+		-- PCE PORT (2026-09-09): resolves a hard contradiction between two existing
+		-- probes. The trap says CPU_A(20:13) = $ED, but A_OUT(20:13) is
+		-- `x"FF" when MC.ADDR_BUS="101" else MPR_SEL`, and the MPR array read back
+		-- A0 A0 00 00 A0 00 A0 00 at that same instant -- no register holds $ED. A mux
+		-- cannot output a value none of its inputs hold, so one of those two probes is
+		-- wrong. This exports the MUX OUTPUT and its SELECT alongside the array, so the
+		-- three can be compared directly:
+		--   MPR_SEL = $ED while the array holds none  -> the read select is broken
+		--   MPR_SEL = A0 while A_OUT still shows $ED  -> the fault is after the mux
+		--   MPR_SEL matches the array at that index   -> the ARRAY probe is the liar
+		-- SEL_DBG: MPR_SEL(8) | ADDR_BUS(15:13)(3) | MC.ADDR_BUS(3) | A_OUT(20:13)(8)
+		SEL_DBG	: out std_logic_vector(21 downto 0));
 end HUC6280_CPU;
 
 architecture rtl of HUC6280_CPU is
@@ -93,6 +105,7 @@ architecture rtl of HUC6280_CPU is
 	signal MPR_OUT 		: std_logic_vector(7 downto 0);
 	signal MPR_LAST 		: std_logic_vector(7 downto 0);
 	signal MPR_SEL 		: std_logic_vector(7 downto 0);
+	signal A_OUT_BANK 	: std_logic_vector(7 downto 0);
 	signal TAM_CNT 		: unsigned(7 downto 0);
 	type TLOAD_ENTRY_t is array(0 to 3) of std_logic_vector(47 downto 0);
 	signal TLOAD_BUF 	: TLOAD_ENTRY_t := (others => (others => '0'));
@@ -455,6 +468,7 @@ begin
 	TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
 	TLOAD_DBG <= TLOAD_BUF(3) & TLOAD_BUF(2) & TLOAD_BUF(1) & TLOAD_BUF(0);
 	TLOAD_STB <= TLOAD_STB_I;
+	SEL_DBG <= MPR_SEL & ADDR_BUS(15 downto 13) & MC.ADDR_BUS & A_OUT_BANK;
 
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else
@@ -631,7 +645,10 @@ begin
 	           MPR(6) when ADDR_BUS(15 downto 13) = "110" else
 	           MPR(7);
 
-	A_OUT(20 downto 13) <= x"FF" when MC.ADDR_BUS = "101" else MPR_SEL;
+	-- Mirrored into a readable signal: A_OUT is a port and VHDL-93 cannot read it back,
+	-- and SEL_DBG needs exactly what the port is being driven with.
+	A_OUT_BANK <= x"FF" when MC.ADDR_BUS = "101" else MPR_SEL;
+	A_OUT(20 downto 13) <= A_OUT_BANK;
 
 	process(CLK, RST_N)
 	begin

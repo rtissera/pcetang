@@ -46,7 +46,8 @@ entity HUC6280 is
 		MPR_DBG	: out std_logic_vector(63 downto 0);
 		TAM_DBG	: out std_logic_vector(31 downto 0);
 		TLOAD_DBG	: out std_logic_vector(191 downto 0);
-		TLOAD_STB	: out std_logic);
+		TLOAD_STB	: out std_logic;
+		SEL_DBG	: out std_logic_vector(21 downto 0));
 end HUC6280;
 
 architecture rtl of HUC6280 is
@@ -154,7 +155,8 @@ begin
 		MPR_DBG  => MPR_DBG,
 		TAM_DBG  => TAM_DBG,
 		TLOAD_DBG => TLOAD_DBG,
-		TLOAD_STB => TLOAD_STB
+		TLOAD_STB => TLOAD_STB,
+		SEL_DBG  => SEL_DBG
 	);
 	
 	CPU_IRQ1_N <= IRQ1_N or INT_MASK(1);

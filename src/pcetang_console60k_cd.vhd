@@ -672,6 +672,8 @@ architecture rtl of pcetang_console60k_cd is
    -- but they only prove the bridge is self-consistent -- if it latches CPU_A a fetch
    -- behind, it fetches the wrong byte and reports it as right.
    signal dbg_tload_stb : std_logic;
+   signal dbg_sel    : std_logic_vector(21 downto 0);
+   signal trap_sel   : std_logic_vector(21 downto 0) := (others => '0');
    type bridge_view_t is array(0 to 1) of std_logic_vector(31 downto 0);
    signal bview      : bridge_view_t := (others => (others => '0'));
    signal trap_bview : bridge_view_t := (others => (others => '0'));
@@ -1780,6 +1782,7 @@ begin
       DBG_TAM => dbg_tam,
       DBG_TLOAD => dbg_tload,
       DBG_TLOAD_STB => dbg_tload_stb,
+      DBG_SEL => dbg_sel,
       DBG_WAIT_EVER => dbg_wait_ever,
 
       ROM_RD    => rom_rd_i,
@@ -1962,7 +1965,7 @@ begin
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
             -- Once the trap has fired, spend the next three heartbeat slots emitting the
             -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
-            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 11 then
+            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 12 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"E" & std_logic_vector(trap_sent);
@@ -1982,7 +1985,9 @@ begin
                   when "1000" => dbg_trace_data <= trap_tload(191 downto 144) & "000000000000000" & trap_wait_ever;
                   -- 0xE9/0xEA: the bridge's own view at the CPU's two most recent T-loads.
                   when "1001" => dbg_trace_data <= trap_bview(0) & x"00000000";
-                  when others => dbg_trace_data <= trap_bview(1) & x"00000000";
+                  when "1010" => dbg_trace_data <= trap_bview(1) & x"00000000";
+                  -- 0xEB: MPR_SEL | ADDR_BUS(15:13) | MC.ADDR_BUS | A_OUT(20:13)
+                  when others => dbg_trace_data <= "0000000000" & trap_sel & x"00000000";
                end case;
             elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
@@ -2052,6 +2057,7 @@ begin
                trap_tam   <= dbg_tam;
                trap_tload <= dbg_tload;
                trap_bview <= bview;
+               trap_sel   <= dbg_sel;
                trap_wait_ever <= dbg_wait_ever;
             end if;
          end if;
