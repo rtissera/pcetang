@@ -82,7 +82,15 @@ module pce2hdmi_sd #(
 	output       tmds_clk_n,
 	output       tmds_clk_p,
 	output [2:0] tmds_d_n,
-	output [2:0] tmds_d_p
+	output [2:0] tmds_d_p,
+
+	// Debug probe for the VTOTAL servo below, read out over the board's opcode-9 RTL
+	// trace channel. dbg_out_frame_tog is a 1-bit toggle (one flip per OUTPUT frame) so
+	// the board can count output frames in its own clk_pce domain across a clean 1-bit
+	// crossing; the other two are slow buses snapshotted once per output frame.
+	output       dbg_out_frame_tog,
+	output [9:0] dbg_vs_cy,
+	output [7:0] dbg_vtotal_extra
 );
 
 localparam AUDIO_BIT_WIDTH = 16;
@@ -235,12 +243,12 @@ end
 // 48 kHz, which puts the HDMI audio clock regeneration wildly out and produces silence.
 //
 // It only has to be a STROBE at the sample rate, so no divided clock net is needed.
-// MUST track clk_pixel: at 74.1667 MHz (see the HDMI PLL) 74.1667e6 / 48000 = 1545.14,
-// so a period of 1545 gives 48.00 kHz, 0.01% high -- far inside what the ACR N/CTS
+// MUST track clk_pixel: at 74.375 MHz (see the HDMI PLL) 74.375e6 / 48000 = 1549.48,
+// so a period of 1549 gives 48.015 kHz, 0.03% high -- far inside what the ACR N/CTS
 // mechanism absorbs. This constant has already had to move twice as the pixel clock was
 // retuned; if it is ever retuned again this must move with it or the sample rate
 // silently drifts off 48 kHz.
-localparam int AUDIO_DIV = 1545;
+localparam int AUDIO_DIV = 1549;   // 74.375e6/48000 = 1549.48
 logic [11:0] audio_div_cnt = 12'd0;
 logic clk_audio;
 always_ff @(posedge clk_pixel) begin
@@ -270,41 +278,115 @@ logic[2:0] tmds;
 wire tmdsClk;
 
 //
-// ==================== VSYNC genlock ====================
+// ==================== Frame-rate genlock (VTOTAL servo) ====================
 //
-// Without this the raster free-runs and the output frame slips past the PCE's
-// continuously, which is the rolling picture.
+// Without any lock the output raster free-runs and the source's frame slips past it
+// continuously -- that is the rolling picture. The roll rate measures the rate error
+// directly: at 74.375 MHz the output frame is 2.28 lines/frame shorter than the core's,
+// = 137 lines/s, = 750/137 = 5.5 s for a full roll, which is exactly the period seen on
+// hardware. Nothing else in the video path fixes this: the read side below latches
+// `line_toggle_rd <= ~wr_line_toggle_sync`, i.e. it always shows whichever source line
+// just finished, so the line buffer ALREADY absorbs the phase error line-by-line. The
+// roll IS that slip. Only matching the frame PERIOD can hold the picture still.
 //
-// Restarting the raster on the core's VSYNC forces the output frame period to equal the
-// source's. The FIRST attempt drove hdmi.sv's module-wide `reset` and cost 3 setup
-// violations: asserting it materialises every reset in that module, all of which the
-// constant .reset(0) had let the synthesiser delete. Registering the cy comparison ahead
-// of it did not help, so it was the reset fanout itself. hdmi.sv now has a `sync_reset`
-// that touches ONLY the cx/cy counters -- one extra term, nothing else.
+// WHAT WAS TRIED AND WHY IT FAILED: restarting hdmi.sv's cx/cy on the source VSYNC.
+// That forces the period, but cx/cy are not the only per-frame sequencer -- the video
+// guard/preamble windows key off `frame_height - 1`, and the packet picker and audio
+// clock regeneration pace off the same raster. Rewinding cx/cy alone left all of those
+// stamping packets into a raster they no longer agreed with. Landing in blanking, the
+// sink tolerated one malformed data island per frame (picture locked/dropped/re-locked);
+// landing in active video it was a protocol violation and the sink dropped the link
+// entirely (no signal at all). Chasing the pixel clock to make the reset land in
+// blanking was treating the symptom.
 //
-// HOW CLOSE the rates are is what decides whether this works. The first build ran the
-// output 4.06 lines/frame slower than the core (73.75 MHz), so every resync truncated 4
-// lines, the TV got a 746-line frame instead of 750, and it locked / dropped / re-locked
-// continuously. The pixel clock is now the closest match a 50 MHz input can produce:
-//     core 59.9183 Hz    output 59.9327 Hz at 74.1667 MHz    +0.18 lines/frame
-// so the resync lands essentially ON the frame boundary and almost every frame stays a
-// full 750 lines.
+// WHAT THIS DOES INSTEAD: leave the raster free-running and standard, and stretch the
+// frame by a few BLANKING lines so its period matches the source's. hdmi.sv's
+// `vtotal_extra` is added to frame_height itself, latched once per frame, so every
+// sequencer in that module still sees one consistent, well-formed frame -- there is no
+// reset anywhere and no mid-frame discontinuity. A VTOTAL of 750..760 is an ordinary
+// thing for a source to send.
 //
-// That also means VSYNC now arrives just AFTER the wrap rather than before it, so the
-// guard has to accept BOTH sides of the boundary -- a blanking-only test would reject
-// every resync and leave it free-running. The window is deliberately a few lines wide on
-// each side to absorb jitter in the crossing, and outside it the resync is skipped, so a
-// bad clock choice still degrades to "rolls slowly" rather than a corrupted picture.
-reg vs_meta, vs_sync, vs_prev;
-reg in_vblank;
-reg hdmi_resync;
-always_ff @(posedge clk_pixel) begin
-	vs_meta <= video_vs;      // clk (clk_pce) -> clk_pixel, standard 2-flop synchroniser
-	vs_sync <= vs_meta;
-	vs_prev <= vs_sync;
-	in_vblank <= (cy >= frameHeight - 10'd4) || (cy <= 10'd4);
-	hdmi_resync <= vs_sync & ~vs_prev & in_vblank;
+// REFERENCE EDGE: the falling edge of video_vbl -- huc6260.vhd drives VBL low exactly at
+// V_CNT = TOP_BL_LINES, the first active line, once per frame. So "source active starts"
+// is the event, and the target is output cy == 0, "output active starts". No guessing at
+// the source's blanking length, and it tracks RVBL's 242/262-line switch for free.
+//
+// CONTROL LAW: err = (output cy when the source's active area started), taken as signed
+// about the frame. Output frame period = 750 + extra lines; source period = 750 + m
+// lines with m the (unknown, clock-dependent) mismatch. Setting extra = clamp(err,0,MAX)
+// gives err_next = err + m - extra = m -- deadbeat, and the steady state is err = m,
+// about 2 output lines. It self-calibrates: m never appears as a constant, so retuning
+// the pixel clock cannot invalidate this the way it invalidated AUDIO_DIV twice.
+// Pull-in from worst case (half a frame) takes 375/(MAX-m) ~ 47 frames, under a second.
+localparam int VT_MAX_EXTRA = 10;
+
+// 2026-09-09: the servo COMPUTES but does not ACT. Hardware evidence (debug.log's last
+// 32 heartbeats from the black-screen run) proves the core was alive and emitting frames
+// at 60.0 Hz with the VDC being written hard, so the black picture is the output raster,
+// and the only thing that changed there is VTOTAL modulation. Driving hdmi.sv with a
+// constant 0 restores the exact standard 750-line raster that is the only configuration
+// on this board ever seen to put a picture on the screen, while the servo keeps running
+// and reporting through dbg_vtotal_extra.
+//
+// So one run answers both questions at once:
+//   picture returns (rolling ~5.5 s) -> VTOTAL modulation itself is what blanked the
+//                                       sink; that approach is dead, go to a full
+//                                       framebuffer (BSRAM is 67/118, 51 blocks free).
+//   still black                      -> the fault is NOT the modulation but the
+//                                       frame_height rewrite or something else entirely,
+//                                       and the traced vs_cy/out-frame counts say which.
+// Set to 1 to re-enable modulation once the above is settled.
+localparam bit VT_SERVO_ACTS = 1'b0;
+
+// Source domain: one toggle per frame at the start of the active area.
+reg vbl_r;
+reg src_act_tog = 1'b0;
+always_ff @(posedge clk) begin
+	vbl_r <= video_vbl;
+	if (vbl_r & ~video_vbl) src_act_tog <= ~src_act_tog;
 end
+
+// Pixel domain: recover that event, sample the raster position, servo once per frame.
+reg tog_meta, tog_sync, tog_prev;
+reg [9:0] vs_cy;
+reg       vs_seen = 1'b0;
+reg [7:0] vtotal_extra = 8'd0;
+
+always_ff @(posedge clk_pixel) begin
+	reg signed [11:0] err;
+
+	tog_meta <= src_act_tog;      // clk (clk_pce) -> clk_pixel, 2-flop synchroniser
+	tog_sync <= tog_meta;
+	tog_prev <= tog_sync;
+
+	if (tog_sync ^ tog_prev) begin
+		vs_cy   <= cy;
+		vs_seen <= 1'b1;
+	end
+
+	// End of the output frame: the one instant vtotal_extra may change.
+	if (cx == frameWidth - 1'b1 && cy == frameHeight - 1'b1) begin
+		if (vs_seen) begin
+			// Signed distance from the target (cy == 0), wrapped about the frame, so a
+			// source that starts just BEFORE the output frame reads as a small negative
+			// error rather than a nearly-full-frame positive one.
+			err = (vs_cy <= frameHeight[9:1]) ? $signed({2'b0, vs_cy})
+			                                  : $signed({2'b0, vs_cy}) - $signed({2'b0, frameHeight});
+			vtotal_extra <= (err <= 0)             ? 8'd0
+			              : (err >= VT_MAX_EXTRA)  ? 8'(VT_MAX_EXTRA)
+			                                       : err[7:0];
+		end
+		vs_seen <= 1'b0;
+		out_frame_tog <= ~out_frame_tog;   // one flip per output frame
+		vs_cy_snap    <= vs_cy;            // snapshot at the same instant the servo acts
+	end
+end
+
+reg out_frame_tog = 1'b0;
+reg [9:0] vs_cy_snap = 10'd0;
+assign dbg_out_frame_tog = out_frame_tog;
+assign dbg_vs_cy         = vs_cy_snap;
+assign dbg_vtotal_extra  = vtotal_extra;
 
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
         .DVI_OUTPUT(0),
@@ -319,7 +401,7 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
         .reset(0),
-        .sync_reset(hdmi_resync),
+        .vtotal_extra(VT_SERVO_ACTS ? vtotal_extra : 8'd0),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
         .tmds_clock(tmdsClk),

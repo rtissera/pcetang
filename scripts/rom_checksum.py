@@ -137,11 +137,15 @@ def parse_log(path):
                 dumps[tag - 0xC0] = payload
                 continue
             if tag >= 0x80:
+                # 2026-09-09 layout (see pcetang_console60k_cd.vhd's heartbeat):
+                # [63:48] VDC writes | [47:32] output frames | [31:16] source frames
+                # | [15:6] vs_cy | [5:0] vtotal_extra
                 beats.append({
-                    "vdc": (val >> 48) & 0xFFFF,
-                    "cpu_a": (val >> 27) & 0x1FFFFF,
-                    "cpu_ce": (val >> 11) & 0xFFFF,
-                    "vbl": val & 0x7FF,
+                    "vdc":  (val >> 48) & 0xFFFF,
+                    "outf": (val >> 32) & 0xFFFF,
+                    "srcf": (val >> 16) & 0xFFFF,
+                    "vs_cy": (val >> 6) & 0x3FF,
+                    "vtx":  val & 0x3F,
                 })
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
@@ -434,30 +438,57 @@ def main():
               "concurrent CPU load).")
 
     if beats:
-        vdc = [b["vdc"] for b in beats]
-        ce  = [b["cpu_ce"] for b in beats]
-        addrs = [b["cpu_a"] for b in beats]
         print()
-        print(f"heartbeat: {len(beats)} samples")
-        print(f"  VDC writes {vdc[0]} -> {vdc[-1]}")
-        print(f"  CPU_CE     {ce[0]} -> {ce[-1]}  (16-bit, wraps; delta per sample matters)")
-        print(f"  VBLANK     {beats[0]['vbl']} -> {beats[-1]['vbl']}")
+        print(f"heartbeat: {len(beats)} samples (~100 ms apart)")
+        print(f"  {'#':>3} {'VDCwr':>7} {'outFrm':>7} {'srcFrm':>7} {'vs_cy':>6} {'vtx':>4}")
+        for k, b in enumerate(beats):
+            print(f"  {k:3d} {b['vdc']:7d} {b['outf']:7d} {b['srcf']:7d} "
+                  f"{b['vs_cy']:6d} {b['vtx']:4d}")
+
+        d_vdc  = beats[-1]["vdc"]  - beats[0]["vdc"]
+        d_out  = (beats[-1]["outf"] - beats[0]["outf"]) & 0xFFFF
+        d_src  = (beats[-1]["srcf"] - beats[0]["srcf"]) & 0xFFFF
         print()
-        print("  CPU_A samples (physical, 21-bit):")
-        for k, a_ in enumerate(addrs):
-            bank = (a_ >> 13) & 0xFF
-            if bank <= 0x7F:      where = f"ROM offset {a_ & 0x1FFFFF:#07x}"
-            elif 0x80 <= bank <= 0x87: where = "CD-RAM"
-            elif bank == 0xF7:    where = "BRAM"
-            elif 0xF8 <= bank <= 0xFB: where = "work RAM"
-            elif bank == 0xFF:    where = "I/O"
-            else:                 where = "*** UNMAPPED ***"
-            if k < 6 or k >= len(addrs) - 3:
-                print(f"    [{k:02d}] {a_:#08x}  bank ${bank:02X}  {where}")
-            elif k == 6:
-                print("    ...")
-        banks = {(a_ >> 13) & 0xFF for a_ in addrs}
-        print(f"  distinct banks seen: {sorted(hex(b) for b in banks)}")
+        print("VERDICT")
+        if d_src == 0:
+            print("  source frames FLAT -> the core is not emitting frames at all "
+                  "(or video_vbl never falls).\n"
+                  "  The servo has no input; the video path is downstream of the real "
+                  "fault. Look at the core.")
+        elif d_out == 0:
+            print("  output frames FLAT -> the output raster is stopped. The pixel clock "
+                  "or hdmi.sv is the fault.")
+        else:
+            # The output frame is 750 + vtotal_extra lines; the ratio gives the real
+            # mismatch without assuming the core's line count.
+            ratio = d_out / d_src
+            vtx = [b["vtx"] for b in beats]
+            avg_extra = sum(vtx) / len(vtx)
+            # source period, expressed in output lines, from the measured ratio
+            src_lines = (750 + avg_extra) * ratio
+            print(f"  core alive: VDC writes +{d_vdc}, source frames +{d_src}, "
+                  f"output frames +{d_out}")
+            print(f"  measured out/src frame ratio = {ratio:.6f}")
+            print(f"  => source frame = {src_lines:.2f} output lines "
+                  f"(m = {src_lines - 750:+.2f} vs the nominal 750)")
+            print(f"  vtotal_extra: min {min(vtx)} max {max(vtx)} mean {avg_extra:.2f}")
+            cys = [b["vs_cy"] for b in beats]
+            print(f"  vs_cy:        min {min(cys)} max {max(cys)}")
+            if max(vtx) - min(vtx) <= 1 and max(cys) - min(cys) <= 8:
+                print("  -> servo is LOCKED and well behaved. A black picture with a "
+                      "locked servo means the\n"
+                      "     sink is rejecting the VTOTAL modulation itself; stop "
+                      "modulating VTOTAL.")
+            elif max(vtx) >= 10:
+                print("  -> vtotal_extra is PEGGED at the clamp: the mismatch is outside "
+                      "the servo's authority.\n"
+                      "     Either the sign is wrong (need a faster pixel clock) or the "
+                      "clamp is too small.")
+            else:
+                print("  -> servo is THRASHING: VTOTAL changes most frames, which is "
+                      "very likely why the sink\n"
+                      "     locks but will not unblank. Needs a deadband and a slew "
+                      "limit, or a different approach.")
     return 1 if (bad_vs_file or disagree) else 0
 
 

@@ -321,7 +321,10 @@ architecture rtl of pcetang_console60k_cd is
          tmds_clk_n : out std_logic;
          tmds_clk_p : out std_logic;
          tmds_d_n   : out std_logic_vector(2 downto 0);
-         tmds_d_p   : out std_logic_vector(2 downto 0)
+         tmds_d_p   : out std_logic_vector(2 downto 0);
+         dbg_out_frame_tog : out std_logic;
+         dbg_vs_cy         : out std_logic_vector(9 downto 0);
+         dbg_vtotal_extra  : out std_logic_vector(7 downto 0)
       );
    end component;
 
@@ -456,6 +459,20 @@ architecture rtl of pcetang_console60k_cd is
    signal dbg_trace_data : std_logic_vector(63 downto 0) := (others => '0');
    signal dbg_fetch_cnt  : unsigned(7 downto 0) := (others => '0');
    signal dbg_hb_cnt     : unsigned(21 downto 0) := (others => '0');
+
+   -- VTOTAL-servo probe (see the heartbeat payload below). The source side is counted
+   -- here in clk_pce, where video_vbl already lives, so there is no crossing on it at
+   -- all; the output side crosses as a single toggle bit and is counted here too. Only
+   -- vs_cy/vtotal_extra cross as buses, and both are snapshotted once per output frame
+   -- and sampled ~100 ms apart, so a torn sample is possible but would show as one
+   -- outlier against 32 samples rather than a wrong trend.
+   signal vid_out_frame_tog : std_logic;
+   signal vid_vs_cy         : std_logic_vector(9 downto 0);
+   signal vid_vtotal_extra  : std_logic_vector(7 downto 0);
+   signal vid_oft_meta, vid_oft_sync, vid_oft_prev : std_logic := '0';
+   signal vid_out_frames    : unsigned(15 downto 0) := (others => '0');
+   signal vid_src_vbl_r     : std_logic := '0';
+   signal vid_src_frames    : unsigned(15 downto 0) := (others => '0');
    signal rd_state_bits  : std_logic_vector(1 downto 0);
 
    signal romb_addr : std_logic_vector(24 downto 0);
@@ -2024,6 +2041,27 @@ begin
    --                    is downstream (video path); a flat zero means it did not, and
    --                    the fault is upstream. That single number splits the remaining
    --                    search space in half, which the previous payload could not.
+   -- Source frames: video_vbl's falling edge is the first active line (huc6260.vhd
+   -- drives VBL low at V_CNT = TOP_BL_LINES), i.e. exactly the event the servo locks to.
+   -- Counting it here proves the reference edge exists and fires once per frame -- if
+   -- this stays flat, the servo has no input and every conclusion about it is moot.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         vid_src_vbl_r <= video_vbl;
+         if vid_src_vbl_r = '1' and video_vbl = '0' then
+            vid_src_frames <= vid_src_frames + 1;
+         end if;
+
+         vid_oft_meta <= vid_out_frame_tog;
+         vid_oft_sync <= vid_oft_meta;
+         vid_oft_prev <= vid_oft_sync;
+         if vid_oft_sync /= vid_oft_prev then
+            vid_out_frames <= vid_out_frames + 1;
+         end if;
+      end if;
+   end process;
+
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
@@ -2134,10 +2172,29 @@ begin
                -- bits was enough to see that and not enough to say why, so the full
                -- 21-bit CPU_A goes in the payload now. IRQ1 is dropped -- proven 0.
                -- [63:48] VDC writes | [47:27] CPU_A(20:0) | [26:11] CPU_CE | [10:0] VBLANK
+               -- 2026-09-09 repurpose: the ROM/CPU fault this payload was built for is
+               -- fixed (777ba38), so CPU_A and CPU_CE give up their bits to the video
+               -- path, which is the live fault. What this answers in ONE run:
+               --   VDC writes climbing  -> the CPU is programming the VDC
+               --   src frames climbing  -> the core is really emitting frames, and the
+               --                           servo's reference edge exists
+               --   out frames climbing  -> the output raster is running
+               --   out/src ratio        -> the REAL rate mismatch, measured rather than
+               --                           derived from an assumed 262-line frame
+               --   vs_cy                -> the servo's phase; should settle near 2 and
+               --                           stay there. Wandering = not locked.
+               --   vtotal_extra         -> what the servo is actually asking for. A
+               --                           stable small number means the loop is sane and
+               --                           a black screen is the sink rejecting VTOTAL
+               --                           modulation; a thrashing or pegged number means
+               --                           the loop itself is the bug.
+               -- [63:48] VDC writes | [47:32] output frames | [31:16] source frames
+               -- | [15:6] vs_cy | [5:0] vtotal_extra(5:0)
                dbg_trace_data <= std_logic_vector(dbg_vdc_cnt(15 downto 0))
-                                 & dbg_cpu_a
-                                 & std_logic_vector(dbg_cpu_cyc)
-                                 & std_logic_vector(dbg_vbl_cnt(10 downto 0));
+                                 & std_logic_vector(vid_out_frames)
+                                 & std_logic_vector(vid_src_frames)
+                                 & vid_vs_cy
+                                 & vid_vtotal_extra(5 downto 0);
             end if;
          end if;
       end if;
@@ -2257,7 +2314,10 @@ begin
       cdda_sl => std_logic_vector(cdda_sl), cdda_sr => std_logic_vector(cdda_sr),
       adpcm_s => std_logic_vector(adpcm_s),
       tmds_clk_n => tmds_clk_n, tmds_clk_p => tmds_clk_p,
-      tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p
+      tmds_d_n => tmds_d_n, tmds_d_p => tmds_d_p,
+      dbg_out_frame_tog => vid_out_frame_tog,
+      dbg_vs_cy         => vid_vs_cy,
+      dbg_vtotal_extra  => vid_vtotal_extra
    );
 
    leds_n(0) <= not (pll_lock and hdmi_pll_lock);

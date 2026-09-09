@@ -196,36 +196,31 @@ begin
          FCLKIN     => "50",
          IDIV_SEL   => 1,     -- /1 -> PFD 50 MHz (within 19-87.5 MHz)
          FBDIV_SEL  => 1,
-         -- PCE PORT (2026-09-09, second pass): 22 + 2/8 with ODIV 15/3, not 14 + 6/8 with
-         -- ODIV 10/2. The first genlock build used 73.75 MHz, which is 4.06 output lines
-         -- per frame SLOWER than the core -- so every resync truncated 4 lines and the TV
-         -- saw a 746-line frame instead of 750. It locked, rejected the non-standard
-         -- vertical timing, and re-locked, over and over.
+         -- PCE PORT (2026-09-09, third pass): back to 14 + 7/8 with ODIV 10/2, the
+         -- 74.375 MHz that is the only setting on this board ever observed to put a
+         -- picture on a screen. Two retunes away from it each made things worse and both
+         -- were chasing the wrong thing -- they were trying to make a raster RESET land
+         -- in blanking. pce2hdmi_sd.sv no longer resets the raster at all; it stretches
+         -- VTOTAL instead, and that servo only ADDS blanking lines, so the one real
+         -- constraint on the pixel clock is now a sign:
+         --
+         --   the source frame must be LONGER than the nominal 750-line output frame.
          --
          --   core          59.9183 Hz   (42.857 MHz / 2, 262 lines x 1365 dots)
-         --   73.75 MHz     59.5960 Hz   -4.06 lines/frame   <- rejected by the TV
-         --   74.1667 MHz   59.9327 Hz   +0.18 lines/frame   <- this
+         --   73.75 MHz     59.5960 Hz   -4.06 lines/frame   <- WRONG SIGN, unlockable
+         --   74.1667 MHz   59.9327 Hz   +0.18 lines/frame   <- right sign, no margin
+         --   74.375 MHz    60.1010 Hz   +2.28 lines/frame   <- this
          --
-         -- At +0.18 lines the resync lands essentially on the frame boundary, so almost
-         -- every frame is a full 750 lines and the raster stays standard. Searched over
-         -- every legal MDIV/MDIV_FRAC/ODIV combination with FVCO in 700-1400 and
-         -- ODIV0 = 5 x ODIV1; this is the closest match available from a 50 MHz input.
-         MDIV_SEL   => 22,    -- x22.25 -> FVCO 1112.5 MHz, in the 700-1400 range
-         -- PCE PORT (2026-09-09): .875 -> .75, deliberately making the output frame rate
-         -- slightly SLOWER than the core's, which is what the VSYNC genlock in
-         -- pce2hdmi_sd.sv requires. The direction matters and is easy to get backwards:
-         --
-         --   core   ~59.92 Hz  (clk_pce 42.857 MHz, 262 lines x 1365 master clocks)
-         --   output  59.60 Hz  (73.75 MHz / (1650 x 750))
-         --
-         -- Output slower means the core's VSYNC arrives while the output raster still
-         -- has ~4 lines to go, i.e. inside the 30-line vertical blanking of 720p. The
-         -- genlock reset therefore truncates only blanking. Were the output FASTER (as
-         -- it was at 74.375 MHz, 60.10 Hz) the raster would already have wrapped and the
-         -- reset would cut lines off the TOP of the picture instead.
-         MDIV_FRAC_SEL => 2,  -- the .25 (eighths)
-         ODIV0_SEL  => 15,    -- 1112.5/15 = 74.1667 MHz (clk_pixel, -0.11% vs 74.25)
-         ODIV1_SEL  => 3,     -- 1112.5/3 = 370.833 MHz (clk_5x_pixel, exact 5x ratio)
+         -- +2.28 sits comfortably inside the servo's 0..10 line authority with room on
+         -- both sides, so the lock survives the core's real frame length differing from
+         -- the 262-line assumption (263 lines would be +5.2, still fine) -- the servo
+         -- measures the error, it is not told it. 74.375 is also the closest of the
+         -- three to the 74.25 MHz CEA-861 nominal (+0.17%), which keeps hdmi.sv's
+         -- hardcoded VIDEO_RATE (74.25 MHz, used for the audio ACR CTS) in tolerance.
+         MDIV_SEL   => 14,    -- x14.875 -> FVCO 743.75 MHz, in the 700-1400 range
+         MDIV_FRAC_SEL => 7,  -- the .875 (eighths)
+         ODIV0_SEL  => 10,    -- 743.75/10 = 74.375 MHz (clk_pixel, +0.17% vs 74.25)
+         ODIV1_SEL  => 2,     -- 743.75/2 = 371.875 MHz (clk_5x_pixel, exact 5x ratio)
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE"
       )
