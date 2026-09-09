@@ -197,7 +197,21 @@ begin
          IDIV_SEL   => 1,     -- /1 -> PFD 50 MHz (within 19-87.5 MHz)
          FBDIV_SEL  => 1,
          MDIV_SEL   => 14,    -- x14.875 -> FVCO 743.75 MHz, in the 700-1400 range
-         MDIV_FRAC_SEL => 7,  -- the .875 (eighths)
+         -- PCE PORT (2026-09-09): .875 -> .75, deliberately making the output frame rate
+         -- slightly SLOWER than the core's, which is what the VSYNC genlock in
+         -- pce2hdmi_sd.sv requires. The direction matters and is easy to get backwards:
+         --
+         --   core   ~59.92 Hz  (clk_pce 42.857 MHz, 262 lines x 1365 master clocks)
+         --   output  59.60 Hz  (73.75 MHz / (1650 x 750))
+         --
+         -- Output slower means the core's VSYNC arrives while the output raster still
+         -- has ~4 lines to go, i.e. inside the 30-line vertical blanking of 720p. The
+         -- genlock reset therefore truncates only blanking. Were the output FASTER (as
+         -- it was at 74.375 MHz, 60.10 Hz) the raster would already have wrapped and the
+         -- reset would cut lines off the TOP of the picture instead.
+         MDIV_FRAC_SEL => 7,  -- the .875 (eighths). Was briefly 6 (73.75 MHz) for the
+                              -- genlock attempt backed out in pce2hdmi_sd.sv; restore 6
+                              -- when genlock is done for real.
          ODIV0_SEL  => 10,    -- 743.75/10 = 74.375 MHz (clk_pixel, +0.17% vs 74.25)
          ODIV1_SEL  => 2,     -- 743.75/2 = 371.875 MHz (clk_5x_pixel, exact 5x ratio)
          CLKOUT0_EN => "TRUE",

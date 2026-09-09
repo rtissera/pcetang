@@ -1908,8 +1908,35 @@ begin
    -- -- see this file's header. Reads from joy_active (real per-player mux, see its
    -- own header comment above), not directly from joy1 -- joy_port selects which
    -- real player's HID state is currently active.
-   joy_in <= joy_active(4) & joy_active(5) & joy_active(11) & joy_active(10) when joy_out(0) = '1' else
-             joy_active(3) & joy_active(2) & joy_active(1)  & joy_active(0);
+   -- PCE PORT (2026-09-09): REWRITTEN. The first-cut mapping above this comment's
+   -- predecessor was wrong in two independent ways, both of which had to be fixed before
+   -- a pad could do anything:
+   --
+   -- 1. POLARITY. A real PCE pad is ACTIVE LOW -- pce_top's own default is 16#0FFF#,
+   --    i.e. "nothing pressed" is all ones. iosys_bl616's joy1 is ACTIVE HIGH. The old
+   --    mapping passed it straight through, so with no buttons pressed (joy1 = 0) the
+   --    core read all four lines as held, permanently, on both nibbles. Hence "the pad
+   --    does nothing": the game saw every direction and every button stuck down.
+   --
+   -- 2. D-PAD BITS. iosys_bl616.v:44 documents joy1[11:0] as
+   --        (R L X A RT LT DN UP START SELECT Y B)
+   --    so UP/DN/LT/RT are bits 4/5/6/7 and bits 10/11 are the L/R SHOULDER buttons.
+   --    The old mapping read 10 and 11 for left/right, i.e. the shoulders, and had the
+   --    remaining directions in the wrong order too.
+   --
+   -- Real PCE protocol: JOY_OUT(0) = SEL selects the nibble.
+   --    SEL = 1 -> D0 UP,  D1 RIGHT, D2 DOWN,   D3 LEFT
+   --    SEL = 0 -> D0 I,   D1 II,    D2 SELECT, D3 RUN
+   --
+   -- I and II each accept either of two pad buttons on purpose. This is a PS2-style pad
+   -- with no canonical PCE layout, and accepting A-or-B for I and X-or-Y for II means it
+   -- works whichever cluster the user reaches for, at the cost of nothing.
+   joy_in <= not (joy_active(6) & joy_active(5) & joy_active(7) & joy_active(4))
+                when joy_out(0) = '1'
+             else not (joy_active(3)
+                       & joy_active(2)
+                       & (joy_active(9) or joy_active(1))    -- II  <- X or Y
+                       & (joy_active(8) or joy_active(0)));  -- I   <- A or B
 
    -- TEMP DEBUG (2026-09-06): periodic HEARTBEAT snapshot of the ROM-read bridge, over
    -- iosys_bl616.v's RTL debug-trace channel -> debug.log on the SD card.

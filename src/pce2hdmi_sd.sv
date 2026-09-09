@@ -237,6 +237,29 @@ end
 logic[2:0] tmds;
 wire tmdsClk;
 
+// VSYNC GENLOCK -- ATTEMPTED AND BACKED OUT 2026-09-09, do not just re-add it.
+//
+// The picture rolls because this raster free-runs: .reset(0) below is never asserted, so
+// the output frame and the PCE's frame are independent and slip past each other at the
+// beat frequency between them (core ~59.92 Hz, output ~60.10 Hz at 74.375 MHz).
+//
+// The fix is to restart the raster on the core's VSYNC -- hdmi.sv's `reset` is a
+// synchronous return to (0,0), exactly right -- and the pixel clock must be set so the
+// output frame is slightly SLOWER than the source, so VSYNC lands inside the 30-line
+// vertical blanking and the reset truncates blanking rather than picture.
+//
+// THE COST, measured: asserting `reset` at all MATERIALISES hdmi.sv's entire reset
+// network. With the constant .reset(0) Gowin optimises every one of those resets away.
+// Turning it on cost 3 setup violations, and registering the `cy` comparison ahead of it
+// did NOT help -- so it is the reset fanout itself, not the comparator. Much of that
+// network is the audio packet logic (audio_clock_regeneration_packet,
+// audio_sample_word_transfer_control), which is dead weight today anyway since audio is
+// unimplemented (clk_audio = clk_pixel, no resampler).
+//
+// So genlock is worth doing WITH the audio rework, not before it: implement audio
+// properly (real clk_audio, real resampling), and the reset network gets paid for by
+// logic that is actually doing something.
+//
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
         .DVI_OUTPUT(0),
         .VIDEO_REFRESH_RATE(VIDEO_REFRESH),
