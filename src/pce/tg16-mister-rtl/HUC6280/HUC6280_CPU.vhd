@@ -51,7 +51,11 @@ entity HUC6280_CPU is
 		-- it is (b) and the memory bridge handed over stale data without stalling the CPU.
 		-- Four most recent T-loads, newest in the low slot, 48 bits each:
 		-- IR | DI | ADDR_BUS(15:0) | ALU_OUT | STATE(4:0) | LOAD_T(2:0).
-		TLOAD_DBG	: out std_logic_vector(191 downto 0));
+		TLOAD_DBG	: out std_logic_vector(191 downto 0);
+		-- One-cycle strobe on every commit into T. Lets the BOARD latch its own view of
+		-- the ROM bridge at the exact instant the CPU commits, so "what the CPU took" and
+		-- "what the bridge was presenting" can be compared directly instead of inferred.
+		TLOAD_STB	: out std_logic);
 end HUC6280_CPU;
 
 architecture rtl of HUC6280_CPU is
@@ -92,6 +96,7 @@ architecture rtl of HUC6280_CPU is
 	signal TAM_CNT 		: unsigned(7 downto 0);
 	type TLOAD_ENTRY_t is array(0 to 3) of std_logic_vector(47 downto 0);
 	signal TLOAD_BUF 	: TLOAD_ENTRY_t := (others => (others => '0'));
+	signal TLOAD_STB_I 	: std_logic := '0';
 
 	--ALU
 	signal ALU_CTRL 		: ALUCtrl_r;
@@ -309,7 +314,9 @@ begin
 		if RST_N = '0' then
 			T <= (others=>'0');
 			TLOAD_BUF <= (others => (others => '0'));
+			TLOAD_STB_I <= '0';
 		elsif rising_edge(CLK) then
+			TLOAD_STB_I <= '0';
 			if EN = '1' then 
 				case MC.LOAD_T is
 					when "001" => T <= ALU_OUT;
@@ -327,6 +334,7 @@ begin
 				-- while DI is right means the ALU passthrough or its control is at fault.
 				-- ADDR_BUS says which byte the CPU was addressing when it committed.
 				if MC.LOAD_T /= "000" then
+					TLOAD_STB_I <= '1';
 					TLOAD_BUF(0) <= IR & DI & ADDR_BUS & ALU_OUT & std_logic_vector(STATE) & MC.LOAD_T;
 					for k in 1 to 3 loop
 						TLOAD_BUF(k) <= TLOAD_BUF(k-1);
@@ -446,6 +454,7 @@ begin
 	MPR_DBG <= MPR(7) & MPR(6) & MPR(5) & MPR(4) & MPR(3) & MPR(2) & MPR(1) & MPR(0);
 	TAM_DBG <= std_logic_vector(TAM_CNT) & IR & T & A;
 	TLOAD_DBG <= TLOAD_BUF(3) & TLOAD_BUF(2) & TLOAD_BUF(1) & TLOAD_BUF(0);
+	TLOAD_STB <= TLOAD_STB_I;
 
 	MPR_OUT <= MPR(0) when T(0) = '1' else
 				  MPR(1) when T(1) = '1' else

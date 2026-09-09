@@ -646,6 +646,15 @@ architecture rtl of pcetang_console60k_cd is
    signal trap_tload  : std_logic_vector(191 downto 0) := (others => '0');
    signal dbg_wait_ever : std_logic;
    signal trap_wait_ever : std_logic := '0';
+   -- The BOARD's own view of the ROM bridge, latched on the CPU's T-load strobe. This is
+   -- what compares "what the CPU committed" against "what the bridge was presenting" at
+   -- the SAME instant. The derailment trap's (rd_addr, romb_do) pairs all look correct,
+   -- but they only prove the bridge is self-consistent -- if it latches CPU_A a fetch
+   -- behind, it fetches the wrong byte and reports it as right.
+   signal dbg_tload_stb : std_logic;
+   type bridge_view_t is array(0 to 1) of std_logic_vector(31 downto 0);
+   signal bview      : bridge_view_t := (others => (others => '0'));
+   signal trap_bview : bridge_view_t := (others => (others => '0'));
    signal dbg_tam     : std_logic_vector(31 downto 0);
    signal wram_dly    : unsigned(2 downto 0) := (others => '0');
    constant WRAM_BYTES : integer := 8192;   -- the 8KB a plain HuCard actually uses
@@ -1746,6 +1755,7 @@ begin
       DBG_MPR => dbg_mpr,
       DBG_TAM => dbg_tam,
       DBG_TLOAD => dbg_tload,
+      DBG_TLOAD_STB => dbg_tload_stb,
       DBG_WAIT_EVER => dbg_wait_ever,
 
       ROM_RD    => rom_rd_i,
@@ -1928,7 +1938,7 @@ begin
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
             -- Once the trap has fired, spend the next three heartbeat slots emitting the
             -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
-            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 9 then
+            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 11 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"E" & std_logic_vector(trap_sent);
@@ -1945,7 +1955,10 @@ begin
                   when "0101" => dbg_trace_data <= trap_tload(47 downto 0)    & "000000000000000" & trap_wait_ever;
                   when "0110" => dbg_trace_data <= trap_tload(95 downto 48)   & "000000000000000" & trap_wait_ever;
                   when "0111" => dbg_trace_data <= trap_tload(143 downto 96)  & "000000000000000" & trap_wait_ever;
-                  when others => dbg_trace_data <= trap_tload(191 downto 144) & "000000000000000" & trap_wait_ever;
+                  when "1000" => dbg_trace_data <= trap_tload(191 downto 144) & "000000000000000" & trap_wait_ever;
+                  -- 0xE9/0xEA: the bridge's own view at the CPU's two most recent T-loads.
+                  when "1001" => dbg_trace_data <= trap_bview(0) & x"00000000";
+                  when others => dbg_trace_data <= trap_bview(1) & x"00000000";
                end case;
             elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
@@ -2003,11 +2016,18 @@ begin
                   trap_buf(i) <= trap_buf(i-1);
                end loop;
             end if;
+            if trap_fired = '0' and dbg_tload_stb = '1' then
+               -- rom_a is what pce_top is ASKING for right now; rom_do_i is what the
+               -- bridge is HANDING BACK; rom_rdy_i is whether it claims to be ready.
+               bview(0) <= "000" & rom_a(20 downto 0) & rom_do_i;
+               bview(1) <= bview(0);
+            end if;
             if trap_fired = '0' and bank_bad = '1' then
                trap_fired <= '1';   -- CPU just entered a nonexistent bank: freeze
                trap_mpr   <= dbg_mpr;
                trap_tam   <= dbg_tam;
                trap_tload <= dbg_tload;
+               trap_bview <= bview;
                trap_wait_ever <= dbg_wait_ever;
             end if;
          end if;

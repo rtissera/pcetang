@@ -66,6 +66,7 @@ def parse_log(path):
     mpr = []
     tam = {}
     tloads = {}
+    bviews = {}
     line_re = re.compile(r"RTL\[([0-9a-fA-F]{2})\]\s+((?:[0-9a-fA-F]{2}\s*){8})")
     with open(path, "r", errors="replace") as fh:
         for line in fh:
@@ -75,6 +76,13 @@ def parse_log(path):
             tag = int(m.group(1), 16)
             payload = bytes(int(x, 16) for x in m.group(2).split())
             val = int.from_bytes(payload, "big")
+            if 0xE9 <= tag <= 0xEA:
+                v = val
+                bviews[tag - 0xE9] = {
+                    "rom_a": (v >> 40) & 0x1FFFFF,
+                    "rom_do": (v >> 32) & 0xFF,
+                }
+                continue
             if 0xE5 <= tag <= 0xE8:
                 # IR | DI | ADDR_BUS(15:0) | A | STATE(5) LOAD_T(3) | pad | wait_ever
                 v = val
@@ -130,7 +138,7 @@ def parse_log(path):
                 continue
             passes[(tag >> 6) & 1][tag & 0x3F] = ((val >> 24) & MASK,
                                                   (val >> 2) & 0x3FFFFF)
-    return passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads
+    return passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews
 
 
 def main():
@@ -152,7 +160,7 @@ def main():
             print(f"  block {blk:02x}  checksum {chk:08x}  end {end:#08x}")
         return 0
 
-    passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads = parse_log(args.log)
+    passes, beats, dumps, pattern, wram, trap, mpr, tam, tloads, bviews = parse_log(args.log)
 
     if mpr:
         print()
@@ -167,6 +175,27 @@ def main():
         print()
         print("  (expected values are what 1943 Kai's boot code sets: MPR0=$FF I/O,")
         print("   MPR1=$F8 work RAM, MPR2..6 = ROM banks 1..5 via LE454, MPR7=0 ROM bank 0)")
+
+    if bviews:
+        print()
+        print("BRIDGE VIEW at the CPU's two most recent T-loads (newest first).")
+        print("rom_a is the PHYSICAL address pce_top was asking for at that instant;")
+        print("rom_do is the byte the ROM bridge was handing back at that same instant.")
+        for i in sorted(bviews):
+            b = bviews[i]
+            print(f"   [{i}] rom_a = {b['rom_a']:06X}   rom_do = {b['rom_do']:02X}")
+        if tloads and 0 in tloads and 0 in bviews:
+            want = tloads[0]["addr"] & 0x1FFF
+            got_a = bviews[0]["rom_a"] & 0x1FFF
+            print()
+            if got_a == want:
+                print(f"  Bridge was on the SAME offset the CPU wanted ({want:04X}).")
+                print("  -> the address path is fine; the byte itself is wrong or late.")
+            else:
+                print(f"  MISMATCH: CPU wanted offset {want:04X}, bridge was on {got_a:04X}"
+                      f" (delta {got_a - want:+d}).")
+                print("  -> the bridge is serving a DIFFERENT address than the CPU asked")
+                print("     for, which is why its own (addr,data) pairs all look correct.")
 
     if tam:
         print()

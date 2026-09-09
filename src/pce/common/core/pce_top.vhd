@@ -223,6 +223,7 @@ entity pce_top is
 		DBG_MPR    : out std_logic_vector(63 downto 0);
 		DBG_TAM    : out std_logic_vector(31 downto 0);
 		DBG_TLOAD  : out std_logic_vector(191 downto 0);
+		DBG_TLOAD_STB : out std_logic;
 		-- Sticky: has WAIT_N EVER been low since reset? The previous "WAIT_N never asserted"
 		-- claim came from a heartbeat sample, which can miss a stall entirely. If the CPU is
 		-- never stalled while ROM reads are outstanding, mechanism (b) -- stale DI -- is live.
@@ -560,6 +561,7 @@ port map(
 	MPR_DBG  => DBG_MPR,
 	TAM_DBG  => DBG_TAM,
 	TLOAD_DBG => DBG_TLOAD,
+	TLOAD_STB => DBG_TLOAD_STB,
 
 	AUD_LDATA=> PCE_SL,
 	AUD_RDATA=> PCE_SR
