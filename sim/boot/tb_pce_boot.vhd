@@ -304,6 +304,11 @@ begin
 		-- the board are answering the identical question with the identical wiring.
 		alias mpr_dbg     is << signal dut.CPU.CORE.MPR_DBG : std_logic_vector(63 downto 0) >>;
 		alias tam_dbg     is << signal dut.CPU.CORE.TAM_DBG : std_logic_vector(31 downto 0) >>;
+		-- Same probe the board freezes at the trap. Sampled here at the 7th TAM, the
+		-- equivalent moment, so sim and hardware can be compared field by field. This is
+		-- what says whether hardware's "ADDR=operand, DI=opcode" is a real fault or just
+		-- the normal address/data pipelining that a healthy CPU also shows.
+		alias tload_dbg   is << signal dut.CPU.CORE.TLOAD_DBG : std_logic_vector(191 downto 0) >>;
 
 		variable l : line;
 
@@ -329,6 +334,7 @@ begin
 		variable tam_max   : integer := 0;
 		variable bad_bank  : boolean := false;
 		variable mpr_at_7  : std_logic_vector(63 downto 0) := (others => '0');
+		variable tload_at_7 : std_logic_vector(191 downto 0) := (others => '0');
 		variable mpr_final : std_logic_vector(63 downto 0) := (others => '0');
 		variable mpr_bad   : std_logic_vector(63 downto 0) := (others => '0');
 		variable tam_bad   : std_logic_vector(31 downto 0) := (others => '0');
@@ -383,6 +389,7 @@ begin
 				tam_max := to_integer(unsigned(tam_dbg(31 downto 24)));
 				if tam_max = 7 then
 					mpr_at_7 := mpr_dbg;
+					tload_at_7 := tload_dbg;
 				end if;
 			end if;
 			mpr_final := mpr_dbg;
@@ -545,6 +552,25 @@ begin
 			write(l, hex(mpr_at_7((i*8+7) downto (i*8)))); write(l, string'(" "));
 		end loop;
 		write(l, string'(" (MPR0..MPR7)")); writeline(output, l);
+		write(l, string'("  T-LOADS at 7th TAM (newest first): IR DI ADDR ALU STATE LOADT"));
+		writeline(output, l);
+		for i in 0 to 3 loop
+			write(l, string'("    ["));
+			write(l, i);
+			write(l, string'("] "));
+			write(l, hex(tload_at_7((i*48+47) downto (i*48+40))));  -- IR
+			write(l, string'(" "));
+			write(l, hex(tload_at_7((i*48+39) downto (i*48+32))));  -- DI
+			write(l, string'(" "));
+			write(l, hex(tload_at_7((i*48+31) downto (i*48+16))));  -- ADDR_BUS
+			write(l, string'(" "));
+			write(l, hex(tload_at_7((i*48+15) downto (i*48+8))));   -- ALU_OUT
+			write(l, string'(" "));
+			write(l, hex(tload_at_7((i*48+7) downto (i*48+3))));    -- STATE
+			write(l, string'(" "));
+			write(l, hex(tload_at_7((i*48+2) downto (i*48+0))));    -- LOAD_T
+			writeline(output, l);
+		end loop;
 		write(l, string'("  MPR at end of run   : "));
 		for i in 0 to 7 loop
 			write(l, hex(mpr_final((i*8+7) downto (i*8)))); write(l, string'(" "));

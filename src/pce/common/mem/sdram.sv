@@ -362,9 +362,17 @@ wire       fetch_req_b = RAM_B_WE || !last_valid[1] || (last_a[1] != RAM_B_ADDR[
 wire       fetch_req_c = (RAM_C_RD_n || !last_valid[2] || last_a[2] != RAM_C_ADDR[24:2]);
 
 // access manager
-always @(posedge clk) begin
+// PCE PORT (2026-09-09): block LABELLED so a testbench can reach the statics declared
+// inside it (old_b_req, pend_a_b, ...) to model FPGA power-up, where every register
+// comes up at 0 but Verilog simulation leaves them X. A block label is inert for
+// synthesis. See sim/sdram/tb_sdram_portb.v.
+always @(posedge clk) begin : access_manager
 	reg old_ref;
 	reg        old_b_req;
+	// PCE PORT (2026-09-09): address of the port-B fill currently in flight. The tag is
+	// now published at COMPLETION rather than at launch (see the launch and completion
+	// sites), so this carries it across the fill.
+	reg [22:0] pend_a_b;
 	reg        old_a_req;
 	reg        old_c_req;
 	reg [31:0] last_data[3];
@@ -526,8 +534,29 @@ always @(posedge clk) begin
 			data <= {RAM_B_DI,RAM_B_DI};        // PCE PORT: write data, only used when RAM_B_WE
 			wide_acc <= 1'b0;                  // PCE PORT: port B stays byte-granular
 			ram_req <= 1;
-			last_a[1] <= RAM_B_ADDR[24:2];
-			last_valid[1] <= 1'b1;
+			// PCE PORT (2026-09-09): REAL DATA-CORRUPTION FIX, found on Console 60K
+			// hardware and predicted verbatim by the "RESIDUAL" note in the hit branch
+			// above. Publishing the tag HERE, at launch, makes the line look cached while
+			// its data is still in flight. A second read of the same 4-byte line then
+			// tag-hits, the hit branch consumes `old_b_req` (marking the request served)
+			// and returns the PREVIOUS block's bytes, and when the fill finally completes
+			// the completion path drives RAM_B_DO from the LAUNCHED address `a` -- so the
+			// client is answered with the wrong byte entirely.
+			//
+			// That is exactly what the HuC6280 saw: an opcode fetch at 0x474 missed and
+			// launched, the operand fetch at 0x475 hit the in-flight line, and the CPU
+			// received the byte for 0x474 -- the TAM opcode $53 -- as its operand. Every
+			// TAM then wrote MPR0/1/4/6 (the bits of $53) instead of its own register.
+			// Confirmed against simulation: identical cycle, identical address, sim
+			// returned the correct operands 40/20/10/08 where hardware returned 53.
+			//
+			// The tag is now published at completion. A same-line read during a fill
+			// therefore MISSES, takes the miss branch, leaves `old_b_req` pending, and is
+			// launched properly once the current fill finishes. It costs one extra fetch
+			// in that window and cannot deadlock: the request stays pending rather than
+			// being consumed, which is the failure the hit branch's guard was added for.
+			last_valid[1] <= 1'b0;
+			pend_a_b <= RAM_B_ADDR[24:2];
 			ch1_busy <= 1;
 			state <= STATE_START;
 		end
@@ -595,6 +624,10 @@ always @(posedge clk) begin
 				RAM_B_DO <= a[0] ? data_reg[15:8] : data_reg[7:0];
 				last_data[1][(a[1] ? 16 : 0) +:16] <= data_reg;
 				store <= {1'b1,2'b01,~a[1]};
+				// PCE PORT (2026-09-09): publish the tag HERE, where last_data[1] actually
+				// holds this line. See the launch site for the corruption this prevents.
+				last_a[1] <= pend_a_b;
+				last_valid[1] <= 1'b1;
 			end
 		end
 		// PCE PORT: third client (CD-RAM), mirrors ch0_busy exactly -- real read+write
