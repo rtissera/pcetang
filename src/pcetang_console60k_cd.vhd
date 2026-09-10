@@ -886,6 +886,22 @@ architecture rtl of pcetang_console60k_cd is
    signal dirinfo_pend : std_logic := '0';
    signal dirinfo_data : std_logic_vector(63 downto 0) := (others => '0');
    signal cd_data_wr_r : std_logic := '0';
+   -- 2026-09-11, sector-transfer counters. cd_bridge's multi-sector READ(6) is PROVEN
+   -- correct in simulation (sim/cd/tb_cd_bridge.vhd issues sa=0x1000 sc=2, checks all 4096
+   -- bytes and the second sector's LBA), and iosys's request latch has priority over the
+   -- debug traces and is cleared after transmit. Yet hardware fires exactly ONE
+   -- SECTOR_REQ. The bridge only advances to the next sector once SCSI_READ_GAP has
+   -- counted 2048 SECTOR_DATA_VALID pulses, so the question is purely how many bytes
+   -- actually cross, and these three counters answer it from top-level signals alone:
+   --   valid  == 2048 and wr == 2048 -> the sector completed; look at why REQ #2 is lost
+   --   valid  == 2048 and wr <  2048 -> the bridge is dropping bytes
+   --   valid  <  2048               -> iosys/MCU delivered short, bridge waits forever
+   signal sum_alt      : std_logic := '0';   -- alternate 0xAE / 0xAF each heartbeat
+   signal sd_valid_r   : std_logic := '0';
+   signal sd_valid_cnt : unsigned(15 downto 0) := (others => '0');
+   signal cd_wr_cnt    : unsigned(15 downto 0) := (others => '0');
+   signal sect_req_r   : std_logic := '0';
+   signal sect_req_cnt : unsigned(15 downto 0) := (others => '0');
    -- ROLLING SUMMARY, emitted at heartbeat cadence (~100ms) instead of one-shot traces.
    -- One-shot traces of transient events proved unreliable: READ(6) appeared twice in one
    -- run and not at all in the next, and GETDIRINFO's reply is only 2-3 bytes so an
@@ -2181,6 +2197,15 @@ begin
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
+         sd_valid_r <= cd_sector_data_valid_i;
+         if cd_sector_data_valid_i = '1' and sd_valid_r = '0' then
+            sd_valid_cnt <= sd_valid_cnt + 1;
+         end if;
+         sect_req_r <= cd_sector_req_i;
+         if cd_sector_req_i = '1' and sect_req_r = '0' then
+            sect_req_cnt <= sect_req_cnt + 1;
+         end if;
+
          toc_wr_r <= toc_wr_i;
          if toc_wr_i = '1' and toc_wr_r = '0' then
             toc_wr_count <= toc_wr_count + 1;
@@ -2271,6 +2296,9 @@ begin
                dirinfo_data <= (others => '0');
             end if;
             cd_data_wr_r <= cd_data_wr_i;
+            if cd_data_wr_i = '1' and cd_data_wr_r = '0' then
+               cd_wr_cnt <= cd_wr_cnt + 1;
+            end if;
             if dirinfo_arm = '1' and cd_data_wr_i = '1' and cd_data_wr_r = '0' then
                dirinfo_data <= dirinfo_data(55 downto 0) & cd_data_i;
                dirinfo_cnt  <= dirinfo_cnt + 1;
@@ -2325,7 +2353,18 @@ begin
                dbg_trace_req <= '1';
                dbg_trace_tag <= "101011" & std_logic_vector(dirinfo_sent);  -- 0xAC / 0xAD
                dbg_trace_data <= dirinfo_data;
+            elsif dbg_hb_cnt = 0 and toc_sent_cnt = 4 and sum_alt = '1' then
+               sum_alt       <= '0';
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= x"AF";
+               -- [63:48] SECTOR_DATA_VALID pulses | [47:32] CD_DATA_WR pulses
+               -- | [31:16] SECTOR_REQ pulses | [15:0] 0
+               dbg_trace_data <= std_logic_vector(sd_valid_cnt)
+                                 & std_logic_vector(cd_wr_cnt)
+                                 & std_logic_vector(sect_req_cnt)
+                                 & x"0000";
             elsif dbg_hb_cnt = 0 and toc_sent_cnt = 4 then
+               sum_alt <= '1';
                -- 0xAE, re-emitted every heartbeat so the LAST one in the log is current.
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"AE";

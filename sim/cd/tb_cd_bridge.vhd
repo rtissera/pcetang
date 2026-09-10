@@ -354,20 +354,32 @@ begin
 		check_eq(errors, cd_stat, x"00", "GETDIRINFO mode1 status");
 		wait for CLK_PERIOD * 4;
 
-		-- 10. GETDIRINFO mode 0x2, track=2 (BCD) -> real control(0x04) + AMSF
-		-- (lba=0x1800 -> BCD 01:23:69)
+		-- 10. GETDIRINFO mode 0x2, track=2 (BCD) -> real AMSF + control
+		-- (lba=0x1800 -> BCD 01:23:69), control 0x04 = data track.
+		--
+		-- 2026-09-11: THIS CHECK USED TO ASSERT THE WRONG ORDER, and that is why the bug
+		-- it was meant to catch shipped. mednafen's own DoNEC_PCE_GETDIRINFO
+		-- (pce_fast/pcecd_drive.cpp) answers data_in[0..3] = M, S, F, control -- the
+		-- control byte LAST. The bridge staged it FIRST and this testbench asserted the
+		-- bridge's order rather than the reference's, so both agreed and both were wrong.
+		-- On real hardware the syscard read the control byte as MINUTES and asked to READ
+		-- LBA -101, which the lead-out check rejected forever.
+		--
+		-- A testbench written from the implementation cannot find a disagreement with the
+		-- spec. Anything checked here should be traceable to mednafen or to pcetech, not
+		-- to what cd_bridge.vhd happens to do.
 		cd_comm(7 downto 0)   <= x"DE";
 		cd_comm(15 downto 8)  <= x"02";
 		cd_comm(23 downto 16) <= x"02";  -- cdb[2] = BCD track 2
 		send_cmd(clk, cd_comm_send);
-		wait until rising_edge(clk) and cd_data_wr = '1';
-		check_eq(errors, cd_data, x"04", "GETDIRINFO mode2 control");
 		wait until rising_edge(clk) and cd_data_wr = '1';
 		check_eq(errors, cd_data, x"01", "GETDIRINFO mode2 M");
 		wait until rising_edge(clk) and cd_data_wr = '1';
 		check_eq(errors, cd_data, x"23", "GETDIRINFO mode2 S");
 		wait until rising_edge(clk) and cd_data_wr = '1';
 		check_eq(errors, cd_data, x"69", "GETDIRINFO mode2 F");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"04", "GETDIRINFO mode2 control (LAST, per mednafen)");
 		wait until rising_edge(clk) and cd_stat_get = '1';
 		check_eq(errors, cd_stat, x"00", "GETDIRINFO mode2 status");
 		wait for CLK_PERIOD * 4;
