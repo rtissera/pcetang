@@ -305,9 +305,20 @@ begin
 				toc_first_track_bcd <= (others => '0');
 				toc_last_track_bcd  <= (others => '0');
 			elsif TOC_WR = '1' then
-				if unsigned(TOC_TRACK) < 100 then
+				-- The table covers 0..100, so the lead-out (track 100) is stored BOTH in
+				-- its own register -- READ(6)'s bounds check reads it every command and
+				-- wants a plain register, not an indexed read -- and as table entry 100.
+				-- That second copy is what lets GETDIRINFO mode 2 treat the lead-out as an
+				-- ordinary track and index the table uniformly, instead of selecting
+				-- between the register and the table with a second 24-bit mux. Primer 25K
+				-- sits at 93% logic and failed to route with that extra mux (PR0004, 31
+				-- unrouted nets), so this is a real area fix, not a tidy-up.
+				if unsigned(TOC_TRACK) <= 100 then
 					toc_lba_tbl(to_integer(unsigned(TOC_TRACK)))     <= unsigned(TOC_LBA);
 					toc_control_tbl(to_integer(unsigned(TOC_TRACK))) <= TOC_CONTROL(2);
+				end if;
+				if unsigned(TOC_TRACK) < 100 then
+					-- first/last track extents cover real tracks only, never the lead-out
 					if toc_first_track = x"FF" then
 						toc_first_track     <= unsigned(TOC_TRACK);
 						toc_first_track_bcd <= u8_to_bcd(unsigned(TOC_TRACK));
@@ -612,7 +623,7 @@ begin
 										end if;
 									end if;
 
-									if gdi_track > 99 and gdi_track /= 100 then
+									if gdi_track > 100 then
 										pending_key <= SENSEKEY_ILLEGAL_REQ;
 										pending_asc <= NSE_INVALID_PARAMETER;
 										CD_STAT     <= x"02";
@@ -621,21 +632,16 @@ begin
 									else
 										-- control byte LAST, at index 3. The shared
 										-- converter fills M/S/F into 0/1/2 exactly as it
-										-- does for mode 1.
-										if gdi_track = 100 then
-											-- The lead-out lives in its own register, NOT
-											-- in toc_lba_tbl -- TOC_CAPTURE routes track
-											-- 100 there. Control is 0: that is what the
-											-- MCU sends for the lead-out entry.
-											resp_buf(3) <= x"00";
-											conv_total  <= resize(toc_leadout_lba, 17) + 150;
-										else
-											-- real control-byte reconstruction from the
-											-- 1-bit is_data flag: "00000100"=0x04(data)
-											-- / "00000000"=0x00(audio)
-											resp_buf(3) <= "00000" & toc_control_tbl(to_integer(gdi_track)) & "00";
-											conv_total  <= resize(toc_lba_tbl(to_integer(gdi_track)), 17) + 150;
-										end if;
+										-- does for mode 1. The lead-out needs no special
+										-- case: TOC_CAPTURE stores it as table entry 100,
+										-- so one indexed read serves every track and the
+										-- second 24-bit mux that broke Primer 25K's
+										-- routing is gone.
+										-- real control-byte reconstruction from the 1-bit
+										-- is_data flag: "00000100"=0x04(data) /
+										-- "00000000"=0x00(audio)
+										resp_buf(3)  <= "00000" & toc_control_tbl(to_integer(gdi_track)) & "00";
+										conv_total   <= resize(toc_lba_tbl(to_integer(gdi_track)), 17) + 150;
 										conv_is_subq <= '0';
 										resp_len     <= 4;  -- M + S + F + control
 										scsi_state   <= SCSI_CONV_SUB_M;
