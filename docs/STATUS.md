@@ -20,7 +20,7 @@ deliberate trade, not an oversight — see below.
 | Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
 | BSRAM | 67/118 | 35/56 | 39/46 |
 | **HuCard runs on real hardware** | **YES** | not tested | not tested |
-| Video on real hardware | **locked, stable** | not tested | not tested |
+| Video on real hardware | **locked, stable, 4:3** | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
 | CD-ROM² | **compiled out** (`NO_CD => 1`) | compiled in, **never tested** | compiled in, **never tested** |
@@ -129,6 +129,62 @@ on the evidence that the sink locked and stayed permanently black. What had actu
 tested was a saturating controller bang-banging 750<->760 every frame — the trace shows
 it — which is simply unstable timing. A steady 755 was never tried until now, and it
 works. The verdict was drawn from one bad control law, not from the approach.
+
+## 4:3 aspect ratio (Console 60K): DONE
+
+The picture used to be stretched to the full 1280, i.e. roughly 16:9. The PC Engine is
+4:3 whatever dot clock it is in — 256, 341 and 512 wide all map to the same 4:3 screen —
+and the Bresenham stretch already handled that correctly by mapping whatever width was
+captured into a fixed rectangle. Only the rectangle was wrong.
+
+The height is MEASURED, not assumed, for the same reason the VTOTAL loop measures:
+huc6260's `DISP_LINES` is 242 or 231 depending on `RVBL`, so any hardcoded width is 5%
+wrong in the other mode. Counting output lines while `video_vbl` is low gives the height
+directly and the width follows as `height * 4/3` (21845/16384, rounded — under a tenth of
+a pixel of error). 242 source lines occupy 694.9 output lines, so the window comes out
+927x695 with ~176px pillars.
+
+Also fixed here: the bars are true black. `rgb <= 24'h101010` was invisible while it only
+filled blanking, but those columns are DISPLAYED once pillarboxed and would have shown as
+grey pillars. And the bottom ~25 lines used to be the last active source line smeared to
+the bottom of the frame — the read side always shows the newest COMPLETED line — so the
+vertical extent is now gated on a synchronised `video_vbl`, delayed 3 output lines so the
+stale strip at the top goes too.
+
+**Fail-safe, and it is not optional.** If `video_vbl` never toggles the measured height is
+0, the width collapses and the vertical gate never opens: a black screen with no way to
+reach the OSD, which is how ROMs get loaded. So the window only narrows once a plausible
+height (300..780 lines) has been measured, and until then the previous full-width
+behaviour stands. `ASPECT_4_3 = 0` reverts entirely.
+
+This changes only WHERE pixels are drawn — the RGB mux, the Bresenham denominator, and a
+per-frame window calculation. cx/cy, frame_height, the VTOTAL servo, the packet sequencers
+and audio are untouched, so HDMI lock cannot regress from it.
+
+**Confirmed on hardware 2026-09-10:** 4:3 correct, OSD reachable in-game with
+SELECT + D-pad RIGHT (`OSD_KEY_CODE`, firmware default `OPTION_OSD_KEY_SELECT_RIGHT`).
+
+## Open items on Console 60K, in priority order
+
+None of these block HuCard play. All observed on real hardware 2026-09-10.
+
+1. **Core speed fluctuates** — audible/visible slowdown then speed-up during play. Not
+   the video path: the VTOTAL loop tracks the source rather than forcing it, and the
+   trace shows source and output frame counts advancing together. Suspect the SDRAM
+   arbiter or the ROM bridge's wait path stalling the CPU under load. The heartbeat's VDC
+   write counter is the instrument — a real stall shows up as a dip in writes per sample.
+2. **Suspected VDC sprite-collision bugs** — wrong behaviour in some titles. Core logic,
+   unrelated to video output.
+3. **OSD is glitchy in-game** — readable and navigable, but visibly imperfect. Likely the
+   overlay path assuming TangCore's standard raster; ours is 1280x720 at a non-standard
+   755-line vertical total with a pillarboxed window. Deferred by choice.
+4. **Brief roll at title on some titles** (seen on Raiden, then stable). Expected: the
+   servo re-acquires when the source changes mode. Worth confirming it is only that.
+5. **Uneven scanline thickness.** The read side updates only on even `cy`, so with a true
+   ratio of 2.871 each source line occupies 2 or 4 output rows — a 100% variation.
+   Dropping that gate gives 2 or 3 rows, much more uniform; `out_line_pair` must stay on
+   the /2 cadence or the OSD's vertical scale halves. Deliberately NOT bundled with the
+   aspect change, to keep one variable per build.
 
 ## What "not tested" means here
 

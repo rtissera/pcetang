@@ -480,6 +480,22 @@ def main():
             # frame has been seen, and srcf == 0 marks exactly that window. Including
             # them turns the initial jump-from-zero into fake creep -- on the first log
             # decoded that alone read 6.87 lines/frame instead of the true 5.13.
+            # debug.log APPENDS across runs, and the heartbeat reuses tags 0x80-0x9F
+            # every run, so an un-cleared log holds several runs back to back. Splitting
+            # on the source-frame counter going BACKWARDS keeps only the most recent one;
+            # without this the creep is computed across a run boundary and reports pure
+            # fiction (a real 64-sample log read "+3.246 lines/frame, needs 758.2" when
+            # the last run was in fact locked dead on target).
+            runs, cur = [], []
+            for b in beats:
+                if cur and b["srcf"] < cur[-1]["srcf"]:
+                    runs.append(cur); cur = []
+                cur.append(b)
+            if cur: runs.append(cur)
+            if len(runs) > 1:
+                print(f"  NOTE: log holds {len(runs)} runs; using the last "
+                      f"({len(runs[-1])} samples). Clear debug.log before a run.")
+            beats = runs[-1]
             live = [b for b in beats if b["srcf"] > 0]
             if len(live) < 3:
                 print("  too few valid samples after the startup window to measure phase.")
@@ -525,6 +541,26 @@ def main():
                     roll_frames = abs(fh / slip)
                     print(f"  => roll period {roll_frames:.0f} frames = "
                           f"{roll_frames / 60.10:.1f} s")
+                # The figure above averages the ACQUISITION transient in with the
+                # locked state, which makes it fiction once the servo is working. The
+                # last few samples are the honest steady-state measurement.
+                if len(live) >= 10:
+                    tl = live[-8:]
+                    dn = (tl[-1]["outf"] - tl[0]["outf"]) & 0xFFFF
+                    cw, ac = 0, tl[0]["vs_cy"]
+                    for p0, p1 in zip(tl, tl[1:]):
+                        st = p1["vs_cy"] - p0["vs_cy"]
+                        if st < -fh // 2: st += fh
+                        elif st > fh // 2: st -= fh
+                        cw += st
+                    ss_extra = sorted({b["vtx"] for b in tl})
+                    if dn:
+                        print(f"  STEADY STATE (last 8 samples): creep {cw:+d} lines over "
+                              f"{dn} frames = {cw/dn:+.3f} lines/frame")
+                        print(f"    vs_cy {[b['vs_cy'] for b in tl]}  vtotal_extra {ss_extra}")
+                        if abs(cw) <= 2 and len(ss_extra) <= 2:
+                            print("    -> LOCKED: phase held and only two adjacent "
+                                  "vertical totals in use.")
                 best = round(needed) - 750
                 print(f"  best static vtotal_extra = {best} "
                       f"(residual {needed - (750 + best):+.3f} lines/frame)")

@@ -150,8 +150,92 @@ end
 // fixed-point technique pce2hdmi.sv already uses, just with a runtime-variable source
 // width instead of a compile-time constant.
 //
-localparam XSTART = 0;
-localparam XSTOP  = SCREEN_WIDTH;
+// ==================== 4:3 aspect ====================
+//
+// The PC Engine displays 4:3 regardless of which dot clock it is in -- 256, 341 and 512
+// wide all map to the same 4:3 screen -- and the Bresenham stretch below already handles
+// that correctly by mapping whatever width was captured into a fixed rectangle. Only the
+// rectangle was wrong: it was the full 1280, so the picture came out at roughly 16:9.
+//
+// The height is MEASURED rather than assumed, for the same reason the VTOTAL loop
+// measures: huc6260's DISP_LINES is 242 or 231 depending on RVBL, so any hardcoded width
+// is wrong by 5% in the other mode. One source line lasts 2730/42.857e6 s and one output
+// line 1650/74.375e6 s, a ratio of 2.8713, so 242 active source lines occupy 694.9 output
+// lines and the matching 4:3 width is 926.6. Counting output lines while the source is in
+// its active area gives that height directly, and the width follows as height * 4/3.
+//
+// This changes only WHERE pixels are drawn. cx/cy, frame_height, the VTOTAL servo, the
+// packet sequencers and the audio path are all untouched, so HDMI lock cannot regress.
+// Set ASPECT_4_3 to 0 to get the previous full-width stretch back.
+localparam bit ASPECT_4_3 = 1'b1;
+
+reg  [10:0] x_start = 11'd0;
+reg  [10:0] x_stop  = 11'(SCREEN_WIDTH);
+reg  [10:0] act_w   = 11'(SCREEN_WIDTH);   // Bresenham denominator
+reg  [10:0] act_h   = 11'd695;             // measured, seeded with the 242-line value
+
+// video_vbl is low over the source's active area (huc6260 clears VBL_FF at the first
+// active line). Cross it into clk_pixel and count output lines across that window.
+reg  vbl_meta, vbl_sync, vbl_prev;
+reg  [10:0] act_cnt = 11'd0;
+reg  [9:0]  cy_rv;
+// The read side shows the most recently COMPLETED source line, so at the instant the
+// source's active area opens the buffer still holds the PREVIOUS frame's last line for
+// about one source line. Delaying the vertical gate by 3 output lines drops that stale
+// strip from the top and keeps the real last line at the bottom, instead of the ~25-line
+// smear of the final line that used to run to the bottom of the frame.
+reg  [2:0] vact_sr = 3'b0;
+// FAIL-SAFE. If video_vbl never toggles -- core held in reset, a mode with no active
+// area, anything unexpected -- act_cnt stays 0, the computed width collapses to 0 and
+// the vertical gate never opens, i.e. a black screen with no way to reach the OSD. So
+// the window only narrows once a PLAUSIBLE height has been measured, and until then the
+// old full-width behaviour stands. A blank screen is the one failure mode that would
+// cost the user the menu, so it must not be reachable from a measurement going wrong.
+localparam int ACT_H_MIN = 300;
+localparam int ACT_H_MAX = 780;
+reg  aspect_valid = 1'b0;
+wire v_active = (ASPECT_4_3 && aspect_valid) ? vact_sr[2] : 1'b1;
+
+// height * 4/3, rounded. 21845/16384 = 1.333313, so the error is under a tenth of a pixel.
+wire [26:0] w_mul  = {16'b0, act_h} * 27'd21845 + 27'd8192;
+wire [11:0] w_calc = w_mul[25:14];
+
+always_ff @(posedge clk_pixel) begin
+	reg [10:0] w_clamped;
+	vbl_meta <= video_vbl;
+	vbl_sync <= vbl_meta;
+	vbl_prev <= vbl_sync;
+	cy_rv    <= cy;
+
+	if (cy != cy_rv) vact_sr <= {vact_sr[1:0], ~vbl_sync};
+
+	if (vbl_prev & ~vbl_sync)              // source active area opens
+		act_cnt <= 11'd0;
+	else if (~vbl_sync && cy != cy_rv)     // count output lines across it
+		act_cnt <= act_cnt + 11'd1;
+
+	if (~vbl_prev & vbl_sync) begin        // closes: latch the height, if it is sane
+		if (act_cnt >= 11'(ACT_H_MIN) && act_cnt <= 11'(ACT_H_MAX)) begin
+			act_h        <= act_cnt;
+			aspect_valid <= 1'b1;
+		end else
+			aspect_valid <= 1'b0;
+	end
+
+	// Recompute the window once per frame, so it is stable while a frame is being drawn.
+	if (cx == frameWidth - 1'b1 && cy == frameHeight - 1'b1) begin
+		if (ASPECT_4_3 && aspect_valid) begin
+			w_clamped = (w_calc > 12'(SCREEN_WIDTH)) ? 11'(SCREEN_WIDTH) : w_calc[10:0];
+			act_w   <= w_clamped;
+			x_start <= (11'(SCREEN_WIDTH) - w_clamped) >> 1;
+			x_stop  <= ((11'(SCREEN_WIDTH) - w_clamped) >> 1) + w_clamped;
+		end else begin
+			act_w   <= 11'(SCREEN_WIDTH);
+			x_start <= 11'd0;
+			x_stop  <= 11'(SCREEN_WIDTH);
+		end
+	end
+end
 
 // 2-flop synchronizer for the cross-clock-domain toggle bit -- wr_line_toggle changes
 // once per source scanline (~15.7kHz), read here at clk_pixel (27MHz, ~1700 cycles of
@@ -188,14 +272,14 @@ always @(posedge clk_pixel) begin
 	reg [10:0] xcnt_next;
 
 	active_t = 0;
-	if (cx == XSTART) begin active_t = 1; active <= 1; end
-	else if (cx == XSTOP) begin active_t = 0; active <= 0; end
+	if (cx == x_start) begin active_t = 1; active <= 1; end
+	else if (cx == x_stop) begin active_t = 0; active <= 0; end
 
 	if (active_t | active) begin
 		xcnt_next = xcnt + cur_line_width;
 		xcnt <= xcnt_next;
-		if (xcnt_next >= SCREEN_WIDTH) begin
-			xcnt <= xcnt_next - SCREEN_WIDTH;
+		if (xcnt_next >= act_w) begin
+			xcnt <= xcnt_next - act_w;
 			sx <= sx + 1'b1;
 		end
 	end
@@ -219,7 +303,7 @@ end
 // 9-bit RGB (3/3/3) -> 24-bit, bit-replication expansion (r3,r3,r3[2:1]), not a
 // palette step -- same technique pce2hdmi.sv uses for its default COLOR_BITS=3 case.
 always @(posedge clk_pixel) begin
-	if (active) begin
+	if (active & v_active) begin
 		if (overlay)
 			rgb <= {overlay_color[4:0],3'b0,overlay_color[9:5],3'b0,overlay_color[14:10],3'b0};
 		else
@@ -227,7 +311,9 @@ always @(posedge clk_pixel) begin
 			         sd_rdata[5:3], sd_rdata[5:3], sd_rdata[5:4],
 			         sd_rdata[2:0], sd_rdata[2:0], sd_rdata[2:1] };
 	end else
-		rgb <= 24'h101010;
+		// Pillarbox/letterbox bars are DISPLAYED, unlike the blanking this used to fill,
+		// so 0x101010 would show as grey pillars. They have to be real black.
+		rgb <= ASPECT_4_3 ? 24'h000000 : 24'h101010;
 end
 
 //
