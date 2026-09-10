@@ -20,7 +20,7 @@ deliberate trade, not an oversight — see below.
 | Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
 | BSRAM | 67/118 | 35/56 | 39/46 |
 | **HuCard runs on real hardware** | **YES** | not tested | not tested |
-| Video on real hardware | works, **rolls** | not tested | not tested |
+| Video on real hardware | works, locked (brief resync at boot) | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
 | CD-ROM² | **compiled out** (`NO_CD => 1`) | compiled in, **never tested** | compiled in, **never tested** |
@@ -54,27 +54,64 @@ just never been run against a real disc image on hardware.
 **SuperGrafx.** `LITE => 1` everywhere. Fits, but razor-thin (96% BSRAM, ~0.2% clock
 margin) — scratch work only, never shipped.
 
-## Known defect: the picture rolls (Console 60K)
+## Rolling picture (Console 60K): FIXED by a VTOTAL lock, one residual glitch
 
-Understood, not mysterious. `pce2hdmi_sd.sv` is a 2-line ping-pong buffer whose read
-side shows whichever source line just finished, so it already absorbs phase error
-line-by-line — the roll IS that slip. Measured 5.5 s period matches +2.28 lines/frame
-at 74.375 MHz exactly.
+Real hardware, 2026-09-10. `pce2hdmi_sd.sv` is a 2-line ping-pong buffer whose read side
+shows whichever source line just finished, so it already absorbs phase error line by
+line — the roll WAS that slip, i.e. a pure frame-rate mismatch.
 
-Two dead ends, both confirmed on hardware, recorded so nobody retries them:
+The rate is a fixed rational, not a drift. Both PLLs divide the same 50 MHz crystal
+(`clk_pce` = 1200/28 MHz, `clk_pixel` = 743.75/10 MHz), and `huc6260.vhd` runs
+`LINE_CLOCKS`=2730 with `END_LINE`=263 for this title. Measured three independent ways:
+
+| method | frame_height needed |
+| --- | --- |
+| closed form | 755.1587 |
+| `vs_cy` creep on a free-running 750-line raster | 755.131 |
+| `vs_cy` creep on a static 755-line raster | 755.160 |
+
+A constant cannot lock it — the fraction is real, and the pixel clock cannot absorb it
+either (exact lock at 755 lines wants 74.35937 MHz; MDIV quantises to eighths and the
+nearest value is 74.375, where we already are). So `pce2hdmi_sd.sv` now runs a PI loop on
+the phase error with the fractional part sigma-delta dithered into VTOTAL: 755 lines with
+~0.16 of frames at 756, plus a phase target so the picture stops rather than freezing
+wherever it lands. Slew limited to one line per frame; anti-windup on the integral.
+
+**Confirmed working:** the loop acquires rate AND phase and holds `vs_cy` exactly on
+`VT_PHASE_TARGET`. Traced heartbeat, last three samples `vs_cy = 9, 9, 9` with
+`vtotal_extra` dithering 5/6.
+
+**Residual defect:** roughly 1-2 s of visible roll at power-on while the loop pulls in
+(`vtotal_extra` sits at its clamp and the picture rolls at the full 5.16 lines/frame),
+and one brief resync a few seconds later. The pull-in is in the trace; the later event is
+NOT — the heartbeat only spans 3.2 s (32 samples at ~100 ms) and the event falls outside
+it. Not yet distinguished: a genuine HDMI dropout vs. a visible fast roll during
+re-convergence, and whether the trigger is the loop's slow integral tail (Ki = 1/256
+moves the integral 0.0039 lines/frame, so one line of correction takes 256 frames ≈ 4.3 s
+— exactly the observed timescale) or a source mode change (`CR(2)`/`RVBL`) at
+title-to-game. Both point at the same fix: converge faster with less excursion. A gain
+sweep in simulation puts Kp=1/2, Ki=1/16, clamp 8 at 88 frames to acquire and 14 frames
+to re-lock after a source change, against 170/81 for the shipped gains.
+
+The loop measures rather than assuming, so a title selecting huc6260's 262-line branch
+retunes on its own — simulation converges to mean `vtotal_extra` 2.287 for that case,
+against 5.160 here.
+
+**Two dead ends, both confirmed on hardware, recorded so nobody retries them:**
 
 * **Raster-reset genlock.** Rewinding hdmi.sv's cx/cy desynchronises every other
   per-frame sequencer (guard/preamble key off `frame_height-1`; the packet picker and
   audio clock regeneration pace off the same raster). In blanking the sink tolerated one
   malformed island per frame (lock/drop cycling); in active video it dropped the link
   outright (no signal).
-* **VTOTAL modulation.** Standard-looking and reset-free, but this sink locks and then
-  stays **permanently black**. The servo is still in the tree, computing and reporting,
-  but gated off (`VT_SERVO_ACTS = 0`).
+* **A framebuffer, for this defect.** Not needed. It stays the answer only if a future
+  sink refuses the 755/756 dither; headroom is confirmed at 51 free BSRAM blocks.
 
-The real fix is a full framebuffer: standard free-running raster, vertical position set
-by read address, roll replaced by a slow-moving tear. Headroom is confirmed — 51 free
-BSRAM blocks on Console 60K, and `pce2hdmi.sv`'s full-frame path measured ~19-33.
+**Retracted:** an earlier revision of this file called VTOTAL modulation itself dead,
+on the evidence that the sink locked and stayed permanently black. What had actually been
+tested was a saturating controller bang-banging 750<->760 every frame — the trace shows
+it — which is simply unstable timing. A steady 755 was never tried until now, and it
+works. The verdict was drawn from one bad control law, not from the approach.
 
 ## What "not tested" means here
 

@@ -322,25 +322,62 @@ wire tmdsClk;
 // about 2 output lines. It self-calibrates: m never appears as a constant, so retuning
 // the pixel clock cannot invalidate this the way it invalidated AUDIO_DIV twice.
 // Pull-in from worst case (half a frame) takes 375/(MAX-m) ~ 47 frames, under a second.
-localparam int VT_MAX_EXTRA = 10;
-
-// 2026-09-09: the servo COMPUTES but does not ACT. Hardware evidence (debug.log's last
-// 32 heartbeats from the black-screen run) proves the core was alive and emitting frames
-// at 60.0 Hz with the VDC being written hard, so the black picture is the output raster,
-// and the only thing that changed there is VTOTAL modulation. Driving hdmi.sv with a
-// constant 0 restores the exact standard 750-line raster that is the only configuration
-// on this board ever seen to put a picture on the screen, while the servo keeps running
-// and reporting through dbg_vtotal_extra.
+// ============================ VTOTAL LOCK ============================
 //
-// So one run answers both questions at once:
-//   picture returns (rolling ~5.5 s) -> VTOTAL modulation itself is what blanked the
-//                                       sink; that approach is dead, go to a full
-//                                       framebuffer (BSRAM is 67/118, 51 blocks free).
-//   still black                      -> the fault is NOT the modulation but the
-//                                       frame_height rewrite or something else entirely,
-//                                       and the traced vs_cy/out-frame counts say which.
-// Set to 1 to re-enable modulation once the above is settled.
-localparam bit VT_SERVO_ACTS = 1'b0;
+// CONFIRMED ON REAL HARDWARE, 2026-09-10: the sink accepts a 755-line vertical total.
+// A build with vtotal_extra hard-wired to 5 produced a stable picture whose roll slowed
+// from 2.4 s to 78.5 s, exactly as predicted. That closes the one question the trace
+// data could not answer, and it retires the earlier "VTOTAL modulation is dead" verdict
+// -- what had actually been tested was a saturating controller bang-banging 750<->760
+// every frame, which is simply unstable timing, not evidence about a steady 755.
+//
+// The rate is a fixed rational, measured three independent ways to four figures:
+//     closed form   (263*2730 clk_pce vs 1650 clk_pixel)   755.1587 lines
+//     vs_cy creep, free-running 750-line raster            755.131
+//     vs_cy creep, static 755-line raster                  755.160
+// Both PLLs divide the SAME 50 MHz crystal (clk_pce = 1200/28, clk_pixel = 743.75/10),
+// so there is no thermal term -- but the loop below never assumes any of that. It
+// measures, so a title that selects huc6260's 262-line branch (END_LINE depends on
+// CR(2), which is the GAME's choice) retunes automatically. Hardcoding 263 would not.
+//
+// WHY A CONTROL LOOP AND NOT A CONSTANT: the needed height is fractional. 755 leaves
+// 0.16 lines/frame, which is the 78.5 s crawl actually observed. The pixel clock cannot
+// absorb it either -- exact lock at 755 lines wants 74.35937 MHz, and with MDIV
+// quantised to eighths the nearest realisable value is 74.375, i.e. where we already
+// are. So the fraction has to be dithered in the raster: 755 lines with 0.16 of frames
+// at 756.
+//
+// CONTROL LAW. Plant: e[k+1] = e[k] + S - L[k], with S the source frame length in
+// output lines and L[k] = 750 + extra[k]. A pure integrator, so a PI controller with
+// the fractional part sigma-delta dithered:
+//
+//     ctrl  = I + Kp*e                    (16.8 fixed point, units of output lines)
+//     I    += Ki*e                        Ki = 1/256, Kp = 1/8
+//     extra = int(ctrl) + sigma_delta_carry(frac(ctrl))
+//
+// Closed loop z^2 + (Kp + Ki - 2)z + (1 - Kp): roots 0.948 / 0.923, stable, settling in
+// well under a second. Running the sigma-delta on the WHOLE control value rather than
+// on I alone matters: e is quantised to whole lines, so a bare proportional term is
+// dead for |e| < 8 and the loop would limit-cycle a few lines instead of locking.
+//
+// Two guards that are not optional:
+//   - anti-windup: I is clamped to the same range as extra, or a long pull-in charges I
+//     far past the clamp and the loop overshoots on the way back.
+//   - slew limit of one line per frame on the applied value, so the sink never sees the
+//     abrupt multi-line jumps that blanked it before. The steady-state dither is itself
+//     a +-1 step, so this costs the loop nothing.
+//
+// PHASE TARGET. Rate lock alone freezes the picture wherever it happens to sit, which
+// is not a fix. `out_line_pair` drives only the OSD; the video read side always shows
+// the most recently COMPLETED source line, so one source line occupies 2730/42.857e6 /
+// (1650/74.375e6) = 2.871 output lines and the 242 active source lines fill 695 of the
+// 720 active output lines by themselves. (The "484 doubled lines centered in 480"
+// comment further up is stale -- it describes the 480p configuration this board no
+// longer uses.) So the target is near the TOP of the frame, not mid-screen: the source
+// active area should start about one source line (~3 output lines) before output line
+// 0, offset by half the 25-line slack to centre the picture.
+localparam int VT_MAX_EXTRA   = 12;    // extra in [0,12] -> L in [750,762], brackets 755.16
+localparam int VT_PHASE_TARGET = 9;    // output cy the source's active start should sit on
 
 // Source domain: one toggle per frame at the start of the active area.
 reg vbl_r;
@@ -353,11 +390,19 @@ end
 // Pixel domain: recover that event, sample the raster position, servo once per frame.
 reg tog_meta, tog_sync, tog_prev;
 reg [9:0] vs_cy;
-reg       vs_seen = 1'b0;
-reg [7:0] vtotal_extra = 8'd0;
+reg       vs_seen   = 1'b0;
+reg [7:0] vtotal_extra = 8'd5;                        // applied value, slew limited
+reg signed [23:0] vt_i = 24'sd1321;                   // 16.8 fixed point, seeded 5.16
+reg [7:0] vt_frac = 8'd0;                             // sigma-delta accumulator
+reg out_frame_tog = 1'b0;
+reg [9:0] vs_cy_snap = 10'd0;
 
 always_ff @(posedge clk_pixel) begin
-	reg signed [11:0] err;
+	reg signed [12:0] e;
+	reg signed [12:0] raw;
+	reg signed [23:0] ctrl, i_next;
+	reg signed [16:0] tgt;
+	reg [8:0]         sd_sum;
 
 	tog_meta <= src_act_tog;      // clk (clk_pce) -> clk_pixel, 2-flop synchroniser
 	tog_sync <= tog_meta;
@@ -371,14 +416,34 @@ always_ff @(posedge clk_pixel) begin
 	// End of the output frame: the one instant vtotal_extra may change.
 	if (cx == frameWidth - 1'b1 && cy == frameHeight - 1'b1) begin
 		if (vs_seen) begin
-			// Signed distance from the target (cy == 0), wrapped about the frame, so a
-			// source that starts just BEFORE the output frame reads as a small negative
-			// error rather than a nearly-full-frame positive one.
-			err = (vs_cy <= frameHeight[9:1]) ? $signed({2'b0, vs_cy})
-			                                  : $signed({2'b0, vs_cy}) - $signed({2'b0, frameHeight});
-			vtotal_extra <= (err <= 0)             ? 8'd0
-			              : (err >= VT_MAX_EXTRA)  ? 8'(VT_MAX_EXTRA)
-			                                       : err[7:0];
+			// Phase error about the target, wrapped signed so a source that starts just
+			// BEFORE the output frame reads as a small negative error rather than a
+			// nearly-full-frame positive one.
+			raw = $signed({3'b0, vs_cy}) - $signed(13'(VT_PHASE_TARGET));
+			if (raw < 13'sd0)
+				raw = raw + $signed({3'b0, frameHeight});
+			e = (raw > $signed({4'b0, frameHeight[9:1]}))
+			      ? raw - $signed({3'b0, frameHeight})
+			      : raw;
+
+			// PI, then sigma-delta the fractional part of the whole control value.
+			ctrl   = vt_i + ($signed({{11{e[12]}}, e}) <<< 5);   // Kp = 32/256 = 1/8
+			sd_sum = {1'b0, vt_frac} + {1'b0, ctrl[7:0]};
+			vt_frac <= sd_sum[7:0];
+			tgt    = $signed(ctrl[23:8]) + $signed({16'b0, sd_sum[8]});
+
+			if (tgt < 17'sd0)                tgt = 17'sd0;
+			else if (tgt > $signed(17'(VT_MAX_EXTRA))) tgt = $signed(17'(VT_MAX_EXTRA));
+
+			// One line per frame, so the sink never sees an abrupt jump.
+			if      ($signed({9'b0, vtotal_extra}) < tgt) vtotal_extra <= vtotal_extra + 8'd1;
+			else if ($signed({9'b0, vtotal_extra}) > tgt) vtotal_extra <= vtotal_extra - 8'd1;
+
+			// Integral with anti-windup, clamped to the same authority as the output.
+			i_next = vt_i + $signed({{11{e[12]}}, e});  // Ki = 1/256
+			if (i_next < 24'sd0)                       i_next = 24'sd0;
+			else if (i_next > $signed(24'(VT_MAX_EXTRA <<< 8))) i_next = $signed(24'(VT_MAX_EXTRA <<< 8));
+			vt_i <= i_next;
 		end
 		vs_seen <= 1'b0;
 		out_frame_tog <= ~out_frame_tog;   // one flip per output frame
@@ -386,11 +451,9 @@ always_ff @(posedge clk_pixel) begin
 	end
 end
 
-reg out_frame_tog = 1'b0;
-reg [9:0] vs_cy_snap = 10'd0;
 assign dbg_out_frame_tog = out_frame_tog;
 assign dbg_vs_cy         = vs_cy_snap;
-assign dbg_vtotal_extra  = vtotal_extra;
+assign dbg_vtotal_extra  = vtotal_extra;   // the APPLIED value, not an idle computation
 
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
         .DVI_OUTPUT(0),
@@ -405,7 +468,7 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
         .reset(0),
-        .vtotal_extra(VT_SERVO_ACTS ? vtotal_extra : 8'd0),
+        .vtotal_extra(vtotal_extra),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
         .tmds_clock(tmdsClk),
