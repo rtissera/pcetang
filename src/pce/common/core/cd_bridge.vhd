@@ -149,6 +149,9 @@ architecture rtl of cd_bridge is
 	constant NSE_INVALID_COMMAND     : std_logic_vector(7 downto 0) := x"20";
 	constant NSE_INVALID_ADDRESS     : std_logic_vector(7 downto 0) := x"21";
 	constant NSE_END_OF_VOLUME       : std_logic_vector(7 downto 0) := x"25";
+	-- ASC 0x26, INVALID FIELD IN PARAMETER LIST -- what mednafen returns for a GETDIRINFO
+	-- mode 2 track number above 99.
+	constant NSE_INVALID_PARAMETER   : std_logic_vector(7 downto 0) := x"26";
 	constant NSE_AUDIO_NOT_PLAYING   : std_logic_vector(7 downto 0) := x"2C";
 
 	-- Real CDDA play-status encoding, matching Mednafen's SubQ status byte values exactly
@@ -577,14 +580,66 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								elsif CD_COMM(15 downto 8) = x"02" then  -- cdb[1]=mode 2: track
-									gdi_track := bcd_to_u8(CD_COMM(23 downto 16));  -- cdb[2]
-									-- real control-byte reconstruction from the 1-bit
-									-- is_data flag: "00000100"=0x04(data)/"00000000"=0x00(audio)
-									resp_buf(0)  <= "00000" & toc_control_tbl(to_integer(gdi_track)) & "00";
-									conv_total   <= resize(toc_lba_tbl(to_integer(gdi_track)), 17) + 150;
-									conv_is_subq <= '0';
-									resp_len     <= 4;  -- control + M + S + F
-									scsi_state   <= SCSI_CONV_SUB_M;
+									-- 2026-09-11: THIS BRANCH WAS THE REASON PC ENGINE CD
+									-- WOULD NOT BOOT. Two faults, both against mednafen's
+									-- own DoNEC_PCE_GETDIRINFO (pce_fast/pcecd_drive.cpp):
+									--
+									-- (a) BYTE ORDER. mednafen answers
+									--        data_in[0..3] = M, S, F, control
+									--     and this staged the control byte at index 0
+									--     instead, shifting every byte one place, so the
+									--     syscard read the control byte as MINUTES. Traced
+									--     on hardware: it then asked to READ LBA 0x1FFF9B
+									--     = -101 = MSF 00:00:49, where that 49 is track 2's
+									--     SECONDS field (real AMSF 00:49:65) landing in
+									--     FRAMES. cd_bridge rejected the address against
+									--     the lead-out, the syscard retried through
+									--     REQUEST SENSE at ~40 Hz, and no sector was ever
+									--     requested from the MCU.
+									--
+									-- (b) TRACK NUMBER. mednafen maps 0 -> 1 and
+									--     cdb[2] == 0xAA -> the lead-out (track 100), and
+									--     rejects > 99. None of that existed here, and
+									--     0xAA in particular ran bcd_to_u8(0xAA) = 110 and
+									--     indexed toc_lba_tbl, which is 0..100 -- an
+									--     out-of-range read.
+									if CD_COMM(23 downto 16) = x"AA" then
+										gdi_track := to_unsigned(100, 8);   -- lead-out
+									else
+										gdi_track := bcd_to_u8(CD_COMM(23 downto 16));
+										if gdi_track = 0 then
+											gdi_track := to_unsigned(1, 8);
+										end if;
+									end if;
+
+									if gdi_track > 99 and gdi_track /= 100 then
+										pending_key <= SENSEKEY_ILLEGAL_REQ;
+										pending_asc <= NSE_INVALID_PARAMETER;
+										CD_STAT     <= x"02";
+										CD_MSG      <= x"00";
+										CD_STAT_GET <= '1';
+									else
+										-- control byte LAST, at index 3. The shared
+										-- converter fills M/S/F into 0/1/2 exactly as it
+										-- does for mode 1.
+										if gdi_track = 100 then
+											-- The lead-out lives in its own register, NOT
+											-- in toc_lba_tbl -- TOC_CAPTURE routes track
+											-- 100 there. Control is 0: that is what the
+											-- MCU sends for the lead-out entry.
+											resp_buf(3) <= x"00";
+											conv_total  <= resize(toc_leadout_lba, 17) + 150;
+										else
+											-- real control-byte reconstruction from the
+											-- 1-bit is_data flag: "00000100"=0x04(data)
+											-- / "00000000"=0x00(audio)
+											resp_buf(3) <= "00000" & toc_control_tbl(to_integer(gdi_track)) & "00";
+											conv_total  <= resize(toc_lba_tbl(to_integer(gdi_track)), 17) + 150;
+										end if;
+										conv_is_subq <= '0';
+										resp_len     <= 4;  -- M + S + F + control
+										scsi_state   <= SCSI_CONV_SUB_M;
+									end if;
 								elsif CD_COMM(15 downto 8) = x"01" then  -- mode 1: lead-out
 									conv_total   <= resize(toc_leadout_lba, 17) + 150;
 									conv_is_subq <= '0';
@@ -663,11 +718,12 @@ begin
 						resp_buf(7) <= conv_s_bcd;
 						resp_buf(8) <= conv_f_bcd;
 						resp_len    <= 9;
-					elsif resp_len = 4 then  -- GETDIRINFO mode 2: control already at idx 0
-						resp_buf(1) <= conv_m_bcd;
-						resp_buf(2) <= conv_s_bcd;
-						resp_buf(3) <= conv_f_bcd;
-					else  -- GETDIRINFO mode 1: lead-out, no control byte
+					else
+						-- Both GETDIRINFO modes now put M/S/F first, matching mednafen:
+						-- mode 1 is [M,S,F] (resp_len 3) and mode 2 is [M,S,F,control]
+						-- (resp_len 4) with the control byte already staged at index 3 by
+						-- the command handler. The old resp_len = 4 special case existed
+						-- only to skip over a control byte wrongly placed at index 0.
 						resp_buf(0) <= conv_m_bcd;
 						resp_buf(1) <= conv_s_bcd;
 						resp_buf(2) <= conv_f_bcd;

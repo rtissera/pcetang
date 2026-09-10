@@ -585,6 +585,20 @@ architecture rtl of pcetang_console60k_cd is
    -- heartbeat come to 64 trace lines total -- the same volume as the previous run that
    -- was known to survive the MCU's SD-write path intact. (An earlier opcode-9 bug
    -- truncated debug.log mid-line, so trace volume is not a free parameter here.)
+   -- 2026-09-10: the ROM self-test sweep is debug scaffolding from the HuCard
+   -- black-screen hunt, which closed at 777ba38. It is now actively harmful. Its PT_*
+   -- states WRITE test patterns into memory, which is why core_resetn's release was
+   -- deferred to `vfy_state = VF_DONE` rather than to loading's falling edge -- and
+   -- cd_bridge is instantiated with RST_N => core_resetn, so it sits in reset, with its
+   -- TOC tables cleared, for the whole sweep. The MCU sends the entire TOC within about
+   -- a millisecond of dropping the loading flag, so every TOC_WR lands while the bridge
+   -- is held in reset and is discarded. cd_mounted survives only because it lives in
+   -- iosys, which core_resetn does not reset -- exactly the asymmetry the trace showed
+   -- (mount=1, toc_wr_count=0).
+   -- Turning the sweep off releases the core on loading's falling edge as originally
+   -- designed, removes the pattern-write hazard, and frees tags 0x00-0x7F on the trace
+   -- channel. Set true to get it back.
+   constant SELFTEST : boolean := false;
    constant VFY_BLK_BITS : integer := 15;
    type vfy_state_t is (VF_IDLE,
                         -- SDRAM pattern self-test phase, runs first (see PAT_BASE)
@@ -707,7 +721,13 @@ architecture rtl of pcetang_console60k_cd is
    -- from "TAM wrote the wrong register".
    signal dbg_mpr     : std_logic_vector(63 downto 0);
    -- See gen_cd_bridge below for what this switches off and why.
-   constant HUCARD_ONLY : boolean := true;
+   -- 2026-09-10: false, to instantiate cd_bridge for the first real PC Engine CD test.
+   -- This is a SECOND gate on the CD path, independent of pce_top's NO_CD generic, and
+   -- missing it is what made the first CD attempt look like an MCU problem: the syscard
+   -- loaded and ran, but with cd_bridge absent SECTOR_REQ is hard-tied to '0' in
+   -- gen_no_cd_bridge, so the syscard sat on "JUST A MOMENT..." forever and the MCU's
+   -- sector-request counters stayed at zero because nothing ever asked it for anything.
+   constant HUCARD_ONLY : boolean := false;
 
    signal trap_mpr    : std_logic_vector(63 downto 0) := (others => '0');
    -- TAM evidence frozen at the same instant as trap_mpr. The boot path runs EXACTLY
@@ -797,6 +817,93 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_stat_get_i  : std_logic;
    signal cd_comm_i      : std_logic_vector(95 downto 0);
    signal cd_comm_send_i : std_logic;
+   -- TEMP CD trace (2026-09-10): the syscard reaches CD PLAYER, meaning it read the TOC
+   -- and concluded there was nothing bootable, and the MCU's own counters show it was
+   -- never asked for a single data sector. Everything MCU-side checks out (TOC LBAs and
+   -- the data-track control bit are both right, verified against the .chd on the host),
+   -- so the question is what cd_bridge is actually being ASKED and what it answers --
+   -- which nothing on this board can currently see. Latch every SCSI CDB the core sends.
+   -- TEMP TOC trace (2026-09-10): the syscard issues TEST UNIT READY, then GETDIRINFO,
+   -- then gives up -- it never issues READ(6) at all, so it is deciding from what the
+   -- TOC tells it. The MCU builds that TOC correctly (verified against the .chd on the
+   -- host: 34 tracks, track 2 MODE1_RAW at LBA 3590, lead-out 316011). What has NEVER
+   -- been checked is whether it survives the trip across the wire into cd_bridge. These
+   -- latch what the top level actually hands the bridge. Only the entries that decide
+   -- bootability are kept, not all 35 -- the trace channel is single-outstanding and a
+   -- back-to-back burst would drop most of them; these are emitted at heartbeat cadence.
+   signal toc_wr_r        : std_logic := '0';
+   signal toc_wr_count    : unsigned(7 downto 0) := (others => '0');
+   signal toc_t1_lba      : std_logic_vector(23 downto 0) := (others => '0');
+   signal toc_t2_lba      : std_logic_vector(23 downto 0) := (others => '0');
+   signal toc_lo_lba      : std_logic_vector(23 downto 0) := (others => '0');
+   signal toc_t1_ctl      : std_logic_vector(7 downto 0) := (others => '0');
+   signal toc_t2_ctl      : std_logic_vector(7 downto 0) := (others => '0');
+   signal toc_maxtrack    : std_logic_vector(7 downto 0) := (others => '0');
+   signal toc_sent_cnt    : unsigned(2 downto 0) := (others => '0');
+
+   signal cd_comm_send_r  : std_logic := '0';
+   -- Rate limit for CD command traces. The syscard polls, so commands arrive far faster
+   -- than a 9-byte trace frame takes to leave at 2 Mbaud, and back-to-back requests
+   -- overran the channel: payloads came back containing "aa 00 0a 09 <tag>", i.e. the
+   -- NEXT frame's own protocol header. Anything decoded from such a frame is fiction.
+   -- One trace per ~1 ms (42857 clk_pce cycles) is far longer than a frame takes.
+   signal cdcmd_gap       : unsigned(15 downto 0) := (others => '0');
+   -- 2026-09-11: CD command tracing OFF. It shares the FPGA->MCU link with the CD
+   -- SECTOR REQUESTS, and the MCU's opcode-9 handler calls file_log() -- f_write plus
+   -- f_sync to the SD card -- from inside the UART RX parser. That blocks for
+   -- milliseconds; at 2 Mbaud the RX stream overflows and desyncs, and once desynced it
+   -- never recovers. The signature is unmistakable: the first few frames decode cleanly
+   -- and then every payload contains "aa 00 0a 09 <tag>", i.e. the NEXT frame's own
+   -- protocol header, read as data. A desynced stream also swallows the opcode-6 sector
+   -- requests, which is why cdprog stayed empty -- the reads may have been arriving all
+   -- along. Rate-limiting to 1 ms did not help because the cost is per frame, not per
+   -- burst. It has already told us what it was for (TOC lands, syscard issues READ(6)),
+   -- so it comes out rather than keep corrupting the channel it is measuring.
+   -- The heartbeat (32 frames over ~3.2 s) and the four TOC frames are sparse enough.
+   constant CDCMD_TRACE : boolean := false;
+   -- Trace ONLY READ(6) (opcode 0x08), capped at 2 frames, tags 0xA8/0xA9. With the
+   -- stream now clean and still no sector request reaching the MCU, cd_bridge is simply
+   -- not pulsing SECTOR_REQ, and the likeliest reason is its own lead-out bounds check
+   -- (`if sa > toc_leadout_lba` in the READ(6) decode) rejecting the address. That needs
+   -- the REAL address, and the only previous sighting of a READ CDB came from a frame
+   -- corrupted by the flood this replaces -- so its LBA meant nothing. Two frames total
+   -- cannot flood anything: the MCU logs each trace to SD from inside its UART RX
+   -- parser, so trace volume is what desynced the link before.
+   signal rdcmd_cnt   : unsigned(1 downto 0) := (others => '0');
+   signal rdcmd_pend  : std_logic := '0';
+   signal rdcmd_data  : std_logic_vector(63 downto 0) := (others => '0');
+   -- What cd_bridge ANSWERS to GETDIRINFO. The TOC it holds is provably right (traced:
+   -- 35 writes, track 2 control 0x04 @ 3590, lead-out 316011), yet the syscard then asks
+   -- to READ LBA 0x1FFF9B = -101, whose byte 1 is 0xFF when only its low 5 bits are
+   -- address. That is not an address derived from a sane TOC, so the reply path is the
+   -- suspect, not the table. Capture the first 8 bytes the bridge writes out after a
+   -- GETDIRINFO (0xDE), which covers mode 0 (first/last track, BCD), mode 1 (lead-out
+   -- AMSF) and mode 2 (per-track AMSF). Capped at 2 frames: the MCU logs each trace to
+   -- SD from inside its UART RX parser, so volume is what desyncs the link.
+   signal dirinfo_arm  : std_logic := '0';
+   signal dirinfo_cnt  : unsigned(3 downto 0) := (others => '0');
+   signal dirinfo_sent : unsigned(1 downto 0) := (others => '0');
+   signal dirinfo_pend : std_logic := '0';
+   signal dirinfo_data : std_logic_vector(63 downto 0) := (others => '0');
+   signal cd_data_wr_r : std_logic := '0';
+   -- ROLLING SUMMARY, emitted at heartbeat cadence (~100ms) instead of one-shot traces.
+   -- One-shot traces of transient events proved unreliable: READ(6) appeared twice in one
+   -- run and not at all in the next, and GETDIRINFO's reply is only 2-3 bytes so an
+   -- 8-byte capture never completed. Adding more one-shots is not an option either --
+   -- the MCU logs every trace to SD from inside its UART RX parser, and f_sync can block
+   -- far longer than the 1 ms spacing I tried, which is why volume corrupted the link.
+   -- Accumulating in RTL and reporting periodically is bounded by construction: the
+   -- summary is always current whenever the log happens to be read.
+   signal sum_cmd_cnt  : unsigned(7 downto 0) := (others => '0');
+   signal sum_last_op  : std_logic_vector(7 downto 0) := (others => '0');
+   signal sum_read_cnt : unsigned(7 downto 0) := (others => '0');
+   signal sum_read_lba : std_logic_vector(23 downto 0) := (others => '0');
+   signal sum_dir_cnt  : unsigned(7 downto 0) := (others => '0');
+   signal sum_dir_b0   : std_logic_vector(7 downto 0) := (others => '0');
+   signal sum_dir_b1   : std_logic_vector(7 downto 0) := (others => '0');
+   signal cdcmd_cnt       : unsigned(5 downto 0) := (others => '0');
+   signal cdcmd_pend      : std_logic := '0';
+   signal cdcmd_data      : std_logic_vector(63 downto 0) := (others => '0');
    signal cd_data_i      : std_logic_vector(7 downto 0);
    signal cd_data_wr_i   : std_logic;
    signal cd_data_end_i  : std_logic;
@@ -1197,7 +1304,10 @@ begin
                vfy_active <= '0';
                -- Start on loading's falling edge, the same edge that used to release
                -- the core directly.
-               if rom_loading(0) = '0' and rom_loading_r = '1' then
+               if rom_loading(0) = '0' and rom_loading_r = '1' and not SELFTEST then
+                  -- Scaffolding off: release the core at once, as the original design did.
+                  vfy_state   <= VF_DONE;
+               elsif rom_loading(0) = '0' and rom_loading_r = '1' then
                   vfy_active  <= '1';
                   vfy_addr    <= (others => '0');
                   vfy_sum     <= (others => '0');
@@ -1869,7 +1979,7 @@ begin
    -- core/CPU/CORE/MPR_SEL -- the MPR bank-register read mux, the exact signal the
    -- black-screen fault is localised to -- into core/AC/port[N].base_*, at 0.224 ns
    -- slack on a 23.33 ns period. See pce_top.vhd's AC_BUILD comment.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 1, AC_BUILD => 0, DBG_PROBES => 1)
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 1)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
@@ -2062,6 +2172,32 @@ begin
       end if;
    end process;
 
+   -- TOC capture lives in its OWN process, deliberately gated on NOTHING. It was inside
+   -- the trace process's `if vfy_emit_d ... elsif core_resetn = '0' ... else` chain, so it
+   -- only counted while the core was out of reset -- and the MCU sends the whole TOC
+   -- within a millisecond of releasing the core, long before the first heartbeat. A
+   -- counter that can be masked by the state you are measuring around reports zero and
+   -- looks exactly like "the wire is dead".
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         toc_wr_r <= toc_wr_i;
+         if toc_wr_i = '1' and toc_wr_r = '0' then
+            toc_wr_count <= toc_wr_count + 1;
+            if unsigned(toc_track_i) > unsigned(toc_maxtrack)
+               and unsigned(toc_track_i) /= 100 then
+               toc_maxtrack <= toc_track_i;
+            end if;
+            case toc_track_i is
+               when x"01" => toc_t1_lba <= toc_lba_i; toc_t1_ctl <= toc_control_i;
+               when x"02" => toc_t2_lba <= toc_lba_i; toc_t2_ctl <= toc_control_i;
+               when x"64" => toc_lo_lba <= toc_lba_i;   -- 100 = lead-out
+               when others => null;
+            end case;
+         end if;
+      end if;
+   end process;
+
    process (clk_pce)
    begin
       if rising_edge(clk_pce) then
@@ -2114,6 +2250,55 @@ begin
             dbg_hb_cnt    <= (others => '0');
             trap_sent     <= (others => '0');
          else
+            -- Rate-limit timer for CD command traces. Decremented HERE, in the same
+            -- process that reloads it below -- driving a signal from two processes is
+            -- what the previous build failed on (EX2000, multiple drivers).
+            if cdcmd_gap /= 0 then
+               cdcmd_gap <= cdcmd_gap - 1;
+            end if;
+
+            -- Edge-detect the core's own command strobe and latch the CDB.
+            cd_comm_send_r <= cd_comm_send_i;
+            if cd_comm_send_i = '1' and cd_comm_send_r = '0'
+               and cd_comm_i(7 downto 0) = x"08" then
+               rdcmd_data <= cd_comm_i(63 downto 0);
+               rdcmd_pend <= '1';
+            end if;
+            if cd_comm_send_i = '1' and cd_comm_send_r = '0'
+               and cd_comm_i(7 downto 0) = x"de" then
+               dirinfo_arm  <= '1';
+               dirinfo_cnt  <= (others => '0');
+               dirinfo_data <= (others => '0');
+            end if;
+            cd_data_wr_r <= cd_data_wr_i;
+            if dirinfo_arm = '1' and cd_data_wr_i = '1' and cd_data_wr_r = '0' then
+               dirinfo_data <= dirinfo_data(55 downto 0) & cd_data_i;
+               dirinfo_cnt  <= dirinfo_cnt + 1;
+               if dirinfo_cnt = 7 then
+                  dirinfo_arm  <= '0';
+                  dirinfo_pend <= '1';
+               end if;
+            end if;
+
+            if cd_comm_send_i = '1' and cd_comm_send_r = '0' then
+               cdcmd_data  <= cd_comm_i(63 downto 0);
+               cdcmd_pend  <= '1';
+               sum_cmd_cnt <= sum_cmd_cnt + 1;
+               sum_last_op <= cd_comm_i(7 downto 0);
+               if cd_comm_i(7 downto 0) = x"08" then
+                  sum_read_cnt <= sum_read_cnt + 1;
+                  -- same slicing cd_bridge's own READ(6) decode uses
+                  sum_read_lba <= "000" & cd_comm_i(12 downto 8)
+                                  & cd_comm_i(23 downto 16) & cd_comm_i(31 downto 24);
+               end if;
+            end if;
+            -- First two bytes cd_bridge writes back after any GETDIRINFO, and how many it
+            -- wrote in total -- 0 would mean the reply never reaches the syscard at all.
+            if dirinfo_arm = '1' and cd_data_wr_i = '1' and cd_data_wr_r = '0' then
+               if sum_dir_cnt = 0 then sum_dir_b0 <= cd_data_i;
+               elsif sum_dir_cnt = 1 then sum_dir_b1 <= cd_data_i; end if;
+               sum_dir_cnt <= sum_dir_cnt + 1;
+            end if;
             dbg_hb_cnt <= dbg_hb_cnt + 1;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             -- 32, not 64: two checksum passes now emit 32 lines before the core is even
@@ -2122,7 +2307,67 @@ begin
             -- 32+32 keeps total volume at the 64 lines a previous run survived.
             -- Once the trap has fired, spend the next three heartbeat slots emitting the
             -- frozen window (tags 0xE0-0xE2) before resuming the normal heartbeat.
-            if dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 12 then
+            -- Highest priority: a SCSI command just arrived. These are rare (a boot
+            -- issues a handful) and are the whole point of this run, so they must not
+            -- lose the channel to the ~100ms heartbeat.
+            -- ALWAYS emit, never gated on toc_wr_count: gating the report on the very
+            -- quantity being measured makes "count is zero" and "probe never ran"
+            -- indistinguishable, which is exactly what happened on the previous run.
+            if rdcmd_pend = '1' and rdcmd_cnt < 2 then
+               rdcmd_pend    <= '0';
+               rdcmd_cnt     <= rdcmd_cnt + 1;
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= "101010" & std_logic_vector(rdcmd_cnt);  -- 0xA8 / 0xA9
+               dbg_trace_data <= rdcmd_data;
+            elsif dirinfo_pend = '1' and dirinfo_sent < 2 then
+               dirinfo_pend  <= '0';
+               dirinfo_sent  <= dirinfo_sent + 1;
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= "101011" & std_logic_vector(dirinfo_sent);  -- 0xAC / 0xAD
+               dbg_trace_data <= dirinfo_data;
+            elsif dbg_hb_cnt = 0 and toc_sent_cnt = 4 then
+               -- 0xAE, re-emitted every heartbeat so the LAST one in the log is current.
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= x"AE";
+               -- [63:56] commands | [55:48] last opcode | [47:40] READ(6) count
+               -- | [39:16] last READ LBA | [15:8] GETDIRINFO reply bytes seen
+               -- | [7:0] first reply byte
+               dbg_trace_data <= std_logic_vector(sum_cmd_cnt) & sum_last_op
+                                 & std_logic_vector(sum_read_cnt) & sum_read_lba
+                                 & std_logic_vector(sum_dir_cnt) & sum_dir_b0;
+            elsif dbg_hb_cnt = 0 and toc_sent_cnt < 4 then
+               toc_sent_cnt  <= toc_sent_cnt + 1;
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= "10100" & std_logic_vector(toc_sent_cnt);  -- 0xA0-0xA3
+               case std_logic_vector(toc_sent_cnt) is
+                  -- Order matters: these emit one per ~100ms heartbeat slot, and the
+                  -- MCU sends the TOC ~1ms after the core is released. The count went
+                  -- first last time and was sampled BEFORE the TOC landed, reading 0
+                  -- while a2/a3 in the same run showed the data had in fact arrived.
+                  -- 0xA0: track 1 control + LBA
+                  when "000" => dbg_trace_data <= x"01" & toc_t1_ctl & toc_t1_lba & x"000000";
+                  -- 0xA1: track 2 control + LBA  (the DATA track on this disc)
+                  when "001" => dbg_trace_data <= x"02" & toc_t2_ctl & toc_t2_lba & x"000000";
+                  -- 0xA2: lead-out LBA
+                  when "010" => dbg_trace_data <= x"64" & x"00" & toc_lo_lba & x"000000";
+                  -- 0xA3, LAST: TOC_WR count | highest track | mount
+                  when others => dbg_trace_data <= std_logic_vector(toc_wr_count) & toc_maxtrack & "0000000" & cd_mounted_i & x"0000000000";
+               end case;
+            elsif CDCMD_TRACE and cdcmd_pend = '1' and cdcmd_cnt < 40 and cdcmd_gap = 0 then
+               cdcmd_pend    <= '0';
+               cdcmd_cnt     <= cdcmd_cnt + 1;
+               cdcmd_gap     <= to_unsigned(42857, 16);   -- ~1 ms before the next one
+               dbg_trace_req <= '1';
+               -- 0x40-0x7B: distinct from block checksums (0x00-0x3F), heartbeat (0x80+)
+               -- and the trap window (0xE0+).
+               -- 0xC0+: 0x40+ collides with the SECOND ROM-checksum pass, which cost a
+               -- run: eight checksum lines came back tagged exactly like CD commands.
+               dbg_trace_tag <= std_logic_vector(("1011" & cdcmd_cnt(3 downto 0)));
+               -- CDB bytes 0..7, little-endian in CD_COMM: byte n = CD_COMM(8n+7:8n).
+               -- Byte 0 is the opcode; for READ(6) bytes 1..3 are the LBA and byte 4 the
+               -- sector count, per this file's own READ(6) decode.
+               dbg_trace_data <= cdcmd_data;
+            elsif dbg_hb_cnt = 0 and trap_fired = '1' and trap_sent < 12 then
                trap_sent     <= trap_sent + 1;
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"E" & std_logic_vector(trap_sent);
