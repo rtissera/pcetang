@@ -20,7 +20,7 @@ deliberate trade, not an oversight — see below.
 | Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
 | BSRAM | 67/118 | 35/56 | 39/46 |
 | **HuCard runs on real hardware** | **YES** | not tested | not tested |
-| Video on real hardware | works, locked (brief resync at boot) | not tested | not tested |
+| Video on real hardware | **locked, stable** | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
 | CD-ROM² | **compiled out** (`NO_CD => 1`) | compiled in, **never tested** | compiled in, **never tested** |
@@ -54,7 +54,7 @@ just never been run against a real disc image on hardware.
 **SuperGrafx.** `LITE => 1` everywhere. Fits, but razor-thin (96% BSRAM, ~0.2% clock
 margin) — scratch work only, never shipped.
 
-## Rolling picture (Console 60K): FIXED by a VTOTAL lock, one residual glitch
+## Rolling picture (Console 60K): FIXED and confirmed stable
 
 Real hardware, 2026-09-10. `pce2hdmi_sd.sv` is a 2-line ping-pong buffer whose read side
 shows whichever source line just finished, so it already absorbs phase error line by
@@ -81,21 +81,38 @@ wherever it lands. Slew limited to one line per frame; anti-windup on the integr
 `VT_PHASE_TARGET`. Traced heartbeat, last three samples `vs_cy = 9, 9, 9` with
 `vtotal_extra` dithering 5/6.
 
-**Residual defect:** roughly 1-2 s of visible roll at power-on while the loop pulls in
-(`vtotal_extra` sits at its clamp and the picture rolls at the full 5.16 lines/frame),
-and one brief resync a few seconds later. The pull-in is in the trace; the later event is
-NOT — the heartbeat only spans 3.2 s (32 samples at ~100 ms) and the event falls outside
-it. Not yet distinguished: a genuine HDMI dropout vs. a visible fast roll during
-re-convergence, and whether the trigger is the loop's slow integral tail (Ki = 1/256
-moves the integral 0.0039 lines/frame, so one line of correction takes 256 frames ≈ 4.3 s
-— exactly the observed timescale) or a source mode change (`CR(2)`/`RVBL`) at
-title-to-game. Both point at the same fix: converge faster with less excursion. A gain
-sweep in simulation puts Kp=1/2, Ki=1/16, clamp 8 at 88 frames to acquire and 14 frames
-to re-lock after a source change, against 170/81 for the shipped gains.
+**Bounded authority was the second half of the fix, and it mattered more than the gains.**
+With the clamp at its original [0,12] the loop locked correctly — traced `vs_cy` sat
+exactly on `VT_PHASE_TARGET` — but the display went black for ~2 s a few seconds after
+boot, then recovered and stayed good. Signal was never lost, so that was the sink
+RE-ACQUIRING, not a link drop. The trace says why: during pull-in the loop parks
+`vtotal_extra` at its low clamp (heartbeat samples 1..11, `vtotal_extra` = 0) for over a
+second, the sink locks to that 750-line timing, and the loop then settles at 755. A
+5-line move is a 0.66% frame-rate change — enough for a PC monitor, which is stricter
+than a TV, to re-acquire.
+
+The steady-state 755/756 dither runs continuously and never blanks anything, which proves
+a 1-line change sits below the sink's re-acquire threshold and only the large excursion
+crosses it. So the applied value is clamped to an ABSOLUTE band, `[752,758]` (±3 lines,
+0.4%), with the integral's anti-windup clamped to the same band so it cannot charge past
+what the output can express. Simulated across every starting phase in 25-line steps:
+worst acquisition 213 frames (3.5 s), steady state exactly {5,6}, and a source switching
+to huc6260's 262-line branch still re-locks in 74 frames.
+
+Gains were deliberately left alone. Raising Kp speeds acquisition but widens the steady
+state to three values, which is the one property worth protecting. Two ideas that
+simulation killed before they cost a hardware round trip: a proportional deadband
+(destabilises the loop outright) and clamping relative to the integral rather than
+absolutely (the integral itself wanders, so it bounds nothing).
+
+**CONFIRMED on real hardware, 2026-09-10:** stable on 1943 Kai, HDMI signal and audio
+100% stable, no black period, no roll. Remaining glitches on that title are game/core
+rendering issues, unrelated to video timing.
 
 The loop measures rather than assuming, so a title selecting huc6260's 262-line branch
 retunes on its own — simulation converges to mean `vtotal_extra` 2.287 for that case,
-against 5.160 here.
+against 5.160 here. Narrowing the band to ±2 would keep {5,6} but could no longer reach a
+262-line source at all; that is the knob if a stricter sink ever needs it.
 
 **Two dead ends, both confirmed on hardware, recorded so nobody retries them:**
 

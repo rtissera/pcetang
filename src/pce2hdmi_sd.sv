@@ -376,7 +376,32 @@ wire tmdsClk;
 // longer uses.) So the target is near the TOP of the frame, not mid-screen: the source
 // active area should start about one source line (~3 output lines) before output line
 // 0, offset by half the 25-line slack to centre the picture.
-localparam int VT_MAX_EXTRA   = 12;    // extra in [0,12] -> L in [750,762], brackets 755.16
+// AUTHORITY IS BOUNDED, AND THAT BOUND IS THE WHOLE POINT (2026-09-10, real hardware).
+// With the clamp at [0,12] the loop locked correctly -- traced vs_cy held VT_PHASE_TARGET
+// exactly -- but the display went black for ~2 s a few seconds after boot, then recovered
+// and stayed good. Signal was never lost, so this was the sink RE-ACQUIRING, not a link
+// drop. The trace says why: during pull-in the loop parks vtotal_extra at its low clamp
+// (samples 1..11 of the heartbeat, vtotal_extra = 0) for over a second, the sink locks to
+// that 750-line timing, and the loop then settles at 755. A 5-line move is a 0.66% frame
+// rate change -- far enough for a PC monitor (stricter than a TV) to re-acquire.
+//
+// The fix is not a better control law, it is less authority. The steady-state dither
+// between 755 and 756 runs continuously and never blanks anything, which proves a 1-line
+// change is below the sink's re-acquire threshold; only the large excursion crosses it.
+// So the applied value is clamped to an ABSOLUTE band about the expected height rather
+// than to the full range, and the integral's anti-windup is clamped to the same band so
+// it cannot charge past what the output can express.
+//
+// [752,758] is +-3 lines, i.e. a worst-case 0.4% deviation against the 0.66% that failed.
+// Simulated across every starting phase in 25-line steps: worst acquisition 213 frames
+// (3.5 s), steady state exactly {5,6}, and a source switching to huc6260's 262-line
+// branch still re-locks in 74 frames. Widening to +-4 buys ~0.4 s of acquisition and
+// costs margin against the failure above; narrowing to +-2 keeps {5,6} but can no longer
+// reach a 262-line source at all. The gains stay as they were -- raising Kp speeds
+// acquisition but widens the steady state to three values, which is the one thing worth
+// protecting here.
+localparam int VT_LO           = 2;    // extra in [2,8] -> VTOTAL in [752,758]
+localparam int VT_HI           = 8;
 localparam int VT_PHASE_TARGET = 9;    // output cy the source's active start should sit on
 
 // Source domain: one toggle per frame at the start of the active area.
@@ -432,8 +457,8 @@ always_ff @(posedge clk_pixel) begin
 			vt_frac <= sd_sum[7:0];
 			tgt    = $signed(ctrl[23:8]) + $signed({16'b0, sd_sum[8]});
 
-			if (tgt < 17'sd0)                tgt = 17'sd0;
-			else if (tgt > $signed(17'(VT_MAX_EXTRA))) tgt = $signed(17'(VT_MAX_EXTRA));
+			if (tgt < $signed(17'(VT_LO)))      tgt = $signed(17'(VT_LO));
+			else if (tgt > $signed(17'(VT_HI))) tgt = $signed(17'(VT_HI));
 
 			// One line per frame, so the sink never sees an abrupt jump.
 			if      ($signed({9'b0, vtotal_extra}) < tgt) vtotal_extra <= vtotal_extra + 8'd1;
@@ -441,8 +466,8 @@ always_ff @(posedge clk_pixel) begin
 
 			// Integral with anti-windup, clamped to the same authority as the output.
 			i_next = vt_i + $signed({{11{e[12]}}, e});  // Ki = 1/256
-			if (i_next < 24'sd0)                       i_next = 24'sd0;
-			else if (i_next > $signed(24'(VT_MAX_EXTRA <<< 8))) i_next = $signed(24'(VT_MAX_EXTRA <<< 8));
+			if (i_next < $signed(24'(VT_LO <<< 8)))      i_next = $signed(24'(VT_LO <<< 8));
+			else if (i_next > $signed(24'(VT_HI <<< 8))) i_next = $signed(24'(VT_HI <<< 8));
 			vt_i <= i_next;
 		end
 		vs_seen <= 1'b0;
