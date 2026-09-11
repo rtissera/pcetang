@@ -1,13 +1,24 @@
 # Where this core actually stands
 
-Last updated 2026-09-09. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-11. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
 ## Headline
 
-**HuCard works on Tang Console 60K.** `1943 Kai (Japan).pce` boots and plays, with
-sound and both controllers. That is the only board any real game has ever run on.
+**HuCard works on Tang Console 60K.** `1943 Kai (Japan).pce` and `Raiden` boot and play,
+with sound and both controllers, at 720p60 over HDMI with a correct 4:3 aspect. That is
+the only board any real game has ever run on.
+
+**CD-ROM² loads real discs and boots the system card, but no CD game is playable.**
+As of 2026-09-11 the CD *data path* is verified byte-for-byte against an instrumented
+beetle-pce-fast: on four discs every sector the board serves matches the reference in
+both LBA and data, and the boot command sequence matches command-for-command. Games then
+load, take control, and fail with a dark screen. See "CD-ROM²" below.
+
+**The CD fault is CD-specific, not a shared core weakness.** Every HuCard game boots
+(with speed fluctuation and flaky collision detection); no CD game reaches a boot screen.
+Do not conflate the two — it sent one investigation down the wrong path already.
 
 **To get there the targets were deliberately degraded to plain HuCard.** CD-ROM²,
 the Arcade Card and SuperGrafx are all compiled out or untested. This was a
@@ -192,3 +203,42 @@ Primer 25K and Nano 20K carry faithful ports of every Console 60K fix (ROM bridg
 joypad polarity and d-pad bits, DS2 readers, 48 kHz audio strobe). They synthesise and
 close timing. **No HuCard has booted on either, and no pad has been plugged into
 either.** A clean gw_sh run proves synthesis and timing. It does not prove a picture.
+
+
+## CD-ROM² — detail (2026-09-11)
+
+### Verified
+
+- System card boots off an emulated drive fed from a CHD over UART.
+- Boot SCSI sequence matches beetle-pce-fast command-for-command: TEST UNIT READY, four
+  GETDIRINFOs (modes 0/1/2/2), then the READ(6)s.
+- Every served sector is byte-identical to the reference in LBA and data, on Dungeon
+  Explorer II, Prince of Persia, Bonk III and Double Dragon II.
+- CD-RAM: a full 256KB address-derived write/read-back sweep through the real SDRAM
+  arbiter passes (256 KiB verified, 0 bad). No corruption, no aliasing.
+
+### Fixed getting here, each with a regression test verified to fail without it
+
+1. **SCSI FIFO show-ahead** — the donor's FIFOs are `LPM_SHOWAHEAD`; this port reads
+   through a registered-output block RAM, so `empty` deasserted a cycle before `q` was
+   valid. Invisible under the donor's burst fills, hit on *every* byte under our
+   byte-at-a-time feed. Wrote `0x01`, CPU read `0xf2`.
+2. **Lead-out MSF overflow** — `conv_total` 17 bits where 19 are needed; returned
+   `12:00:17` for `70:15:36`.
+3. **FIFO depths** restored to donor values (SCSI 2048 -> 4096).
+4. **Sector back-pressure** — the bridge paced on MCU arrival, not CPU drain, and the
+   FIFO silently discarded the overflow.
+5. **Lost-request watchdog** — an unacknowledged request frame could strand the FSM.
+6. **MCU: sector serving moved off the UART RX task** — it blocked the only RX consumer
+   for tens of ms, truncating request frames so the MCU served valid sectors from the
+   *wrong* LBA.
+
+### Open
+
+- **Games do not run.** CPU at full speed, VBlank firing, no bad-bank trap, but VDC
+  writes stop. Current suspect: the CD interrupt path (IRQ2 from `CD_DTR`/`CD_DTD`).
+- **SCSI bus reset is ignored** — `CD_RESET => open`. Real defect; the obvious
+  level-sensitive fix regressed hardware and was reverted ($1804 bit 1 is a latch).
+- **UART RX margin is thin** — FIFO high-water 25 of 32 bytes.
+- Trace counters are 16-bit and have been misread via wraparound three times. Widen
+  before trusting them again.

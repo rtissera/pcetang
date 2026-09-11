@@ -777,6 +777,12 @@ architecture rtl of pcetang_console60k_cd is
    -- reports it.
    signal dbg_irq1_cnt  : unsigned(15 downto 0) := (others => '0');
    signal dbg_irq1_r    : std_logic := '1';
+   -- IRQ2 is the CD interrupt (cd.vhd: IRQ_N <= not ((CD_DTR_EN and CD_DTR) or
+   -- (CD_DTD_EN and CD_DTD) or ...)). Prime suspect now: the CD data path and CD-RAM are
+   -- both verified good, the CPU runs at full speed with VBlank firing, yet VDC writes
+   -- stop -- which is what a game waiting forever on a CD interrupt looks like.
+   signal dbg_irq2_cnt  : unsigned(15 downto 0) := (others => '0');
+   signal dbg_irq2_r    : std_logic := '1';
    signal dbg_vdc_cnt : unsigned(31 downto 0) := (others => '0');
    signal dbg_vbl_r   : std_logic := '0';
    signal dbg_vbl_cnt : unsigned(15 downto 0) := (others => '0');
@@ -802,7 +808,17 @@ architecture rtl of pcetang_console60k_cd is
    -- Runs while the core is still held in reset (after the ROM sweep, before
    -- core_resetn is released), so pce_top is not driving CD_RAM_* and the mux below is
    -- uncontested. Bounded and always terminating: 1024 writes, then 1024 read-backs.
-   constant CDRAM_SELFTEST : boolean := true;
+   -- ANSWERED, NOW OFF. Hardware result 2026-09-11: ok = 256 KiB, bad = 0 -- the entire
+   -- 256KB window read back exactly what was written, with ADDRESS-DERIVED data, so the
+   -- SDRAM offload neither corrupts nor aliases. CD-RAM is cleared as a suspect, and
+   -- there is no reason to back it with BSRAM.
+   --
+   -- Off because it has a REAL SIDE EFFECT: per pce_top's own mux, backup RAM shares this
+   -- "1000" address window with CD-RAM, so sweeping all 262144 offsets overwrites BRAM's
+   -- save-data signature. With the sweep on, Dungeon Explorer II stopped booting and
+   -- dropped into the syscard's CD PLAYER -- the BIOS not finding what it expected in
+   -- backup RAM. Re-enable only for a deliberate diagnosis, and expect saves destroyed.
+   constant CDRAM_SELFTEST : boolean := false;
    type cdt_state_t is (CDT_IDLE, CDT_W, CDT_W_WAIT, CDT_R, CDT_R_WAIT, CDT_DONE);
    signal cdt_state  : cdt_state_t := CDT_IDLE;
    -- FULL 256KB sweep, not a 1KB sample. The first version wrote 1024 bytes at offset 0
@@ -2822,15 +2838,18 @@ begin
             elsif dbg_hb_cnt = 0 and cdv_tag_cnt < 24 then
                cdv_tag_cnt <= cdv_tag_cnt + 1;
                dbg_trace_req <= '1';
-               -- 0xD5: CD-RAM full-256KB self-test results.
-               -- [63:48] matching read-backs in KiB (256 = all of CD-RAM verified)
-               -- | [47:32] MISMATCHED BYTES
-               -- | [31:16] first bad as (written | read back)
-               -- ok>0 and bad=0 exonerates the SDRAM offload. bad>0 proves it corrupts,
-               -- and the first-bad pair says how (bit flip, stale byte, wrong address).
+               -- 0xD5: repurposed now the CD-RAM sweep has answered (256 KiB, 0 bad).
+               -- [63:48] CD interrupt (IRQ2) assertions | [47:32] VBlank (IRQ1)
+               -- assertions | [31:16] CD-RAM self-test KiB verified (0 when disabled)
+               -- | [15:0] 0.
+               -- IRQ2 flat at zero while IRQ1 climbs means the CD never interrupts the
+               -- CPU -- exactly what a game stuck waiting on a CD transfer looks like
+               -- from outside, and the next suspect now that the data path and CD-RAM
+               -- are both verified good.
                dbg_trace_tag  <= x"D5";
-               dbg_trace_data <= std_logic_vector(cdv_ok) & std_logic_vector(cdv_bad)
-                                 & cdv_first & x"0000";
+               dbg_trace_data <= std_logic_vector(dbg_irq2_cnt)
+                                 & std_logic_vector(dbg_irq1_cnt)
+                                 & std_logic_vector(cdv_ok) & x"0000";
             elsif dbg_hb_cnt = 0 and hb_alt = '0' and cpu_tag_cnt < 64 then
                hb_alt      <= '1';
                cpu_tag_cnt <= cpu_tag_cnt + 1;
@@ -2962,6 +2981,7 @@ begin
             dbg_vdc_cnt <= (others => '0');
             dbg_vbl_cnt <= (others => '0');
             dbg_irq1_cnt <= (others => '0');
+            dbg_irq2_cnt <= (others => '0');
          else
             if dbg_vdc_wr = '1' then
                dbg_vdc_cnt <= dbg_vdc_cnt + 1;
@@ -2976,6 +2996,10 @@ begin
             dbg_irq1_r <= dbg_irq1_n;
             if dbg_irq1_n = '0' and dbg_irq1_r = '1' then
                dbg_irq1_cnt <= dbg_irq1_cnt + 1;
+            end if;
+            dbg_irq2_r <= dbg_irq2_n;
+            if dbg_irq2_n = '0' and dbg_irq2_r = '1' then
+               dbg_irq2_cnt <= dbg_irq2_cnt + 1;
             end if;
             if video_vbl = '1' and dbg_vbl_r = '0' then
                dbg_vbl_cnt <= dbg_vbl_cnt + 1;
