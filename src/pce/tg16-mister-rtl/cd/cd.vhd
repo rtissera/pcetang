@@ -49,6 +49,7 @@ entity cd is
 		DBG_DATAIN_CNT : out unsigned(15 downto 0);
 		DBG_FIRST8     : out std_logic_vector(63 downto 0);
 		DBG_SP         : out std_logic_vector(3 downto 0);
+		DBG_ADPCM      : out std_logic_vector(2 downto 0);
 		DBG_FIFO_SPACE : out unsigned(12 downto 0);
 		DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		DBG_GDI        : out std_logic_vector(127 downto 0);
@@ -613,6 +614,7 @@ begin
 	
 	BRAM_EN <= not BRAM_LOCK or not EN;
 	CD_RESET <= not SCSI_RST_N;
+	DBG_ADPCM <= ADPCM_PLAY & ADPCM_END & ADPCM_HALF;
 	
 	SCSI : entity work.SCSI
 	port map (

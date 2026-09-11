@@ -998,6 +998,17 @@ architecture rtl of pcetang_console60k_cd is
    signal scsi_first8_i     : std_logic_vector(63 downto 0);
    signal scsi_sp_i         : std_logic_vector(3 downto 0);
    signal scsi_gdi_i        : std_logic_vector(127 downto 0);
+   -- ADPCM activity: PLAY/END/HALF, plus counters for how often the offloaded ADPCM
+   -- RAM is actually accessed. A game stuck waiting for an ADPCM end that never comes
+   -- keeps rendering (VDC writes and frames climb) while issuing no further CD command
+   -- -- exactly what Dungeon Explorer II does on this board.
+   signal adpcm_dbg_i       : std_logic_vector(2 downto 0);
+   signal adpcm_play_r      : std_logic := '0';
+   signal adpcm_end_r       : std_logic := '0';
+   signal adpcm_play_cnt    : unsigned(15 downto 0) := (others => '0');
+   signal adpcm_end_cnt     : unsigned(15 downto 0) := (others => '0');
+   signal adpcm_req_cnt     : unsigned(15 downto 0) := (others => '0');
+   signal adpcm_req_r       : std_logic := '0';
    signal scsi_fifo_space_i : unsigned(12 downto 0);
    -- SCSI bus reset from cd.vhd (CPU writes $1802 bit 1). Was `CD_RESET => open`, which
    -- left cd_bridge parked mid-transfer across a host bus reset -- see BUS_RST's own
@@ -1046,6 +1057,37 @@ architecture rtl of pcetang_console60k_cd is
    signal trace_ready       : std_logic := '0';
    signal cpu_tag_cnt       : unsigned(7 downto 0) := (others => '0');
    signal cdv_tag_cnt       : unsigned(7 downto 0) := (others => '0');
+   signal d6_tag_cnt        : unsigned(7 downto 0) := (others => '0');
+   -- VCE/palette activity. In mednafen this game's splash appears immediately after the
+   -- load, WITH a palette effect; here the CPU renders happily and the screen stays
+   -- black, which is what a palette that never lands (or lands all-black) looks like.
+   -- Rolling ring of the last four CD-register ($1FF800 page) accesses. A game stuck
+   -- in a poll loop fills this with the same register over and over, which names what
+   -- it is waiting on -- the one thing the hardware trace could not show and the sim
+   -- could. Each entry: R/W flag, register low byte, data.
+   signal dbg_cpu_wr_n      : std_logic;
+   signal dbg_cpu_rd_n      : std_logic;
+   signal dbg_cpu_do        : std_logic_vector(7 downto 0);
+   signal dbg_cpu_di        : std_logic_vector(7 downto 0);
+   -- ONE-SHOT capture of the first twelve CD-register accesses after the last SCSI
+   -- command, rather than a rolling ring. The ring showed the poll loop
+   -- ($1802/$1803 alternating, CH_SEL toggling) but a 4-deep ring of a 4-access loop can
+   -- never show what came BEFORE it, which is the part that explains why the game is
+   -- waiting. Armed when the command count stops advancing.
+   signal cdreg_shot        : std_logic_vector(191 downto 0) := (others => '0');
+   signal cdreg_idx         : unsigned(4 downto 0) := (others => '0');
+   signal cdreg_armed       : std_logic := '0';
+   signal cdreg_cmd_r       : unsigned(7 downto 0) := (others => '0');
+   signal cdreg_ring        : std_logic_vector(63 downto 0) := (others => '0');
+   signal cdreg_cnt         : unsigned(15 downto 0) := (others => '0');
+   signal cdreg_acc_r       : std_logic := '0';
+   signal cdreg_data        : std_logic_vector(7 downto 0);
+   signal d7_tag_cnt        : unsigned(7 downto 0) := (others => '0');
+   signal dbg_vce_wr        : std_logic;
+   signal dbg_vce_do        : std_logic_vector(7 downto 0);
+   signal vce_wr_cnt        : unsigned(15 downto 0) := (others => '0');
+   signal vce_nonzero_cnt   : unsigned(15 downto 0) := (others => '0');
+   signal vce_last          : std_logic_vector(7 downto 0) := (others => '0');
    signal hb_alt            : std_logic := '0';
    signal cd_quiet_ct       : unsigned(19 downto 0) := (others => '0');
    signal cd_link_busy      : std_logic := '0';
@@ -2126,6 +2168,8 @@ begin
    -- pce_top instance) to get CD back.
    gen_cd_bridge : if not HUCARD_ONLY generate
    -- see cd_quiet_ct's declaration comment
+   cdreg_data <= dbg_cpu_do when dbg_cpu_wr_n = '0' else dbg_cpu_di;
+
    cd_link_busy <= '1' when cd_quiet_ct /= 0 else '0';
    trace_ready  <= '1' when trace_warmup >= 42860000 else '0';
 
@@ -2219,8 +2263,12 @@ begin
       RAM_C_LINE_DO     => open
    );
 
+   -- mem_init_file => "pce_bram": preload the "HUBM" backup-RAM header, so the CD unit's
+   -- BRAM looks FORMATTED at power-on the way a real battery-backed one does, instead of
+   -- presenting every game with an unformatted 2KB of zeros on every single boot.
+   -- See init_spram in bram_gowin.vhd for the signature and where it comes from.
    backup_ram: entity work.spram
-   generic map (addr_width => 11, data_width => 8)
+   generic map (addr_width => 11, data_width => 8, mem_init_file => "pce_bram")
    port map (
       clock => clk_pce, address => brm_a, data => brm_di, wren => brm_we, q => brm_do
    );
@@ -2254,7 +2302,10 @@ begin
 
       -- TEMP DEBUG (2026-09-06): see pce_top.vhd's own port comments and the trace
       -- process near the bottom of this file.
-      DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr, DBG_VDC_RDY => dbg_vdc_rdy,
+      DBG_CPU_A => dbg_cpu_a, DBG_VDC_WR => dbg_vdc_wr,
+      DBG_VCE_WR => dbg_vce_wr, DBG_VCE_DO => dbg_vce_do,
+      DBG_CPU_WR_N => dbg_cpu_wr_n, DBG_CPU_RD_N => dbg_cpu_rd_n,
+      DBG_CPU_DO => dbg_cpu_do, DBG_CPU_DI => dbg_cpu_di, DBG_VDC_RDY => dbg_vdc_rdy,
       DBG_CPU_CE => dbg_cpu_ce, DBG_IRQ1_N => dbg_irq1_n, DBG_IRQ2_N => dbg_irq2_n,
       RAMTEST_EN => wram_en, RAMTEST_A => std_logic_vector(wram_a),
       RAMTEST_D => wram_d, RAMTEST_WE => wram_we, RAMTEST_Q => wram_q,
@@ -2331,6 +2382,7 @@ begin
       CD_DBG_DATAIN_CNT => scsi_datain_cnt_i,
       CD_DBG_FIRST8     => scsi_first8_i,
       CD_DBG_SP         => scsi_sp_i,
+      CD_DBG_ADPCM      => adpcm_dbg_i,
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
@@ -2424,7 +2476,9 @@ begin
    --   tags 0xAA-0xAB : GETDIRINFO mode/track bytes of the first eight calls.
    --   tags 0xA7/0xAC : the GETDIRINFO reply bytes as the CPU took them off the bus.
    --   tag  0xD2      : CPU_CE / VDC writes / source frames / trap+IRQ flags.
-   --   tag  0xD5      : CD-RAM read-after-write verifier (ok / bad / first bad pair).
+   --   tag  0xD5      : IRQ2/IRQ1 assertions + ADPCM play/end counts.
+   --   tag  0xD6      : VCE palette writes / nonzero / last byte + ADPCM.
+   --   tags 0xD7-0xD9 : first 12 CD-register accesses after the last SCSI command.
    --   tag  0xAD      : sense/status summary.   0xAE : rolling CD summary.
    --   tag  0xAF      : sector-transfer counters.
    --   tags 0xB0-0xBF : general CDB trace (CDCMD_TRACE only).
@@ -2849,7 +2903,52 @@ begin
                dbg_trace_tag  <= x"D5";
                dbg_trace_data <= std_logic_vector(dbg_irq2_cnt)
                                  & std_logic_vector(dbg_irq1_cnt)
-                                 & std_logic_vector(cdv_ok) & x"0000";
+                                 & std_logic_vector(adpcm_play_cnt)
+                                 & std_logic_vector(adpcm_end_cnt);
+            elsif dbg_hb_cnt = 0 and d7_tag_cnt < 24 then
+               d7_tag_cnt <= d7_tag_cnt + 1;
+               dbg_trace_req <= '1';
+               -- 0xD7: the last FOUR CD-register accesses, oldest first. Each 16 bits:
+               -- [15] 1=write 0=read | [14:8] register low bits | [7:0] data.
+               -- A game stuck polling shows the same register repeating here, which
+               -- names what it is waiting on.
+               -- 0xD7/0xD8/0xD9: the first twelve CD-register accesses after the last
+               -- SCSI command, oldest first, four per tag. Each 16 bits:
+               -- [15] 1=write 0=read | [14:8] register low bits | [7:0] data.
+               case d7_tag_cnt(1 downto 0) is
+                  when "00" =>
+                     dbg_trace_tag  <= x"D7";
+                     dbg_trace_data <= cdreg_shot(191 downto 128);
+                  when "01" =>
+                     dbg_trace_tag  <= x"D8";
+                     dbg_trace_data <= cdreg_shot(127 downto 64);
+                  when others =>
+                     dbg_trace_tag  <= x"D9";
+                     dbg_trace_data <= cdreg_shot(63 downto 0);
+               end case;
+            elsif dbg_hb_cnt = 0 and d6_tag_cnt < 24 then
+               d6_tag_cnt <= d6_tag_cnt + 1;
+               dbg_trace_req <= '1';
+               -- 0xD6: ADPCM detail. Its own counter, NOT cdv_tag_cnt -- sharing one
+               -- meant 0xD5 consumed the whole budget and 0xD6 never emitted a single
+               -- frame. Same elsif-chain starvation that silenced the CPU/video probes
+               -- earlier; budget every tag block separately.
+               -- [63:48] ADPCM RAM requests | [47:45] live PLAY/END/HALF
+               -- | [44:29] CD-RAM self-test KiB | [28:0] 0.
+               -- PLAY starts with no END following is a game waiting on an ADPCM
+               -- completion that never arrives -- it keeps rendering while issuing no
+               -- further CD command, which is what DE2 does here.
+               -- 0xD6: [63:48] VCE (palette) writes | [47:32] of those, writes with a
+               -- NONZERO value | [31:24] last byte written | [23:8] ADPCM RAM requests
+               -- | [7:5] live ADPCM PLAY/END/HALF | [4:0] 0.
+               -- vce=0 means the palette is never programmed at all; vce>0 with
+               -- nonzero=0 means it is programmed entirely to black. Those are different
+               -- bugs and the screen looks identical for both.
+               dbg_trace_tag  <= x"D6";
+               dbg_trace_data <= std_logic_vector(vce_wr_cnt)
+                                 & std_logic_vector(vce_nonzero_cnt)
+                                 & vce_last & std_logic_vector(adpcm_req_cnt)
+                                 & adpcm_dbg_i & "00000";
             elsif dbg_hb_cnt = 0 and hb_alt = '0' and cpu_tag_cnt < 64 then
                hb_alt      <= '1';
                cpu_tag_cnt <= cpu_tag_cnt + 1;
@@ -2986,6 +3085,49 @@ begin
             if dbg_vdc_wr = '1' then
                dbg_vdc_cnt <= dbg_vdc_cnt + 1;
             end if;
+            -- CD-register access ring (see cdreg_ring's declaration comment). The CD page
+            -- is PHYSICAL 0x1FF800: the PCE I/O page is bank $FF (0x1FE000-0x1FFFFF) and
+            -- the CD block sits at $1800 within it. Decoding the LOGICAL $1800 instead is
+            -- a mistake already made once in the GHDL testbench, where the probe then
+            -- printed nothing at all.
+            -- Re-arm on every new SCSI command, detected HERE rather than in the command
+            -- process: cdreg_idx must have exactly one driver, and driving it from both
+            -- places is a multiple-driver error (EX2000), which this file has hit before.
+            -- The capture then always holds what followed the LAST command issued.
+            cdreg_cmd_r <= sum_cmd_cnt;
+            if sum_cmd_cnt /= cdreg_cmd_r then
+               cdreg_armed <= '1';
+               cdreg_idx   <= (others => '0');
+            elsif cdreg_acc_r = '0' and dbg_cpu_ce = '1'
+                  and dbg_cpu_a(20 downto 10) = "11111111110"
+                  and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0')
+                  and cdreg_armed = '1' and cdreg_idx < 12 then
+               cdreg_shot(191 - to_integer(cdreg_idx)*16
+                          downto 176 - to_integer(cdreg_idx)*16)
+                  <= (not dbg_cpu_wr_n) & dbg_cpu_a(6 downto 0) & cdreg_data;
+               cdreg_idx <= cdreg_idx + 1;
+            end if;
+
+            cdreg_acc_r <= dbg_cpu_ce;
+            if dbg_cpu_ce = '1' and cdreg_acc_r = '0'
+               and dbg_cpu_a(20 downto 10) = "11111111110"
+               and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0') then
+               -- entry = [15] 1=write 0=read | [14:8] register low bits | [7:0] data
+               -- (what was written, or what was read back)
+               cdreg_ring <= cdreg_ring(47 downto 0)
+                             & (not dbg_cpu_wr_n) & dbg_cpu_a(6 downto 0)
+                             & cdreg_data;
+               cdreg_cnt <= cdreg_cnt + 1;
+
+            end if;
+
+            if dbg_vce_wr = '1' then
+               vce_wr_cnt <= vce_wr_cnt + 1;
+               vce_last   <= dbg_vce_do;
+               if dbg_vce_do /= x"00" then
+                  vce_nonzero_cnt <= vce_nonzero_cnt + 1;
+               end if;
+            end if;
             if dbg_vdc_rdy = '0' then
                dbg_vdc_stall <= '1';   -- sticky: a VDC stalled the CPU at least once
             end if;
@@ -3000,6 +3142,19 @@ begin
             dbg_irq2_r <= dbg_irq2_n;
             if dbg_irq2_n = '0' and dbg_irq2_r = '1' then
                dbg_irq2_cnt <= dbg_irq2_cnt + 1;
+            end if;
+            -- ADPCM activity (see adpcm_dbg_i's declaration comment)
+            adpcm_play_r <= adpcm_dbg_i(2);
+            adpcm_end_r  <= adpcm_dbg_i(1);
+            adpcm_req_r  <= adpcm_ram_req_i;
+            if adpcm_dbg_i(2) = '1' and adpcm_play_r = '0' then
+               adpcm_play_cnt <= adpcm_play_cnt + 1;
+            end if;
+            if adpcm_dbg_i(1) = '1' and adpcm_end_r = '0' then
+               adpcm_end_cnt <= adpcm_end_cnt + 1;
+            end if;
+            if adpcm_ram_req_i = '1' and adpcm_req_r = '0' then
+               adpcm_req_cnt <= adpcm_req_cnt + 1;
             end if;
             if video_vbl = '1' and dbg_vbl_r = '0' then
                dbg_vbl_cnt <= dbg_vbl_cnt + 1;

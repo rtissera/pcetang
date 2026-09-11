@@ -244,7 +244,37 @@ architecture rtl of spram is
 
 	constant DEPTH : natural := 2**addr_width;
 	type mem_t is array (0 to DEPTH-1) of std_logic_vector(data_width-1 downto 0);
-	shared variable mem : mem_t := (others => (others => '0'));
+
+	-- mem_init_file = "pce_bram" preloads the PCE's backup-RAM format header.
+	--
+	-- On a real PCE the CD unit's backup RAM is battery-backed: the system card formats
+	-- it once and it stays formatted. This port's BRAM is a plain volatile spram, so it
+	-- powers up all zeros -- permanently UNFORMATTED, every single boot, which is a state
+	-- a real machine essentially never presents to a game.
+	--
+	-- The signature is taken from the reference implementation, not from memory:
+	-- beetle-pce-fast's libretro.cpp has
+	--     static const uint8 BRAM_Init_String[8] = { 'H','U','B','M', 0x00,0x88,0x10,0x80 };
+	-- and its IsBRAMUsed() treats anything else as modified/missing.
+	--
+	-- We already know empirically that the system card's behaviour depends on BRAM
+	-- contents: when a CD-RAM self-test accidentally swept this same address window,
+	-- Dungeon Explorer II stopped booting and dropped into the CD PLAYER instead.
+	impure function init_spram return mem_t is
+		variable m : mem_t := (others => (others => '0'));
+		type hdr_t is array (0 to 7) of integer;
+		constant HUBM : hdr_t := (16#48#, 16#55#, 16#42#, 16#4D#,
+		                          16#00#, 16#88#, 16#10#, 16#80#);
+	begin
+		if mem_init_file = "pce_bram" and data_width = 8 and DEPTH >= 8 then
+			for i in 0 to 7 loop
+				m(i) := std_logic_vector(to_unsigned(HUBM(i), data_width));
+			end loop;
+		end if;
+		return m;
+	end function;
+
+	shared variable mem : mem_t := init_spram;
 
 	signal q0 : std_logic_vector(data_width-1 downto 0) := (others => '0');
 

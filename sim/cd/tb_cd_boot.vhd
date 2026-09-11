@@ -389,12 +389,20 @@ begin
 	-- the first attempt pressed only bit 3 and the system card never left its wait loop,
 	-- and this removes the guess from the experiment. Directions stay released.
 	joy_in_s <= "0000" when (run_pressed = '1' and joy_out(0) = '0') else "1111";
+	-- PULSED, not held. Holding RUN from a fixed time onward means there is never a
+	-- press EDGE after the system card puts its prompt up -- a real person presses after
+	-- seeing it, and a card that debounces or edge-detects would ignore a button already
+	-- down at boot. The held version reached CD-BIOS init and no further.
 	runbtn : process
 	begin
 		wait for RUN_PRESS_US * 1 us;
-		run_pressed <= '1';
-		report "RUN button pressed" severity note;
-		wait;
+		loop
+			run_pressed <= '1';
+			report "RUN pressed" severity note;
+			wait for 120 us * 1000;     -- 120 ms held
+			run_pressed <= '0';
+			wait for 80 us * 1000;      -- 80 ms released, so the next press is an edge
+		end loop;
 	end process;
 
 	-- ------------------------------------------------------------- CD subsystem
@@ -547,7 +555,7 @@ begin
 		variable lo : std_logic_vector(11 downto 0);
 	begin
 		wait until rising_edge(clk);
-		if cpu_ce = '1' and n < 400 and not is_x(cpu_a) then
+		if cpu_ce = '1' and n < 2000 and not is_x(cpu_a) then
 			lo := cpu_a(11 downto 0);
 			-- PHYSICAL address, not logical. The PCE I/O page is bank $FF, i.e.
 			-- 0x1FE000-0x1FFFFF, so the CD registers ($1800 in the page) are at
@@ -565,11 +573,16 @@ begin
 					write(l, string'(" => ")); write(l, hex(cpu_di));
 					writeline(output, l);
 				end if;
-			elsif cpu_a(20 downto 10) = "11111111100" and cpu_rd_n = '0' then -- 0x1FF000: pad
-				if n < 40 then
+			-- NO cpu_rd_n gate. The pad is decoded INSIDE the HuC6280 (IOP_SEL, see
+			-- HUC6280.vhd: CPU_A(20:13)=0xFF and CPU_A(12:10)="100"), so it never
+			-- asserts the EXTERNAL bus read strobe -- gating on cpu_rd_n is why this
+			-- probe printed nothing at all and made the pad model look broken.
+			elsif cpu_a(20 downto 10) = "11111111100" then                   -- 0x1FF000: pad
+				if n < 60 then
 					n := n + 1;
-					write(l, string'("[pad] read => ")); write(l, hex(cpu_di));
-					write(l, string'("  joy_out=")); write(l, hex(joy_out));
+					write(l, string'("[pad] acc joy_out=")); write(l, hex(joy_out));
+					write(l, string'("  joy_in=")); write(l, hex(joy_in_s));
+					write(l, string'("  run=")); write(l, std_logic'image(run_pressed));
 					writeline(output, l);
 				end if;
 			end if;

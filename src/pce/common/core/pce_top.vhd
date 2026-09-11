@@ -193,6 +193,21 @@ entity pce_top is
 		-- (ROM_A drops CPU_A(19) on the 512K bucket and shows nothing for RAM/IO cycles).
 		DBG_CPU_A  : out std_logic_vector(20 downto 0);
 		DBG_VDC_WR : out std_logic;
+		-- VCE writes are the palette path. A game whose splash is a palette fade can run
+		-- its whole display loop -- VDC writes climbing, frames emitted -- and still show
+		-- pure black if the palette never lands. DBG_VCE_WR pulses on any CPU write that
+		-- selects the VCE, and DBG_VCE_DO carries what was written, so "never programmed"
+		-- and "programmed to black" are distinguishable.
+		-- Full CPU bus tap, so the board can trace CD-register traffic the way the GHDL
+		-- testbench does. The sim prints every $1800-page access and that is how the CD
+		-- init sequence was read; hardware had no equivalent, and hardware is where the
+		-- failure actually reproduces.
+		DBG_CPU_WR_N : out std_logic;
+		DBG_CPU_RD_N : out std_logic;
+		DBG_CPU_DO   : out std_logic_vector(7 downto 0);
+		DBG_CPU_DI   : out std_logic_vector(7 downto 0);
+		DBG_VCE_WR : out std_logic;
+		DBG_VCE_DO : out std_logic_vector(7 downto 0);
 		-- PCE PORT (2026-09-07): the HuC6280's OTHER stall input. `RDY` below is
 		-- `VDC0_BUSY_N and VDC1_BUSY_N`, entirely separate from WAIT_N's
 		-- ROM_RDY/CD_RAM_RDY. A VDC holding BUSY low freezes the CPU while every memory
@@ -307,6 +322,11 @@ entity pce_top is
 		CD_DBG_DATAIN_CNT : out unsigned(15 downto 0);
 		CD_DBG_FIRST8     : out std_logic_vector(63 downto 0);
 		CD_DBG_SP         : out std_logic_vector(3 downto 0);
+		-- ADPCM activity, the last CD-only subsystem never verified. A game that runs its
+		-- display loop forever but issues no further CD command is waiting on something,
+		-- and ADPCM_END/ADPCM_HALF feed IRQ_N -- so "started playing and never ended" has
+		-- exactly that shape. HuCard never touches any of this.
+		CD_DBG_ADPCM      : out std_logic_vector(2 downto 0);   -- PLAY, END, HALF
 		CD_DBG_FIFO_SPACE : out unsigned(12 downto 0);
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
@@ -1131,6 +1151,12 @@ ROM_CLKEN <= CPU_CLKEN;
 -- mean exactly the same thing and can be compared directly.
 DBG_CPU_A  <= CPU_A;
 DBG_VDC_WR <= CPU_CE and not CPU_WR_N and not CPU_VDC0_SEL_N;
+DBG_CPU_WR_N <= CPU_WR_N;
+DBG_CPU_RD_N <= CPU_RD_N;
+DBG_CPU_DO   <= CPU_DO;
+DBG_CPU_DI   <= CPU_DI;
+DBG_VCE_WR <= CPU_CE and not CPU_WR_N and not CPU_VCE_SEL_N;
+DBG_VCE_DO <= CPU_DO;
 DBG_VDC_RDY <= VDC0_BUSY_N and VDC1_BUSY_N;
 DBG_CPU_CE  <= CPU_CE;
 DBG_IRQ1_N  <= VDC0_IRQ_N and VDC1_IRQ_N;
@@ -1233,6 +1259,7 @@ begin
 		DBG_DATAIN_CNT => CD_DBG_DATAIN_CNT,
 		DBG_FIRST8     => CD_DBG_FIRST8,
 		DBG_SP         => CD_DBG_SP,
+		DBG_ADPCM      => CD_DBG_ADPCM,
 		DBG_FIFO_SPACE => CD_DBG_FIFO_SPACE,
 		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
 		DBG_GDI        => CD_DBG_GDI,
@@ -1277,6 +1304,7 @@ begin
 	CD_DBG_DATAIN_CNT <= (others => '0');
 	CD_DBG_FIRST8     <= (others => '0');
 	CD_DBG_SP         <= (others => '0');
+	CD_DBG_ADPCM      <= (others => '0');
 	CD_DBG_FIFO_SPACE <= (others => '0');
 	CD_DBG_FIFO_DROPS <= (others => '0');
 	CD_DBG_GDI        <= (others => '0');
