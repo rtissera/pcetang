@@ -785,6 +785,52 @@ architecture rtl of pcetang_console60k_cd is
    -- sdram.sv's port C -- shared with ADPCM RAM (2026-08-28, see the cdr_owner_t signal
    -- block above), same as pcetang_primer25k_cd.vhd. Level-held REQ (port A's
    -- convention, not port B's toggle), matching CD_RAM_RDY's contribution to WAIT_N.
+   -- CD-RAM SELF-TEST (2026-09-11). CD-RAM is the largest subsystem the HuCard path
+   -- never touches -- 256KB offloaded to SDRAM through the cdr_* arbiter below -- and it
+   -- is the prime suspect now that EVERY HuCard game boots while NO CD game reaches a
+   -- boot screen. The CD data path is verified byte-for-byte against beetle-pce-fast, so
+   -- if the bytes arrive correctly and the program still will not run, the next thing to
+   -- doubt is where they are STORED.
+   --
+   -- A passive read-after-write snoop was tried first and measured NOTHING (ok=0, bad=0):
+   -- it only compared when a read hit the most recent write address, and a loader writes
+   -- a buffer forwards then reads it back from the start, so the addresses never match.
+   -- "Zero" was indistinguishable from "never ran" -- the same trap as every other
+   -- self-gated probe on this project. This drives the bus itself instead, so a zero is
+   -- a real zero.
+   --
+   -- Runs while the core is still held in reset (after the ROM sweep, before
+   -- core_resetn is released), so pce_top is not driving CD_RAM_* and the mux below is
+   -- uncontested. Bounded and always terminating: 1024 writes, then 1024 read-backs.
+   constant CDRAM_SELFTEST : boolean := true;
+   type cdt_state_t is (CDT_IDLE, CDT_W, CDT_W_WAIT, CDT_R, CDT_R_WAIT, CDT_DONE);
+   signal cdt_state  : cdt_state_t := CDT_IDLE;
+   -- FULL 256KB sweep, not a 1KB sample. The first version wrote 1024 bytes at offset 0
+   -- and passed 1024/1024, which proves the offload moves bytes but says NOTHING about
+   -- the window's size or whether it aliases -- and an aliasing CD-RAM window is exactly
+   -- the bug that lets a small boot loader work while a real game's data quietly
+   -- overwrites itself. This file's own history contains one such bug (the Arcade Card
+   -- window, fixed 2026-08-29), so it is a live possibility, not a hypothetical.
+   --
+   -- Data is derived from the ADDRESS, so if two offsets collide the later write changes
+   -- the earlier one and the read-back pass catches it. A fixed pattern could not.
+   signal cdt_idx    : unsigned(17 downto 0) := (others => '0');
+   signal cdt_wait   : unsigned(3 downto 0) := (others => '0');
+   signal cdt_a      : std_logic_vector(21 downto 0) := (others => '0');
+   signal cdt_do     : std_logic_vector(7 downto 0) := (others => '0');
+   signal cdt_rd     : std_logic := '0';
+   signal cdt_wr     : std_logic := '0';
+   signal cdt_active : std_logic := '0';
+   signal cdv_ok     : unsigned(15 downto 0) := (others => '0');
+   signal cdv_bad    : unsigned(15 downto 0) := (others => '0');
+   signal cdv_first  : std_logic_vector(15 downto 0) := (others => '0');
+
+   -- what the arbiter actually sees: the self-test while it runs, pce_top afterwards
+   signal cdr_a_mux  : std_logic_vector(21 downto 0);
+   signal cdr_do_mux : std_logic_vector(7 downto 0);
+   signal cdr_rd_mux : std_logic;
+   signal cdr_wr_mux : std_logic;
+
    signal cd_ram_a     : std_logic_vector(21 downto 0);
    signal cd_ram_do    : std_logic_vector(7 downto 0);
    signal cd_ram_di_i  : std_logic_vector(7 downto 0) := (others => '0');
@@ -983,6 +1029,7 @@ architecture rtl of pcetang_console60k_cd is
    signal trace_warmup      : unsigned(25 downto 0) := (others => '0');
    signal trace_ready       : std_logic := '0';
    signal cpu_tag_cnt       : unsigned(7 downto 0) := (others => '0');
+   signal cdv_tag_cnt       : unsigned(7 downto 0) := (others => '0');
    signal hb_alt            : std_logic := '0';
    signal cd_quiet_ct       : unsigned(19 downto 0) := (others => '0');
    signal cd_link_busy      : std_logic := '0';
@@ -1233,7 +1280,8 @@ begin
             core_resetn <= '0';
          elsif rom_loading(0) = '1' and rom_loading_r = '0' then
             core_resetn <= '0';
-         elsif vfy_state = VF_DONE then
+         elsif vfy_state = VF_DONE
+               and (not CDRAM_SELFTEST or cdt_state = CDT_DONE) then
             core_resetn <= '1';
          end if;
 
@@ -1835,6 +1883,89 @@ begin
       end if;
    end process;
 
+   cdr_a_mux  <= cdt_a  when cdt_active = '1' else cd_ram_a;
+   cdr_do_mux <= cdt_do when cdt_active = '1' else cd_ram_do;
+   cdr_rd_mux <= cdt_rd when cdt_active = '1' else cd_ram_rd;
+   cdr_wr_mux <= cdt_wr when cdt_active = '1' else cd_ram_wr;
+
+   -- CD-RAM self-test driver (see CDRAM_SELFTEST's declaration comment).
+   -- Address form matches pce_top's own CD-RAM mux: "1000" & an 18-bit offset, so bit 21
+   -- is the tag that routes it to the CD-RAM window rather than the Arcade Card's.
+   cdt_a  <= "1000" & std_logic_vector(cdt_idx);
+   cdt_do <= (std_logic_vector(cdt_idx(7 downto 0)) xor std_logic_vector(cdt_idx(15 downto 8)))
+             xor ("000000" & std_logic_vector(cdt_idx(17 downto 16)));
+
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         case cdt_state is
+            when CDT_IDLE =>
+               if CDRAM_SELFTEST and vfy_state = VF_DONE then
+                  cdt_active <= '1';
+                  cdt_idx    <= (others => '0');
+                  cdt_state  <= CDT_W;
+               end if;
+
+            when CDT_W =>
+               cdt_wr    <= '1';
+               cdt_wait  <= to_unsigned(8, 4);
+               cdt_state <= CDT_W_WAIT;
+
+            when CDT_W_WAIT =>
+               cdt_wr <= '0';
+               -- hold off before believing cd_ram_rdy_i: it is still high for the first
+               -- few cycles, until the arbiter has seen the access and dropped it.
+               if cdt_wait /= 0 then
+                  cdt_wait <= cdt_wait - 1;
+               elsif cd_ram_rdy_i = '1' then
+                  if cdt_idx = 262143 then
+                     cdt_idx   <= (others => '0');
+                     cdt_state <= CDT_R;
+                  else
+                     cdt_idx   <= cdt_idx + 1;
+                     cdt_state <= CDT_W;
+                  end if;
+               end if;
+
+            when CDT_R =>
+               cdt_rd    <= '1';
+               cdt_wait  <= to_unsigned(8, 4);
+               cdt_state <= CDT_R_WAIT;
+
+            when CDT_R_WAIT =>
+               cdt_rd <= '0';
+               if cdt_wait /= 0 then
+                  cdt_wait <= cdt_wait - 1;
+               elsif cd_ram_rdy_i = '1' then
+                  -- ok counts in KiB, not bytes: 262144 read-backs would wrap a
+                  -- 16-bit counter four times over, and a wrapped counter has misread
+                  -- results three times on this project already. bad counts every byte,
+                  -- since any nonzero value is the whole story and it will not wrap in
+                  -- any case worth reporting.
+                  if cd_ram_di_i = cdt_do then
+                     if cdt_idx(9 downto 0) = 0 then
+                        cdv_ok <= cdv_ok + 1;
+                     end if;
+                  else
+                     cdv_bad <= cdv_bad + 1;
+                     if cdv_bad = 0 then
+                        cdv_first <= cdt_do & cd_ram_di_i;   -- wrote | read back
+                     end if;
+                  end if;
+                  if cdt_idx = 262143 then
+                     cdt_state <= CDT_DONE;
+                  else
+                     cdt_idx <= cdt_idx + 1;
+                     cdt_state <= CDT_R;
+                  end if;
+               end if;
+
+            when CDT_DONE =>
+               cdt_active <= '0';
+         end case;
+      end if;
+   end process;
+
    -- CD-RAM + ADPCM RAM bridge: pce_top's CD_RAM_RD/CD_RAM_WR (raw, level-held) and
    -- ADPCM_RAM_REQ (level-held for one DRAM_CLKEN slot, ~420ns) both become SDRAM
    -- accesses via the same shared port C, one at a time, CD-RAM winning ties. Real,
@@ -1844,11 +1975,11 @@ begin
       variable cd_new, adpcm_new : std_logic;
    begin
       if rising_edge(clk_pce) then
-         cdram_rd_r      <= cd_ram_rd;
-         cdram_wr_r      <= cd_ram_wr;
+         cdram_rd_r      <= cdr_rd_mux;
+         cdram_wr_r      <= cdr_wr_mux;
          adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
 
-         cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         cd_new := (cdr_rd_mux and not cdram_rd_r) or (cdr_wr_mux and not cdram_wr_r);
          if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
             adpcm_new := adpcm_ram_req_i;
          else
@@ -1878,15 +2009,15 @@ begin
                   -- each to its own real, non-overlapping SDRAM window instead of both
                   -- collapsing onto CD-RAM's 256KB slice (the real aliasing bug this
                   -- file's header used to describe under "ARCADE CARD RAM: NOT done").
-                  if cd_ram_a(21) = '0' then
+                  if cdr_a_mux(21) = '0' then
                      cdr_addr <= std_logic_vector(AC_SDRAM_BASE +
-                                 resize(unsigned(cd_ram_a(20 downto 0)), 25));
+                                 resize(unsigned(cdr_a_mux(20 downto 0)), 25));
                   else
                      cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
                                  resize(unsigned(cd_ram_a(17 downto 0)), 25));
                   end if;
                   cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write
-                  cdr_di   <= cd_ram_do;
+                  cdr_di   <= cdr_do_mux;
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_CDRAM;
                   cd_pend  <= '0';
@@ -2277,6 +2408,7 @@ begin
    --   tags 0xAA-0xAB : GETDIRINFO mode/track bytes of the first eight calls.
    --   tags 0xA7/0xAC : the GETDIRINFO reply bytes as the CPU took them off the bus.
    --   tag  0xD2      : CPU_CE / VDC writes / source frames / trap+IRQ flags.
+   --   tag  0xD5      : CD-RAM read-after-write verifier (ok / bad / first bad pair).
    --   tag  0xAD      : sense/status summary.   0xAE : rolling CD summary.
    --   tag  0xAF      : sector-transfer counters.
    --   tags 0xB0-0xBF : general CDB trace (CDCMD_TRACE only).
@@ -2687,6 +2819,18 @@ begin
                   -- 0xEB: MPR_SEL | ADDR_BUS(15:13) | MC.ADDR_BUS | A_OUT(20:13)
                   when others => dbg_trace_data <= "0000000000" & trap_sel & x"00000000";
                end case;
+            elsif dbg_hb_cnt = 0 and cdv_tag_cnt < 24 then
+               cdv_tag_cnt <= cdv_tag_cnt + 1;
+               dbg_trace_req <= '1';
+               -- 0xD5: CD-RAM full-256KB self-test results.
+               -- [63:48] matching read-backs in KiB (256 = all of CD-RAM verified)
+               -- | [47:32] MISMATCHED BYTES
+               -- | [31:16] first bad as (written | read back)
+               -- ok>0 and bad=0 exonerates the SDRAM offload. bad>0 proves it corrupts,
+               -- and the first-bad pair says how (bit flip, stale byte, wrong address).
+               dbg_trace_tag  <= x"D5";
+               dbg_trace_data <= std_logic_vector(cdv_ok) & std_logic_vector(cdv_bad)
+                                 & cdv_first & x"0000";
             elsif dbg_hb_cnt = 0 and hb_alt = '0' and cpu_tag_cnt < 64 then
                hb_alt      <= '1';
                cpu_tag_cnt <= cpu_tag_cnt + 1;
