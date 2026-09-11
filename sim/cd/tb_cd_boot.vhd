@@ -385,7 +385,10 @@ begin
 	);
 
 	-- RUN button, held from RUN_PRESS_US onward.
-	joy_in_s <= "0111" when (run_pressed = '1' and joy_out(0) = '0') else "1111";
+	-- All four buttons (I, II, SELECT, RUN) rather than the single bit I guessed as RUN:
+	-- the first attempt pressed only bit 3 and the system card never left its wait loop,
+	-- and this removes the guess from the experiment. Directions stay released.
+	joy_in_s <= "0000" when (run_pressed = '1' and joy_out(0) = '0') else "1111";
 	runbtn : process
 	begin
 		wait for RUN_PRESS_US * 1 us;
@@ -417,13 +420,18 @@ begin
 		);
 
 	-- CD-RAM behavioural model, one cycle, matching the board's CD_RAM_RDY => '1' path.
+	-- is_x() guards are NOT cosmetic here. Before the CPU drives this bus the address is
+	-- 'U', and numeric_std's to_integer then emits a metavalue warning EVERY clock -- the
+	-- first run of this testbench wrote a 19.4 GB log and filled the disk.
 	cdram_proc : process (clk)
 	begin
 		if rising_edge(clk) then
-			if cd_ram_wr_s = '1' then
-				cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0)))) := cd_ram_do_s;
+			if not is_x(cd_ram_a_s(17 downto 0)) then
+				if cd_ram_wr_s = '1' then
+					cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0)))) := cd_ram_do_s;
+				end if;
+				cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
 			end if;
-			cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
 		end if;
 	end process;
 
@@ -464,7 +472,11 @@ begin
 		sector_dv_s   <= '0';
 		sector_last_s <= '0';
 		wait until rising_edge(clk) and sector_req_s = '1';
-		lba := to_integer(unsigned(sector_lba_s));
+		if is_x(sector_lba_s) then
+			lba := -1;
+		else
+			lba := to_integer(unsigned(sector_lba_s));
+		end if;
 		write(l, string'("[sector] req LBA ")); write(l, lba);
 		if lba < SECTOR_BASE or lba >= SECTOR_BASE + SECTOR_CNT then
 			write(l, string'("  *** OUTSIDE THE SLICE -- not served"));
@@ -517,6 +529,51 @@ begin
 			end if;
 		end if;
 		irq_r := cd_irq_n;
+	end process;
+
+	-- CD register + pad probe. The syscard talks to the drive through $1800-$180F and
+	-- polls the pad at $1000; if it never issues a SCSI command, the reason is visible
+	-- in what it reads back from those. Bounded print count -- an unbounded per-cycle
+	-- print in this testbench once wrote a 19.4 GB log.
+	cdregmon : process
+		alias cpu_a    is << signal dut.CPU_A     : std_logic_vector(20 downto 0) >>;
+		alias cpu_do   is << signal dut.CPU_DO    : std_logic_vector(7 downto 0) >>;
+		alias cpu_di   is << signal dut.CPU_DI    : std_logic_vector(7 downto 0) >>;
+		alias cpu_wr_n is << signal dut.CPU_WR_N  : std_logic >>;
+		alias cpu_rd_n is << signal dut.CPU_RD_N  : std_logic >>;
+		alias cpu_ce   is << signal dut.CPU_CE    : std_logic >>;
+		variable l : line;
+		variable n : integer := 0;
+		variable lo : std_logic_vector(11 downto 0);
+	begin
+		wait until rising_edge(clk);
+		if cpu_ce = '1' and n < 400 and not is_x(cpu_a) then
+			lo := cpu_a(11 downto 0);
+			-- PHYSICAL address, not logical. The PCE I/O page is bank $FF, i.e.
+			-- 0x1FE000-0x1FFFFF, so the CD registers ($1800 in the page) are at
+			-- 0x1FF800 and the pad ($1000) at 0x1FF000. Decoding the logical form is
+			-- why the first version of this probe printed nothing at all.
+			if cpu_a(20 downto 10) = "11111111110" then      -- 0x1FF800: CD registers
+				if cpu_wr_n = '0' then
+					n := n + 1;
+					write(l, string'("[cdreg] WR $18")); write(l, hex(cpu_a(7 downto 0)));
+					write(l, string'(" <= ")); write(l, hex(cpu_do));
+					writeline(output, l);
+				elsif cpu_rd_n = '0' then
+					n := n + 1;
+					write(l, string'("[cdreg] RD $18")); write(l, hex(cpu_a(7 downto 0)));
+					write(l, string'(" => ")); write(l, hex(cpu_di));
+					writeline(output, l);
+				end if;
+			elsif cpu_a(20 downto 10) = "11111111100" and cpu_rd_n = '0' then -- 0x1FF000: pad
+				if n < 40 then
+					n := n + 1;
+					write(l, string'("[pad] read => ")); write(l, hex(cpu_di));
+					write(l, string'("  joy_out=")); write(l, hex(joy_out));
+					writeline(output, l);
+				end if;
+			end if;
+		end if;
 	end process;
 
 	-- ------------------------------------------------------- internal probes

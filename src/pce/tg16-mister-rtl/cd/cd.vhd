@@ -915,9 +915,30 @@ begin
 				end if;
 
 
+				-- PCE PORT (2026-09-11): raise the subcode interrupt flag ONLY when there is
+				-- actually subcode to report. The donor sets it unconditionally every 6
+				-- CDDA sample intervals (~7350 Hz) because MiSTer's HPS streams subcode
+				-- continuously, so the flag always means something there.
+				--
+				-- This port never supplies subcode at all -- CD_SUBCD_WR is tied '0' at
+				-- every board top level -- so the flag was pure noise at 7350 Hz. Once a
+				-- game sets CD_SUBCD_EN ($1802 bit 4), IRQ_N asserts continuously and the
+				-- CPU never leaves the interrupt handler: CPU at full speed, VBlank still
+				-- firing, VDC writes stopped, black screen. That is exactly the signature
+				-- this board already hit once (see pcetang_console60k_cd.vhd's CD_EN
+				-- comment, which gated CD_EN on a disc being mounted) -- that fix cured it
+				-- for HuCard, where CD_EN is 0, and left it live for every CD game.
+				--
+				-- Found in simulation (sim/cd/tb_cd_boot.vhd): the system card read
+				-- $1803 => 0x10 (bit 4 = CD_SUBCD) and then $1807 to clear it, in a
+				-- testbench that supplies no subcode whatsoever.
+				--
+				-- Games that need subchannel Q use the SCSI READSUBQ command (0xDD), not
+				-- this interrupt, so gating it costs nothing until real subcode streaming
+				-- exists.
 				if SUBCD_CNT = 0 then
-					SUBCD_CE <= '1';									-- set interrupt flag
-					
+					SUBCD_CE <= not SUBCD_FIFO_EMPTY;   -- only when subcode data is actually present
+
 					if SUBCD_FIFO_EMPTY = '0' then
 						SUBCD_FIFO_RD_REQ <= '1';
 						SUBCD_BYTE <= SUBCD_FIFO_Q(7 downto 0);

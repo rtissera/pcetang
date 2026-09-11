@@ -46,6 +46,8 @@ a src/pce/common/core/cd_bridge.vhd
 a src/pce/common/core/pce_top.vhd
 a sim/cd/tb_cd_boot.vhd
 
+# Pipe through a filter: a metavalue warning can fire every clock, and an unfiltered run
+# once wrote a 19.4 GB log and filled the disk. Also cap the log outright.
 ghdl -r "${GHDL_FLAGS[@]}" tb_cd_boot \
     -gROM_FILE="$SYSCARD" \
     -gSECTOR_FILE="$SECTORS" \
@@ -55,4 +57,7 @@ ghdl -r "${GHDL_FLAGS[@]}" tb_cd_boot \
     -gCD_EN_G="'1'" \
     -gVERBOSE=0 \
     -gAC_BUILD_G=0 \
-    -gNO_CD_G=0 -gRUN_PRESS_US="${RUN_PRESS_US:-30000}" -gSECTOR_BYTE_CYCLES="${SECTOR_BYTE_CYCLES:-214}"
+    -gNO_CD_G=0 \
+    -gRUN_PRESS_US="${RUN_PRESS_US:-30000}" \
+    -gSECTOR_BYTE_CYCLES="${SECTOR_BYTE_CYCLES:-214}" \
+    2>&1 | stdbuf -oL grep --line-buffered -avE "metavalue|NUMERIC_STD|warning"
