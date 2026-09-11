@@ -85,6 +85,36 @@ architecture sim of tb_cd_bridge is
 	signal cd_dm           : std_logic;
 	signal sector_is_audio : std_logic;
 
+	-- ----------------------------------------------------------------------------
+	-- MCU-SHAPED SECTOR DELIVERY (2026-09-11)
+	--
+	-- Every CD bug found on hardware since the GETDIRINFO one has lived in the seam
+	-- between cd_bridge, iosys and the BL616 firmware -- a seam nothing simulated. The
+	-- original sector_source below offers a byte roughly every 3 cycles with no frame
+	-- structure, which is nothing like the real path: the MCU decodes a whole CHD hunk,
+	-- then sends the sector as TWO separate 1024-byte frames over a 2Mbaud UART, and
+	-- iosys pulses SECTOR_DATA_LAST only on the last byte of chunk 1.
+	--
+	-- mcu_mode switches the source to that shape so the bridge is exercised against what
+	-- the hardware actually does: a long stall before the first byte, ~214 clk_pce cycles
+	-- between bytes, a frame-header gap between the two chunks, and LAST exactly once.
+	constant MCU_BYTE_CYCLES  : integer := 214;   -- 2Mbaud, 10 bits/byte, at 42.857MHz
+	constant MCU_CHUNK_GAP    : integer := 10 * MCU_BYTE_CYCLES;  -- 0xAA/len/len/cmd + slack
+	-- Hardware decode of a cold 19584-byte hunk is tens to hundreds of ms; 100us keeps the
+	-- run short while still making the bridge wait far longer than any byte time.
+	constant MCU_DECODE_DELAY : time := 100 us;
+	signal mcu_mode : boolean := false;
+
+	-- SECTOR_REQ monitor: counts pulses and records the LBA of each, so a multi-sector
+	-- READ can be checked for exactly N requests at consecutive LBAs -- the property that
+	-- actually failed on hardware (2 sectors asked for, 1 request seen).
+	signal req_count   : integer := 0;
+	signal req_lba_1   : std_logic_vector(23 downto 0) := (others => '0');
+	signal req_lba_2   : std_logic_vector(23 downto 0) := (others => '0');
+	signal wr_count    : integer := 0;
+	-- driven by the stimulus, observed by the monitor: a counter may have ONE driver
+	signal mon_clear   : boolean := false;
+
 	signal sim_done  : boolean := false;
 	signal errors    : integer := 0;
 
@@ -166,6 +196,29 @@ begin
 	-- itself paces its own one-idle-cycle-per-byte consumption (data path) or samples
 	-- every real SECTOR_DATA_VALID pulse directly (audio path), so a byte offered every
 	-- cycle is always safe.
+	-- Count SECTOR_REQ pulses and CD_DATA_WR pulses, and latch the first two request LBAs.
+	req_monitor: process(clk)
+	begin
+		if rising_edge(clk) then
+			if mon_clear then
+				req_count <= 0;
+				wr_count  <= 0;
+			else
+			if sector_req = '1' then
+				req_count <= req_count + 1;
+				if req_count = 0 then
+					req_lba_1 <= sector_lba;
+				elsif req_count = 1 then
+					req_lba_2 <= sector_lba;
+				end if;
+			end if;
+			if cd_data_wr = '1' then
+				wr_count <= wr_count + 1;
+			end if;
+			end if;
+		end if;
+	end process;
+
 	sector_source: process
 		variable byte_idx : integer range 0 to 2047;
 	begin
@@ -173,7 +226,34 @@ begin
 			sector_data_valid <= '0';
 			sector_data_last  <= '0';
 			wait until rising_edge(clk) and sector_req = '1';
-			if sector_is_audio = '1' then
+			if mcu_mode and sector_is_audio = '0' then
+				-- Real MCU shape: decode stall, then 2 x 1024-byte frames at UART pace,
+				-- LAST only on the final byte of chunk 1.
+				wait for MCU_DECODE_DELAY;
+				for chunk in 0 to 1 loop
+					if chunk = 1 then
+						for g in 0 to MCU_CHUNK_GAP loop
+							wait until rising_edge(clk);
+						end loop;
+					end if;
+					for byte_idx in 0 to 1023 loop
+						for g in 0 to MCU_BYTE_CYCLES - 2 loop
+							wait until rising_edge(clk);
+						end loop;
+						wait until rising_edge(clk);
+						sector_data <= std_logic_vector(
+							unsigned(sector_lba(7 downto 0))
+							xor to_unsigned((chunk * 1024 + byte_idx) mod 256, 8));
+						sector_data_valid <= '1';
+						if chunk = 1 and byte_idx = 1023 then
+							sector_data_last <= '1';
+						end if;
+						wait until rising_edge(clk);
+						sector_data_valid <= '0';
+						sector_data_last  <= '0';
+					end loop;
+				end loop;
+			elsif sector_is_audio = '1' then
 				for byte_idx in 0 to 7 loop
 					wait until rising_edge(clk);
 					sector_data <= std_logic_vector(unsigned(sector_lba(7 downto 0)) + to_unsigned(byte_idx, 8));
@@ -595,6 +675,56 @@ begin
 			errors <= errors + 1;
 		end if;
 
+		wait for CLK_PERIOD * 4;
+
+		-- ------------------------------------------------------------------------
+		-- 14. MULTI-SECTOR READ(6) AGAINST THE REAL MCU DELIVERY SHAPE
+		--
+		-- This is the property that actually failed on hardware: the syscard asked for
+		-- TWO sectors and exactly ONE SECTOR_REQ was ever seen. The bridge's own sector
+		-- loop is already covered by test 5, but test 5 is fed by a source that offers a
+		-- byte every ~3 cycles with no frame structure. Here the source models what the
+		-- firmware really does -- decode stall, then 2 x 1024-byte frames at 2Mbaud pace,
+		-- SECTOR_DATA_LAST once -- so the bridge has to survive a long stall mid-transfer
+		-- and a gap between chunks without losing its place.
+		--
+		-- Checks, stated as properties rather than byte compares:
+		--   * exactly 2 SECTOR_REQ pulses for cdb[4]=2
+		--   * second request is at first LBA + 1
+		--   * exactly 4096 CD_DATA_WR pulses reach the CPU side (2 x 2048)
+		--   * GOOD status at the end
+		mcu_mode <= true;
+		wait for CLK_PERIOD;
+		mon_clear <= true;   -- restart the monitor for this test
+		wait for CLK_PERIOD * 2;
+		mon_clear <= false;
+		wait for CLK_PERIOD * 2;
+
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"12";
+		cd_comm(31 downto 24) <= x"34";   -- sa = 0x001234
+		cd_comm(39 downto 32) <= x"02";   -- sc = 2 sectors
+		send_cmd(clk, cd_comm_send);
+
+		-- Two full sectors at MCU pace plus the decode stalls; generous margin.
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "MCU-paced READ(6) final status");
+
+		if req_count /= 2 then
+			report "FAIL: MCU-paced 2-sector READ(6) issued " & integer'image(req_count)
+			     & " SECTOR_REQ pulse(s), expected 2 -- this is the hardware symptom"
+			     severity error;
+			errors <= errors + 1;
+		end if;
+		check_eq(errors, req_lba_1, x"001234", "MCU-paced READ(6) first request LBA");
+		check_eq(errors, req_lba_2, x"001235", "MCU-paced READ(6) second request LBA");
+		if wr_count /= 4096 then
+			report "FAIL: MCU-paced 2-sector READ(6) delivered " & integer'image(wr_count)
+			     & " bytes to the CPU, expected 4096" severity error;
+			errors <= errors + 1;
+		end if;
+		mcu_mode <= false;
 		wait for CLK_PERIOD * 4;
 
 		if errors = 0 then
