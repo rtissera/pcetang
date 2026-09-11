@@ -43,7 +43,17 @@ entity cd is
 		CD_AUDIO_WR	: in std_logic;
 		CD_SUBCD_WR	: in std_logic;
 		CD_DATA_END	: out std_logic;
-		
+
+		-- SCSI DATA-IN probes, straight through from the SCSI entity (see its own port
+		-- comment): what the CPU actually took off the bus, not what we fed in.
+		DBG_DATAIN_CNT : out unsigned(15 downto 0);
+		DBG_FIRST8     : out std_logic_vector(63 downto 0);
+		DBG_SP         : out std_logic_vector(3 downto 0);
+		DBG_FIFO_SPACE : out unsigned(12 downto 0);
+		DBG_FIFO_DROPS : out unsigned(15 downto 0);
+		DBG_GDI        : out std_logic_vector(127 downto 0);
+		DBG_RD_TOTAL   : out unsigned(15 downto 0);
+
 		DM				: in std_logic;
 		
 		CD_SL			: out signed(15 downto 0);
@@ -634,7 +644,15 @@ begin
 		
 		CD_DATA		=> CD_DATA,
 		CD_WR			=> CD_DATA_WR,
-		CD_DATA_END	=> CD_DATA_END
+		CD_DATA_END	=> CD_DATA_END,
+
+		DBG_DATAIN_CNT => DBG_DATAIN_CNT,
+		DBG_FIRST8     => DBG_FIRST8,
+		DBG_SP         => DBG_SP,
+		DBG_FIFO_SPACE => DBG_FIFO_SPACE,
+		DBG_FIFO_DROPS => DBG_FIFO_DROPS,
+		DBG_GDI        => DBG_GDI,
+		DBG_RD_TOTAL   => DBG_RD_TOTAL
 	);
 
 

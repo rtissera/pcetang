@@ -17,22 +17,36 @@
 -- -- strictly larger than the donor's capacity, never causes an earlier overflow than the
 -- original).
 --
--- KNOWN SIMPLIFICATION, not yet verified: all three donor instantiations set
--- LPM_SHOWAHEAD = "ON" (q combinationally reflects the current front-of-queue item, valid
--- before rdreq is even asserted -- "first-word-fall-through"). This implementation reads
--- through bram_gowin's dpram, which has the same one-cycle synchronous latency as every
--- other memory in this port: q reflects rd_ptr's target starting one cycle after rd_ptr
--- last changed, not combinationally on it. For a STABLE rd_ptr (no pop this cycle) q is
--- valid continuously, same as showahead; the difference only shows up in the cycle
--- immediately after a pop, where true showahead has zero bubble and this has one.
+-- SHOW-AHEAD BUBBLE -- was a KNOWN SIMPLIFICATION here, and it was a real bug. FIXED
+-- 2026-09-11; sim/cd/tb_scsi_fifo.vhd is the regression test, and it fails on the old
+-- code for every byte.
 --
--- Not exercised by any path in this port yet -- CD_EN gates the whole CD subsystem off
--- at the pce_top.vhd level, and cd.vhd's own SCSI/ADPCM state machines are the only
--- consumers of these three FIFOs' timing. Needed here only so pce_top.vhd (which
--- instantiates cd.vhd unconditionally, not inside a generate) compiles at all. Before
--- CD_EN is ever driven high in a real build, verify against cd.vhd's/SCSI.vhd's actual
--- pop cadence whether the one-cycle bubble matters -- a GHDL testbench, not inference,
--- per this project's own working style (see NECTang's docs/PORTING.md).
+-- All three donor instantiations set LPM_SHOWAHEAD = "ON": q reflects the current
+-- front-of-queue item combinationally, valid on the same cycle rdempty deasserts and
+-- before rdreq is ever asserted. This implementation reads through bram_gowin's dpram,
+-- whose q is REGISTERED -- it reflects address_b's target one cycle later. So the naive
+-- "empty when wr_ptr = rd_ptr" deasserts empty one cycle before q actually holds the
+-- byte, and a consumer that samples q on that cycle (SCSI.vhd's SP_FREE and
+-- SP_DATAIN_END branches both do exactly that) latches whatever the RAM held before.
+--
+-- Why it stayed hidden: under the donor's own usage the FIFO is never observed empty in
+-- the steady state. MiSTer's HPS bursts an entire 2048-byte sector in at once, so rd_ptr
+-- trails far behind wr_ptr and q has settled many cycles earlier. cd_bridge.vhd feeds
+-- bytes ONE AT A TIME at UART cadence (~214 clk_pce cycles apart), so the FIFO is empty
+-- at every single byte and the race is hit on every byte instead of never. Measured on
+-- real hardware 2026-09-11: the syscard read 0xf2 as the first GETDIRINFO reply byte
+-- where cd_bridge had written 0x01, concluded first_track = 0xf2, asked for track 0xf2
+-- (BCD 152 > 100), got INVALID_PARAMETER back, and spun in a REQUEST SENSE loop.
+--
+-- The fix, applied to all three FIFOs: hold `empty` asserted until q is genuinely valid,
+-- which is one cycle after EITHER pointer moves --
+--   * a write into an empty FIFO: compare rd_ptr against a REGISTERED copy of wr_ptr, so
+--     empty deasserts a cycle later, by which time dpram has registered the new byte;
+--   * the cycle right after a pop: q still shows the PREVIOUS entry (dpram registered it
+--     from the old address_b), so re-assert empty for that one cycle.
+-- full/wrfull keep using the true wr_ptr -- delaying those would risk a real overflow.
+-- This costs one cycle of latency per byte and nothing else; no consumer in this port
+-- pops on consecutive cycles (every SCSI.vhd pop is gated behind a REQ/ACK handshake).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -49,7 +63,14 @@ entity SCSI_FIFO is
 		wrreq   : in  std_logic;
 		q       : out std_logic_vector(7 downto 0);
 		rdempty : out std_logic;
-		wrfull  : out std_logic
+		wrfull  : out std_logic;
+		-- Bytes thrown away because a write arrived while full. The donor silently
+		-- dropped these (wrreq is gated on FULL with no back-pressure), which makes a
+		-- short transfer indistinguishable from a correct one. Counted so it is visible.
+		dbg_drops : out unsigned(15 downto 0);
+		-- Live occupancy, so cd_bridge can refuse to request another sector until there
+		-- is genuinely room for it.
+		dbg_level : out unsigned(12 downto 0)
 	);
 end entity;
 
@@ -79,11 +100,33 @@ architecture rtl of SCSI_FIFO is
 	-- Path-A headroom on all 3 boards (see pcetang_status_matrix.md lever 20). Chosen over
 	-- adding UART-side flow control/pacing to the new sector protocol -- simpler, and this
 	-- FIFO now has to absorb a full sector while the CPU drains it a byte at a time.
-	constant ADDR_W : integer := 11;   -- 2048 entries, was 6/64 (2026-08-27 stub-era shrink)
+	-- RESTORED TO DONOR DEPTH 2026-09-11. The donor instantiates this with
+	-- LPM_NUMWORDS = 4096 (see rtl/cd/SCSI_FIFO.vhd); it had been left at 2048 from the
+	-- Primer-25K BSRAM-pressure work and never revisited for Console 60K, which runs at
+	-- 73/118 blocks with room to spare.
+	--
+	-- Depth is a real correctness margin here, not just buffering, because of how
+	-- cd_bridge paces itself: it requests the NEXT sector as soon as it has counted 2048
+	-- bytes ARRIVING FROM THE MCU, not when the CPU has drained them. So occupancy grows
+	-- with any CPU lag, and FIFO_WR_REQ is gated on FULL='0' with no back-pressure --
+	-- over-capacity bytes are silently DROPPED. At 2048 we tolerate one sector of lag;
+	-- at the donor's 4096, two. That is the shape of "3-sector read works, 16-sector read
+	-- fails" seen on Prince of Persia. See the DBG_DROPS counter below, which now counts
+	-- the drops instead of leaving them invisible.
+	constant ADDR_W : integer := 12;   -- 4096 entries, donor LPM_NUMWORDS
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
+	-- see the show-ahead note in this file's header: q is only valid one cycle after
+	-- either pointer moves, so empty is computed from a delayed write pointer and
+	-- re-asserted for the single cycle following a pop.
+	signal wr_ptr_q : unsigned(ADDR_W downto 0) := (others => '0');
+	signal pop_d    : std_logic := '0';
+	signal drops_i  : unsigned(15 downto 0) := (others => '0');
 	signal mem_q : std_logic_vector(7 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;
 begin
+	dbg_drops <= drops_i;
+	dbg_level <= resize(wr_ptr - rd_ptr, 13);
+
 	-- wrclk = rdclk always in this design (see file header) -- both tied to the same
 	-- port map signal by rtl/cd/SCSI.vhd, so a single-clock implementation is exact,
 	-- not an approximation, regardless of the two port names.
@@ -100,7 +143,7 @@ begin
 		);
 	q <= mem_q;
 
-	empty_i <= '1' when wr_ptr = rd_ptr else '0';
+	empty_i <= '1' when wr_ptr_q = rd_ptr or pop_d = '1' else '0';
 	full_i  <= '1' when wr_ptr(ADDR_W-1 downto 0) = rd_ptr(ADDR_W-1 downto 0)
 	                and wr_ptr(ADDR_W) /= rd_ptr(ADDR_W) else '0';
 	rdempty <= empty_i;
@@ -109,14 +152,22 @@ begin
 	process (wrclk, aclr)
 	begin
 		if aclr = '1' then
-			wr_ptr <= (others => '0');
-			rd_ptr <= (others => '0');
+			wr_ptr   <= (others => '0');
+			rd_ptr   <= (others => '0');
+			wr_ptr_q <= (others => '0');
+			pop_d    <= '0';
+			drops_i  <= (others => '0');
 		elsif rising_edge(wrclk) then
+			wr_ptr_q <= wr_ptr;
+			pop_d    <= '0';
 			if wrreq = '1' and full_i = '0' then
 				wr_ptr <= wr_ptr + 1;
+			elsif wrreq = '1' then
+				drops_i <= drops_i + 1;   -- silently lost before this counter existed
 			end if;
 			if rdreq = '1' and empty_i = '0' then
 				rd_ptr <= rd_ptr + 1;
+				pop_d  <= '1';
 			end if;
 		end if;
 	end process;
@@ -153,6 +204,9 @@ architecture rtl of CDDA_FIFO is
 	-- being asked, but do not treat this depth as final either.
 	constant ADDR_W : integer := 11;   -- 2048 entries, was 12/4096
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
+	-- see the show-ahead note in this file's header
+	signal wr_ptr_q : unsigned(ADDR_W downto 0) := (others => '0');
+	signal pop_d    : std_logic := '0';
 	signal mem_q : std_logic_vector(31 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;
 begin
@@ -169,7 +223,7 @@ begin
 		);
 	q <= mem_q;
 
-	empty_i <= '1' when wr_ptr = rd_ptr else '0';
+	empty_i <= '1' when wr_ptr_q = rd_ptr or pop_d = '1' else '0';
 	full_i  <= '1' when wr_ptr(ADDR_W-1 downto 0) = rd_ptr(ADDR_W-1 downto 0)
 	                and wr_ptr(ADDR_W) /= rd_ptr(ADDR_W) else '0';
 	empty <= empty_i;
@@ -179,14 +233,19 @@ begin
 	begin
 		if rising_edge(clock) then
 			if sclr = '1' then
-				wr_ptr <= (others => '0');
-				rd_ptr <= (others => '0');
+				wr_ptr   <= (others => '0');
+				rd_ptr   <= (others => '0');
+				wr_ptr_q <= (others => '0');
+				pop_d    <= '0';
 			else
+				wr_ptr_q <= wr_ptr;
+				pop_d    <= '0';
 				if wrreq = '1' and full_i = '0' then
 					wr_ptr <= wr_ptr + 1;
 				end if;
 				if rdreq = '1' and empty_i = '0' then
 					rd_ptr <= rd_ptr + 1;
+					pop_d  <= '1';
 				end if;
 			end if;
 		end if;
@@ -219,6 +278,9 @@ architecture rtl of CDSUBC_FIFO is
 	-- for consistency, not because it was itself a resource concern.
 	constant ADDR_W : integer := 8;    -- 256 entries, was 9/512 (donor LPM_NUMWORDS=490)
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
+	-- see the show-ahead note in this file's header
+	signal wr_ptr_q : unsigned(ADDR_W downto 0) := (others => '0');
+	signal pop_d    : std_logic := '0';
 	signal mem_q : std_logic_vector(7 downto 0);
 	signal empty_i, full_i, wren_a_i : std_logic;
 begin
@@ -235,7 +297,7 @@ begin
 		);
 	q <= mem_q;
 
-	empty_i <= '1' when wr_ptr = rd_ptr else '0';
+	empty_i <= '1' when wr_ptr_q = rd_ptr or pop_d = '1' else '0';
 	full_i  <= '1' when wr_ptr(ADDR_W-1 downto 0) = rd_ptr(ADDR_W-1 downto 0)
 	                and wr_ptr(ADDR_W) /= rd_ptr(ADDR_W) else '0';
 	empty <= empty_i;
@@ -245,14 +307,19 @@ begin
 	begin
 		if rising_edge(clock) then
 			if sclr = '1' then
-				wr_ptr <= (others => '0');
-				rd_ptr <= (others => '0');
+				wr_ptr   <= (others => '0');
+				rd_ptr   <= (others => '0');
+				wr_ptr_q <= (others => '0');
+				pop_d    <= '0';
 			else
+				wr_ptr_q <= wr_ptr;
+				pop_d    <= '0';
 				if wrreq = '1' and full_i = '0' then
 					wr_ptr <= wr_ptr + 1;
 				end if;
 				if rdreq = '1' and empty_i = '0' then
 					rd_ptr <= rd_ptr + 1;
+					pop_d  <= '1';
 				end if;
 			end if;
 		end if;

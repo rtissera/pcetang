@@ -303,6 +303,14 @@ entity pce_top is
 		CD_AUDIO_WR	: in  std_logic;
 		CD_SUBCD_WR	: in  std_logic;			-- subcode data
 		CD_DATA_END	: out std_logic;
+		-- SCSI DATA-IN probes (see cd.vhd / SCSI.vhd). Tied off in the NO_CD generate.
+		CD_DBG_DATAIN_CNT : out unsigned(15 downto 0);
+		CD_DBG_FIRST8     : out std_logic_vector(63 downto 0);
+		CD_DBG_SP         : out std_logic_vector(3 downto 0);
+		CD_DBG_FIFO_SPACE : out unsigned(12 downto 0);
+		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
+		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
+		CD_DBG_RD_TOTAL   : out unsigned(15 downto 0);
 		CD_DM			: in  std_logic;
 
 		CDDA_SL		: out signed(15 downto 0);
@@ -1222,6 +1230,14 @@ begin
 		CD_SUBCD_WR	=> CD_SUBCD_WR,
 		CD_DATA_END	=> CD_DATA_END,
 
+		DBG_DATAIN_CNT => CD_DBG_DATAIN_CNT,
+		DBG_FIRST8     => CD_DBG_FIRST8,
+		DBG_SP         => CD_DBG_SP,
+		DBG_FIFO_SPACE => CD_DBG_FIFO_SPACE,
+		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
+		DBG_GDI        => CD_DBG_GDI,
+		DBG_RD_TOTAL   => CD_DBG_RD_TOTAL,
+
 		CD_REGION   => CD_REGION,
 		CD_RESET		=> CD_RESET,
 
@@ -1258,6 +1274,13 @@ begin
 	CD_DOUT     <= (others => '0');
 	CD_DOUT_SEND<= '0';
 	CD_DATA_END <= '0';
+	CD_DBG_DATAIN_CNT <= (others => '0');
+	CD_DBG_FIRST8     <= (others => '0');
+	CD_DBG_SP         <= (others => '0');
+	CD_DBG_FIFO_SPACE <= (others => '0');
+	CD_DBG_FIFO_DROPS <= (others => '0');
+	CD_DBG_GDI        <= (others => '0');
+	CD_DBG_RD_TOTAL   <= (others => '0');
 	CD_RESET    <= '0';
 	CDDA_SL     <= (others => '0');
 	CDDA_SR     <= (others => '0');

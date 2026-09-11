@@ -37,7 +37,23 @@ entity SCSI is
 		CD_DATA_END	: out std_logic;
 		STOP_CD_SND	: out std_logic;
 		
-		DBG_DATAIN_CNT: out unsigned(15 downto 0)
+		DBG_DATAIN_CNT: out unsigned(15 downto 0);
+		-- CPU-side view of the DATA-IN stream, to tell "the bytes we fed in were
+		-- wrong" apart from "the CPU never took them". DBG_FIRST8 is the first 8
+		-- bytes the CPU actually ACKed after a READ(6), DBG_SP the live phase state.
+		DBG_FIRST8    : out std_logic_vector(63 downto 0);
+		DBG_SP        : out std_logic_vector(3 downto 0);
+		-- Same idea for the GETDIRINFO replies: the boot issues several back to back and
+		-- the divergence from a reference trace happens there, so append (never reset per
+		-- command) the first 16 bytes the CPU takes for any 0xDE.
+		-- Free space in the DATA-IN FIFO, so cd_bridge can throttle instead of
+		-- overrunning it (bytes written while full are dropped, see cd_fifos.vhd).
+		DBG_FIFO_SPACE: out unsigned(12 downto 0);
+		DBG_FIFO_DROPS: out unsigned(15 downto 0);
+		DBG_GDI       : out std_logic_vector(127 downto 0);
+		-- Cumulative, reset only on RESET_N -- unlike DATAIN_CNT, which restarts on every
+		-- SELECT, so only this one can show bytes left stranded in the FIFO across commands.
+		DBG_RD_TOTAL  : out unsigned(15 downto 0)
 	);
 end SCSI;
 
@@ -94,6 +110,17 @@ architecture rtl of SCSI is
 	
 	signal DATAIN_CNT 	: unsigned(15 downto 0);
 
+	signal FIFO_DROPS    : unsigned(15 downto 0);
+	signal FIFO_LEVEL    : unsigned(12 downto 0);
+	signal FIFO_Q_D1     : std_logic_vector(7 downto 0);
+	signal DBG_GDI_ARM   : std_logic;
+	signal DBG_GDI_POS   : unsigned(4 downto 0);
+	signal DBG_GDI_BUF   : std_logic_vector(127 downto 0);
+	signal DBG_RD_CNT    : unsigned(15 downto 0);
+	signal DBG_ARM       : std_logic;
+	signal DBG_POS       : unsigned(3 downto 0);
+	signal DBG_BUF       : std_logic_vector(63 downto 0);
+
 	signal STAT_COUNT    : unsigned(15 downto 0);
 	signal DELAY_COUNT   : unsigned(16 downto 0);
 
@@ -132,7 +159,9 @@ begin
 		rdclk		=> CLK,
 		rdreq		=> FIFO_RD_REQ,
 		rdempty	=> EMPTY,
-		q			=> FIFO_Q
+		q			=> FIFO_Q,
+		dbg_drops => FIFO_DROPS,
+		dbg_level => FIFO_LEVEL
 	);
 
 	process( CLK, RESET_N ) begin
@@ -373,5 +402,68 @@ begin
 	DOUT_SEND <= DATA_OUT;
 	
 	DBG_DATAIN_CNT <= DATAIN_CNT;
+	DBG_FIFO_DROPS <= FIFO_DROPS;
+	DBG_FIFO_SPACE <= to_unsigned(4096, 13) - FIFO_LEVEL;
+	DBG_FIRST8 <= DBG_BUF;
+	DBG_GDI <= DBG_GDI_BUF;
+	DBG_RD_TOTAL <= DBG_RD_CNT;
+	with SP select DBG_SP <=
+		x"0" when SP_FREE,          x"1" when SP_COMM_BEFOREREQ,
+		x"2" when SP_COMM_START,    x"3" when SP_COMM_END,
+		x"4" when SP_STAT_START,    x"5" when SP_STAT_END,
+		x"6" when SP_STAT_HOLD,     x"7" when SP_MSGIN_START,
+		x"8" when SP_MSGIN_END,     x"9" when SP_MSGIN_HOLD,
+		x"A" when SP_DATAIN_START,  x"B" when SP_DATAIN_END,
+		x"C" when SP_DATAOUT_START, x"D" when others;
+
+	-- The byte handed to the CPU on the cycle FIFO_RD_REQ is high was latched into
+	-- DBO the PREVIOUS cycle (both assignments happen together), so the CPU-visible
+	-- byte is FIFO_Q delayed by one -- DBO itself is an out port and cannot be read
+	-- back in VHDL-93. Sampling FIFO_Q_D1 records what the CPU sees, not what we wrote.
+	process( RESET_N, CLK ) begin
+		if RESET_N = '0' then
+			DBG_ARM <= '0';
+			DBG_POS <= (others => '0');
+			DBG_BUF <= (others => '0');
+			FIFO_Q_D1 <= (others => '0');
+			DBG_GDI_ARM <= '0';
+			DBG_GDI_POS <= (others => '0');
+			DBG_GDI_BUF <= (others => '0');
+			DBG_RD_CNT <= (others => '0');
+		elsif rising_edge(CLK) then
+			FIFO_Q_D1 <= FIFO_Q;
+			if FIFO_RD_REQ = '1' then
+				DBG_RD_CNT <= DBG_RD_CNT + 1;
+			end if;
+			-- GETDIRINFO capture: armed by any 0xDE, disarmed by any other command, so the
+			-- buffer accumulates only reply bytes and never the following READ's payload.
+			if COMM_OUT = '1' then
+				if COMM(0) = x"DE" then
+					DBG_GDI_ARM <= '1';
+				else
+					DBG_GDI_ARM <= '0';
+				end if;
+			elsif DBG_GDI_ARM = '1' and FIFO_RD_REQ = '1' and DBG_GDI_POS < 16 then
+				-- indexed, not shifted: the replies total 13 bytes, not 16, so a shift
+				-- register would leave byte 0 at an offset that depends on how many
+				-- arrived. Fixed position keeps byte 0 at [127:120] however many come.
+				DBG_GDI_BUF(127 - to_integer(DBG_GDI_POS)*8 downto 120 - to_integer(DBG_GDI_POS)*8)
+					<= FIFO_Q_D1;
+				DBG_GDI_POS <= DBG_GDI_POS + 1;
+			end if;
+			if COMM_OUT = '1' and COMM(0) = x"08" then
+				DBG_ARM <= '1';
+				DBG_POS <= (others => '0');
+				DBG_BUF <= (others => '0');
+			elsif DBG_ARM = '1' and FIFO_RD_REQ = '1' then
+				DBG_BUF <= DBG_BUF(55 downto 0) & FIFO_Q_D1;
+				if DBG_POS = 7 then
+					DBG_ARM <= '0';
+				else
+					DBG_POS <= DBG_POS + 1;
+				end if;
+			end if;
+		end if;
+	end process;
 
 end rtl;

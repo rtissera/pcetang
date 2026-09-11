@@ -76,6 +76,11 @@ architecture sim of tb_cd_bridge is
 	signal toc_lba     : std_logic_vector(23 downto 0) := (others => '0');
 
 	signal sector_req        : std_logic;
+	-- Driven, not left defaulted: leaving this open makes it all-ones ("plenty of room")
+	-- and the back-pressure path below is then never exercised at all. Defaulted ports
+	-- are how the GETDIRINFO byte-order bug survived a green testbench.
+	signal fifo_space        : unsigned(12 downto 0) := (others => '1');
+	signal bus_rst           : std_logic := '0';
 	signal sector_lba        : std_logic_vector(23 downto 0);
 	signal sector_data       : std_logic_vector(7 downto 0) := (others => '0');
 	signal sector_data_valid : std_logic := '0';
@@ -182,6 +187,8 @@ begin
 		SECTOR_DATA       => sector_data,
 		SECTOR_DATA_VALID => sector_data_valid,
 		SECTOR_DATA_LAST  => sector_data_last,
+		FIFO_SPACE        => fifo_space,
+		BUS_RST           => bus_rst,
 		CD_AUDIO_WR       => cd_audio_wr,
 		CD_DM             => cd_dm,
 		SECTOR_IS_AUDIO   => sector_is_audio
@@ -306,6 +313,7 @@ begin
 		variable rx_count : integer;
 		variable exp_byte  : std_logic_vector(7 downto 0);
 		variable sense_exp : sense_data_t;
+		variable req_seen  : boolean := false;
 	begin
 		wait for CLK_PERIOD * 4;
 		rst_n <= '1';
@@ -726,6 +734,101 @@ begin
 		end if;
 		mcu_mode <= false;
 		wait for CLK_PERIOD * 4;
+
+		-- 15. Real-sized lead-out. The TOC above uses lba=0x2000 (8192), which fits in
+		-- any plausible counter width, so it could never catch the overflow that shipped:
+		-- conv_total was 17 bits with the comment "max real disc <100000", but a 74-minute
+		-- CD is 333000 frames and the converted value is LBA+150. Measured on hardware
+		-- with Dungeon Explorer II: lead-out lba=316011 -> 316161, which needs 19 bits;
+		-- at 17 it wrapped to 54017 and mode 1 returned 12:00:17 instead of 70:15:36.
+		-- Push a real lead-out and assert the real answer.
+		toc_track <= x"64"; toc_control <= x"00"; toc_lba <= x"04D26B";  -- 316011
+		wait until rising_edge(clk); toc_wr <= '1';
+		wait until rising_edge(clk); toc_wr <= '0';
+		wait for CLK_PERIOD * 4;
+
+		cd_comm(7 downto 0)  <= x"DE";
+		cd_comm(15 downto 8) <= x"01";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"70", "real lead-out mode1 M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"15", "real lead-out mode1 S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"36", "real lead-out mode1 F");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "real lead-out mode1 status");
+		wait for CLK_PERIOD * 4;
+
+		-- and the same value through mode 2 with track 0xAA, which reads the same table
+		-- entry by a different path (entry 100, see cd_bridge's TOC_CAPTURE).
+		cd_comm(7 downto 0)  <= x"DE";
+		cd_comm(15 downto 8) <= x"02";
+		cd_comm(23 downto 16) <= x"AA";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"70", "real lead-out mode2 AA M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"15", "real lead-out mode2 AA S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"36", "real lead-out mode2 AA F");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"00", "real lead-out mode2 AA control");
+		wait for CLK_PERIOD * 4;
+		cd_comm(23 downto 16) <= x"00";
+
+		-- 16. Back-pressure. cd_bridge paces itself on bytes arriving from the MCU, not
+		-- on the CPU draining them, so it must refuse to fetch the next sector while the
+		-- DATA-IN FIFO lacks room for one -- otherwise the FIFO silently drops the
+		-- overflow, the host sees a short transfer and retries forever (measured on
+		-- Prince of Persia: a 16-sector boot read retried 146 times).
+		--
+		-- The sector_source process serves each request on its own, so this test must NOT
+		-- drive sector_data/_valid itself -- that would be a second driver on the same
+		-- signals. It only starves FIFO_SPACE and watches whether requests keep coming.
+		mcu_mode <= false;          -- fast source; this test is about request gating
+		mon_clear <= true;
+		wait for CLK_PERIOD * 2;
+		mon_clear <= false;
+		fifo_space <= to_unsigned(100, 13);   -- no room for a whole sector
+		wait for CLK_PERIOD * 4;
+
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(15 downto 8)  <= x"00";
+		cd_comm(23 downto 16) <= x"00";
+		cd_comm(31 downto 24) <= x"10";
+		cd_comm(39 downto 32) <= x"04";   -- 4 sectors
+		send_cmd(clk, cd_comm_send);
+
+		-- sector 1 is fetched and served; after that the starved FIFO must stop the fetch,
+		-- so the request count must settle at exactly 1.
+		wait until rising_edge(clk) and sector_req = '1';
+		wait for CLK_PERIOD * 40000;
+		if req_count /= 1 then
+			report "FAIL back-pressure: FIFO_SPACE=100 but bridge issued " &
+			       integer'image(req_count) & " sector requests (expected 1)"
+				severity error;
+			errors <= errors + 1;
+		end if;
+
+		-- restore room: the remaining sectors must then be fetched
+		fifo_space <= to_unsigned(4096, 13);
+		wait for CLK_PERIOD * 40000;
+		if req_count <= 1 then
+			report "FAIL back-pressure: bridge never resumed after FIFO_SPACE was restored"
+				severity error;
+			errors <= errors + 1;
+		end if;
+		fifo_space <= (others => '1');
+		wait for CLK_PERIOD * 4;
+
+		-- 17. REMOVED 2026-09-11. It asserted that a SCSI bus reset aborts the transfer
+		-- and returns to idle -- correct behaviour, and the test did catch its absence
+		-- (the bridge answered the next command with sector payload bytes 05 06 07 where
+		-- the GETDIRINFO reply belonged). But the implementation that made it pass caused
+		-- a real hardware regression and was reverted; see BUS_RST's comment in
+		-- cd_bridge.vhd. A green test for behaviour the RTL no longer has is worse than
+		-- no test, so it is gone until the fix is redone properly.
 
 		if errors = 0 then
 			report "PASS: all cd_bridge checks passed";

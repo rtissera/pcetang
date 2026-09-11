@@ -771,6 +771,10 @@ architecture rtl of pcetang_console60k_cd is
    signal dbg_irq1_n    : std_logic;
    signal dbg_irq2_n    : std_logic;
    signal dbg_cpu_cyc   : unsigned(15 downto 0) := (others => '0');
+   -- IRQ1 is the VDC interrupt. Its LEVEL sampled at heartbeat instants is nearly
+   -- useless (reads inactive almost always, even on a healthy system) -- what matters
+   -- is whether it ever fires, which is what this counts. Pre-existing; tag 0xD2 now
+   -- reports it.
    signal dbg_irq1_cnt  : unsigned(15 downto 0) := (others => '0');
    signal dbg_irq1_r    : std_logic := '1';
    signal dbg_vdc_cnt : unsigned(31 downto 0) := (others => '0');
@@ -896,7 +900,22 @@ architecture rtl of pcetang_console60k_cd is
    --   valid  == 2048 and wr == 2048 -> the sector completed; look at why REQ #2 is lost
    --   valid  == 2048 and wr <  2048 -> the bridge is dropping bytes
    --   valid  <  2048               -> iosys/MCU delivered short, bridge waits forever
-   signal sum_alt      : std_logic := '0';   -- alternate 0xAE / 0xAF each heartbeat
+   signal sum_alt      : unsigned(3 downto 0) := (others => '0');  -- cycles 0xAE/0xAF/0xAD/0xA4/0xA5/0xA6/0xAA/0xAB/0xA7/0xAC
+   -- 2026-09-11: WHY the syscard rejects a transfer it received correctly.
+   -- Both sectors of the 2-sector READ(6) reach it (0xAF: valid=4096, req=2), the sector
+   -- at file frame 3368 self-identifies as LBA 3590 in its own sync header, and the IPL
+   -- signature sits in the next sector -- yet it issues no further READ and loops on
+   -- REQUEST SENSE. So either the bridge handed back a CHECK CONDITION, or the syscard
+   -- rejected the content. The sense key/ASC it is being given separates those: they are
+   -- bytes 2 and 12 of the REQUEST SENSE response, captured off CD_DATA the same way the
+   -- GETDIRINFO reply already is.
+   signal sense_arm    : std_logic := '0';
+   signal sense_idx    : unsigned(4 downto 0) := (others => '0');
+   signal sense_key    : std_logic_vector(7 downto 0) := (others => '0');
+   signal sense_asc    : std_logic_vector(7 downto 0) := (others => '0');
+   signal last_stat    : std_logic_vector(7 downto 0) := (others => '0');
+   signal chk_cond_cnt : unsigned(15 downto 0) := (others => '0');
+   signal stat_get_r   : std_logic := '0';
    signal sd_valid_r   : std_logic := '0';
    signal sd_valid_cnt : unsigned(15 downto 0) := (others => '0');
    signal cd_wr_cnt    : unsigned(15 downto 0) := (others => '0');
@@ -910,6 +929,78 @@ architecture rtl of pcetang_console60k_cd is
    -- far longer than the 1 ms spacing I tried, which is why volume corrupted the link.
    -- Accumulating in RTL and reporting periodically is bounded by construction: the
    -- summary is always current whenever the log happens to be read.
+   -- CPU-side SCSI probes (see SCSI.vhd DBG_* port comment). These answer the one
+   -- question the bridge-side counters structurally cannot: whether the bytes we fed
+   -- into the FIFO are the bytes the CPU took out, and in what order.
+   signal scsi_datain_cnt_i : unsigned(15 downto 0);
+   signal scsi_first8_i     : std_logic_vector(63 downto 0);
+   signal scsi_sp_i         : std_logic_vector(3 downto 0);
+   signal scsi_gdi_i        : std_logic_vector(127 downto 0);
+   signal scsi_fifo_space_i : unsigned(12 downto 0);
+   -- SCSI bus reset from cd.vhd (CPU writes $1802 bit 1). Was `CD_RESET => open`, which
+   -- left cd_bridge parked mid-transfer across a host bus reset -- see BUS_RST's own
+   -- comment in cd_bridge.vhd.
+   signal cd_bus_rst_i      : std_logic;
+   signal scsi_fifo_drops_i : unsigned(15 downto 0);
+   -- TRACE HOLD-OFF. Every trace frame this board emits is received by the BL616 inside
+   -- uart1_rx_task, which writes it to the SD card (file_log -> f_write + f_sync) from
+   -- that same task -- so each frame blocks the MCU's UART RX for milliseconds. The CD
+   -- sector request is a 5-byte frame on that same RX path, sent the instant the bridge
+   -- has consumed 2048 bytes, and a request that lands in an f_sync window is simply
+   -- lost: the bridge then parks in SCSI_READ_WAIT_BYTE forever.
+   --
+   -- Measured 2026-09-11: the run before this one delivered 4096 bytes (both sectors);
+   -- adding seven diagnostic tags roughly doubled the frame rate and it dropped to 2048.
+   -- The instrumentation was competing with the protocol it was measuring.
+   --
+   -- So: reload a timer on any real sector-channel activity and emit nothing until the
+   -- channel has been quiet for ~20ms. Deliberately keyed on ACTIVITY (SECTOR_REQ /
+   -- SECTOR_DATA_VALID pulses) and NOT on the bridge FSM state -- a bridge parked
+   -- waiting for a sector that never comes would hold a state-based gate shut forever
+   -- and suppress the very trace that diagnoses the stall. With an activity-based gate
+   -- a stall goes quiet, the timer expires, and the trace resumes and reports it.
+   -- The ten CD summary tags added while debugging the boot consume EVERY heartbeat
+   -- slot, and the chain below them (TOC, trap 0xE0+, video heartbeat 0x80+) is an
+   -- elsif chain -- so once they existed, the CPU/video probes silently stopped being
+   -- emitted entirely. Measured 2026-09-11: a whole run came back with 109 copies each
+   -- of the CD tags and not one 0x8x or 0xE frame. Give the CD rotation a budget so it
+   -- reports the boot and then hands the channel back.
+   -- Budget is re-armed by a real SCSI command, NOT counted down from power-on. The
+   -- wall-clock version (2026-09-11) expired ~3s after reset, which is before the user
+   -- has even pressed RUN, so it reported the idle period and nothing else: every
+   -- RTL[ae]/[af] in that run read zero. Keyed to activity, the tags go quiet when the
+   -- CD is quiet and report the few seconds after each command, which is the window
+   -- that carries information.
+   -- Starts at ZERO, not 3. The core is released while the MCU is still finishing
+   -- load_rom, and a full CD rotation fired straight into that window: ~30 frames, each
+   -- costing the MCU an f_sync inside its polled UART RX task. Measured 2026-09-11: the
+   -- MCU wedged between "loadpcecd: returning 0" and "menu_loadrom: load_rom returned"
+   -- and not one trace frame was ever received for the whole run. Nothing to report at
+   -- t=0 anyway -- no SCSI command has happened yet.
+   signal cd_rot_left       : unsigned(3 downto 0) := (others => '0');
+   -- Hold the whole trace channel off for ~1s after the core is released, for the same
+   -- reason: let the MCU finish its load path before giving it anything to log.
+   signal trace_warmup      : unsigned(25 downto 0) := (others => '0');
+   signal trace_ready       : std_logic := '0';
+   signal cpu_tag_cnt       : unsigned(7 downto 0) := (others => '0');
+   signal hb_alt            : std_logic := '0';
+   signal cd_quiet_ct       : unsigned(19 downto 0) := (others => '0');
+   signal cd_link_busy      : std_logic := '0';
+   signal scsi_rd_total_i   : unsigned(15 downto 0);
+   signal cd_dbg_state_i    : std_logic_vector(4 downto 0) := (others => '0');
+   -- Opcodes of the first eight commands of the boot sequence, one byte each, oldest
+   -- in [63:56]. Diffed directly against a reference trace from beetle-pce-fast.
+   signal op_first8    : std_logic_vector(63 downto 0) := (others => '0');
+   signal op_idx       : unsigned(3 downto 0) := (others => '0');
+   -- GETDIRINFO is issued several times in a row at boot and the opcode alone cannot
+   -- tell those apart, so the mode byte (CDB[1]) and track byte (CDB[2]) of the first
+   -- eight are kept separately. Reference for Dungeon Explorer II, captured from
+   -- beetle-pce-fast on the same disc, is four calls: modes 00 01 02 02, tracks
+   -- ca ca 01 02. This board issues five, and which one is extra is the open question.
+   signal gdi_modes    : std_logic_vector(63 downto 0) := (others => '0');
+   signal gdi_tracks   : std_logic_vector(63 downto 0) := (others => '0');
+   signal gdi_idx      : unsigned(3 downto 0) := (others => '0');
+
    signal sum_cmd_cnt  : unsigned(7 downto 0) := (others => '0');
    signal sum_last_op  : std_logic_vector(7 downto 0) := (others => '0');
    signal sum_read_cnt : unsigned(7 downto 0) := (others => '0');
@@ -1887,6 +1978,10 @@ begin
    -- 0.050 ns slack. Flip HUCARD_ONLY to false (and NO_CD => 0, AC_BUILD => 1 at the
    -- pce_top instance) to get CD back.
    gen_cd_bridge : if not HUCARD_ONLY generate
+   -- see cd_quiet_ct's declaration comment
+   cd_link_busy <= '1' when cd_quiet_ct /= 0 else '0';
+   trace_ready  <= '1' when trace_warmup >= 42860000 else '0';
+
    cd_bridge_inst: entity work.cd_bridge
    port map (
       CLK          => clk_pce,
@@ -1912,7 +2007,10 @@ begin
       SECTOR_IS_AUDIO   => cd_sector_is_audio_i,
       SECTOR_DATA       => cd_sector_data_i,
       SECTOR_DATA_VALID => cd_sector_data_valid_i,
-      SECTOR_DATA_LAST  => cd_sector_data_last_i
+      SECTOR_DATA_LAST  => cd_sector_data_last_i,
+      DBG_STATE         => cd_dbg_state_i,
+      FIFO_SPACE        => scsi_fifo_space_i,
+      BUS_RST           => cd_bus_rst_i
    );
    end generate;
 
@@ -2080,9 +2178,17 @@ begin
       -- against a real BIOS trace) -- treat this as "correct default", not "confirmed
       -- region-locked to X". Real follow-up, not yet scoped: a runtime switch once any
       -- config-menu mechanism exists on this project.
-      CD_REGION => '0', CD_RESET => open,
+      CD_REGION => '0', CD_RESET => cd_bus_rst_i,
       CD_DATA => cd_data_i, CD_DATA_WR => cd_data_wr_i, CD_AUDIO_WR => cd_audio_wr_i,
-      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i, CD_DM => cd_dm_i,
+      CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_i,
+      CD_DBG_DATAIN_CNT => scsi_datain_cnt_i,
+      CD_DBG_FIRST8     => scsi_first8_i,
+      CD_DBG_SP         => scsi_sp_i,
+      CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
+      CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
+      CD_DBG_GDI        => scsi_gdi_i,
+      CD_DBG_RD_TOTAL   => scsi_rd_total_i,
+      CD_DM => cd_dm_i,
 
       CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
 
@@ -2161,6 +2267,21 @@ begin
    --                    answer "is the image in SDRAM the image on the SD card?" against
    --                    scripts/rom_checksum.py's output for the same file. This is the
    --                    first candidate the GHDL bisection left open.
+   --   tags 0xA0-0xA3 : TOC as cd_bridge received it (tracks 1/2, lead-out, counts).
+   --   tags 0xA4-0xA6 : CPU-side SCSI view, added 2026-09-11 to separate "we fed the
+   --                    wrong bytes" from "the CPU never took them" -- 0xA4 the first
+   --                    eight bytes the CPU ACKed after a READ(6), 0xA5 the DATA-IN
+   --                    byte count plus both FSM states, 0xA6 the first eight command
+   --                    opcodes for a direct diff against a beetle-pce-fast trace.
+   --   tags 0xA8-0xA9 : first two READ(6) CDBs, one-shot.
+   --   tags 0xAA-0xAB : GETDIRINFO mode/track bytes of the first eight calls.
+   --   tags 0xA7/0xAC : the GETDIRINFO reply bytes as the CPU took them off the bus.
+   --   tag  0xD2      : CPU_CE / VDC writes / source frames / trap+IRQ flags.
+   --   tag  0xAD      : sense/status summary.   0xAE : rolling CD summary.
+   --   tag  0xAF      : sector-transfer counters.
+   --   tags 0xB0-0xBF : general CDB trace (CDCMD_TRACE only).
+   --   tags 0xC0-0xCF : ROM raw dumps -- NOT free.
+   --   tags 0xE0+     : trap window.
    --   tags 0x80+     : runtime heartbeat, now carrying DBG_VDC_WR's cumulative count
    --                    and the VBLANK count. A nonzero, climbing VDC write count means
    --                    the CPU DID reach the code that programs the VDC and the fault
@@ -2289,6 +2410,26 @@ begin
                rdcmd_data <= cd_comm_i(63 downto 0);
                rdcmd_pend <= '1';
             end if;
+            -- status handed to the CPU, and how many were CHECK CONDITION (0x02)
+            stat_get_r <= cd_stat_get_i;
+            if cd_stat_get_i = '1' and stat_get_r = '0' then
+               last_stat <= cd_stat_i;
+               if cd_stat_i = x"02" then
+                  chk_cond_cnt <= chk_cond_cnt + 1;
+               end if;
+            end if;
+            -- REQUEST SENSE (0x03): byte 2 is the sense key, byte 12 the ASC
+            if cd_comm_send_i = '1' and cd_comm_send_r = '0'
+               and cd_comm_i(7 downto 0) = x"03" then
+               sense_arm <= '1';
+               sense_idx <= (others => '0');
+            end if;
+            if sense_arm = '1' and cd_data_wr_i = '1' and cd_data_wr_r = '0' then
+               if sense_idx = 2  then sense_key <= cd_data_i; end if;
+               if sense_idx = 12 then sense_asc <= cd_data_i; sense_arm <= '0'; end if;
+               sense_idx <= sense_idx + 1;
+            end if;
+
             if cd_comm_send_i = '1' and cd_comm_send_r = '0'
                and cd_comm_i(7 downto 0) = x"de" then
                dirinfo_arm  <= '1';
@@ -2312,6 +2453,19 @@ begin
                cdcmd_data  <= cd_comm_i(63 downto 0);
                cdcmd_pend  <= '1';
                sum_cmd_cnt <= sum_cmd_cnt + 1;
+               cd_rot_left <= x"3";   -- re-arm the CD tag budget on real CD activity
+               if op_idx < 8 then
+                  op_first8(63 - to_integer(op_idx)*8 downto 56 - to_integer(op_idx)*8)
+                     <= cd_comm_i(7 downto 0);
+                  op_idx <= op_idx + 1;
+               end if;
+               if cd_comm_i(7 downto 0) = x"de" and gdi_idx < 8 then
+                  gdi_modes(63 - to_integer(gdi_idx)*8 downto 56 - to_integer(gdi_idx)*8)
+                     <= cd_comm_i(15 downto 8);
+                  gdi_tracks(63 - to_integer(gdi_idx)*8 downto 56 - to_integer(gdi_idx)*8)
+                     <= cd_comm_i(23 downto 16);
+                  gdi_idx <= gdi_idx + 1;
+               end if;
                sum_last_op <= cd_comm_i(7 downto 0);
                if cd_comm_i(7 downto 0) = x"08" then
                   sum_read_cnt <= sum_read_cnt + 1;
@@ -2327,6 +2481,18 @@ begin
                elsif sum_dir_cnt = 1 then sum_dir_b1 <= cd_data_i; end if;
                sum_dir_cnt <= sum_dir_cnt + 1;
             end if;
+            -- startup hold-off (see trace_warmup's declaration comment)
+            if trace_warmup < 42860000 then
+               trace_warmup <= trace_warmup + 1;
+            end if;
+
+            -- trace hold-off timer (see cd_quiet_ct's declaration comment)
+            if cd_sector_req_i = '1' or cd_sector_data_valid_i = '1' then
+               cd_quiet_ct <= to_unsigned(857140, 20);   -- ~20ms at 42.86MHz
+            elsif cd_quiet_ct /= 0 then
+               cd_quiet_ct <= cd_quiet_ct - 1;
+            end if;
+
             dbg_hb_cnt <= dbg_hb_cnt + 1;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             -- 32, not 64: two checksum passes now emit 32 lines before the core is even
@@ -2341,7 +2507,12 @@ begin
             -- ALWAYS emit, never gated on toc_wr_count: gating the report on the very
             -- quantity being measured makes "count is zero" and "probe never ran"
             -- indistinguishable, which is exactly what happened on the previous run.
-            if rdcmd_pend = '1' and rdcmd_cnt < 2 then
+            if trace_ready = '0' or cd_link_busy = '1' then
+               -- CD sector traffic in flight: stay off the link entirely. Nothing is
+               -- dropped, only deferred -- every tag below re-emits on the next
+               -- heartbeat, and the pend latches hold until they get the channel.
+               null;
+            elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
                rdcmd_cnt     <= rdcmd_cnt + 1;
                dbg_trace_req <= '1';
@@ -2351,10 +2522,96 @@ begin
                dirinfo_pend  <= '0';
                dirinfo_sent  <= dirinfo_sent + 1;
                dbg_trace_req <= '1';
-               dbg_trace_tag <= "101011" & std_logic_vector(dirinfo_sent);  -- 0xAC / 0xAD
+               -- 0xD3 / 0xD4. Was "101011" & sent, i.e. 0xAC/0xAD, which shadowed two
+               -- live CD tags. This branch is in practice dead -- it only fires once
+               -- dirinfo_cnt reaches 7 and no GETDIRINFO reply is longer than 4 bytes --
+               -- but a dead branch must still not squat on tags something else uses.
+               dbg_trace_tag <= "110100" & std_logic_vector(dirinfo_sent + 3);
                dbg_trace_data <= dirinfo_data;
-            elsif dbg_hb_cnt = 0 and toc_sent_cnt = 4 and sum_alt = '1' then
-               sum_alt       <= '0';
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 9 then
+               sum_alt       <= "0000";
+               if cd_rot_left /= 0 then
+                  cd_rot_left <= cd_rot_left - 1;   -- one full rotation spent
+               end if;
+               dbg_trace_req <= '1';
+               -- 0xAC: bytes 8-15 the CPU took for GETDIRINFO replies. Reference for
+               -- this disc, continuing 0xA7: 00 49 65 04 then zeros.
+               dbg_trace_tag <= x"AC";
+               dbg_trace_data <= scsi_gdi_i(63 downto 0);
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 8 then
+               sum_alt       <= "1001";
+               dbg_trace_req <= '1';
+               -- 0xA7: the first eight bytes the CPU actually took for GETDIRINFO
+               -- replies, appended across all of them. This is the CPU-side view of
+               -- the exchange the board diverges on -- the bridge-side counters
+               -- structurally cannot show a byte the CPU never collected. Reference
+               -- for this disc is 01 34 | 70 15 36 | 00 02 00 (the 13 reply bytes
+               -- of the four calls run together, continued in 0xAC).
+               dbg_trace_tag <= x"A7";
+               dbg_trace_data <= scsi_gdi_i(127 downto 64);
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 7 then
+               sum_alt       <= "1000";
+               dbg_trace_req <= '1';
+               -- 0xAB: CDB[2] (track) of the first eight GETDIRINFOs, reference
+               -- ca ca 01 02 -- a fifth entry here is the divergence.
+               dbg_trace_tag <= x"AB";
+               dbg_trace_data <= gdi_tracks;
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 6 then
+               sum_alt       <= "0111";
+               dbg_trace_req <= '1';
+               -- 0xAA: CDB[1] (mode) of the first eight GETDIRINFOs, reference 00 01 02 02.
+               dbg_trace_tag <= x"AA";
+               dbg_trace_data <= gdi_modes;
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 5 then
+               sum_alt       <= "0110";
+               dbg_trace_req <= '1';
+               -- 0xA6: opcodes of the first eight commands, oldest first. Reference
+               -- sequence captured from beetle-pce-fast on the same disc is
+               -- 00 de de de de 08 08 08 -- anything else here is the divergence.
+               dbg_trace_tag <= x"A6";
+               dbg_trace_data <= op_first8;
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 4 then
+               sum_alt       <= "0101";
+               dbg_trace_req <= '1';
+               -- 0xA5: [63:48] bytes the CPU ACKed in DATA-IN for the current command
+               -- | [47:44] SCSI.vhd phase | [43:39] cd_bridge FSM state | 0.
+               -- A bridge parked in SCSI_READ_WAIT_END (state 01000) with the SCSI
+               -- side back at SP_FREE (0) is "waiting for a CD_DATA_END that already
+               -- came and went"; both idle is "the host simply stopped talking".
+               dbg_trace_tag <= x"A5";
+               -- [63:48] DATA-IN bytes ACKed for the current command | [47:44] SCSI
+               -- phase | [43:39] cd_bridge state | [38:23] cumulative FIFO reads.
+               -- cd_wr_cnt (tag 0xAF) minus that last figure is what is stranded in
+               -- the FIFO -- nonzero means a reply the CPU never collected, which
+               -- would shift every byte of the next transfer.
+               dbg_trace_data <= std_logic_vector(scsi_datain_cnt_i) & scsi_sp_i
+                                 & cd_dbg_state_i & std_logic_vector(scsi_rd_total_i)
+                                 & "0000000" & x"0000";
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 3 then
+               sum_alt       <= "0100";
+               dbg_trace_req <= '1';
+               -- 0xA4: the first eight bytes the CPU actually took off the SCSI bus
+               -- after the last READ(6). Sector 0 of a PCE CD data track is the Hudson
+               -- Shift-JIS copyright block, byte-identical across discs, so a shift or
+               -- a stale-FIFO prefix is visible directly here.
+               dbg_trace_tag <= x"A4";
+               dbg_trace_data <= scsi_first8_i;
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 2 then
+               sum_alt       <= "0011";
+               dbg_trace_req <= '1';
+               dbg_trace_tag <= x"AD";
+               -- [63:56] last CD_STAT | [55:48] sense key | [47:40] sense ASC
+               -- | [39:24] CHECK CONDITION count | [23:0] 0
+               -- [63:56] last CD_STAT | [55:48] sense key | [47:40] sense ASC
+               -- | [39:24] CHECK CONDITION count | [23:8] FIFO bytes DROPPED
+               -- | [7:0] 0.  Drops were previously invisible: the FIFO silently threw
+               -- away any byte written while full, so a short transfer looked identical
+               -- to a good one. Nonzero here means the bridge outran the CPU.
+               dbg_trace_data <= last_stat & sense_key & sense_asc
+                                 & std_logic_vector(chk_cond_cnt)
+                                 & std_logic_vector(scsi_fifo_drops_i) & x"00";
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 and sum_alt = 1 then
+               sum_alt       <= "0010";
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"AF";
                -- [63:48] SECTOR_DATA_VALID pulses | [47:32] CD_DATA_WR pulses
@@ -2363,8 +2620,8 @@ begin
                                  & std_logic_vector(cd_wr_cnt)
                                  & std_logic_vector(sect_req_cnt)
                                  & x"0000";
-            elsif dbg_hb_cnt = 0 and toc_sent_cnt = 4 then
-               sum_alt <= '1';
+            elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 then
+               sum_alt <= "0001";
                -- 0xAE, re-emitted every heartbeat so the LAST one in the log is current.
                dbg_trace_req <= '1';
                dbg_trace_tag <= x"AE";
@@ -2430,10 +2687,39 @@ begin
                   -- 0xEB: MPR_SEL | ADDR_BUS(15:13) | MC.ADDR_BUS | A_OUT(20:13)
                   when others => dbg_trace_data <= "0000000000" & trap_sel & x"00000000";
                end case;
-            elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 32 then
+            elsif dbg_hb_cnt = 0 and hb_alt = '0' and cpu_tag_cnt < 64 then
+               hb_alt      <= '1';
+               cpu_tag_cnt <= cpu_tag_cnt + 1;
+               dbg_trace_req <= '1';
+               -- 0xD2: is the CPU still executing, and did it fault? The video heartbeat
+               -- (0x80+) answers "is the VDC being programmed"; this answers the half
+               -- that matters once a game has been handed control and the screen goes
+               -- dark -- CPU_CE still advancing means running, flat means wedged, and
+               -- trap_fired/bank_bad means it jumped into an unmapped bank (the exact
+               -- fault signature that was chased to 777ba38 on the HuCard path).
+               -- [63:48] CPU_CE count | [47:32] VDC writes | [31:16] IRQ1 assertions
+               -- | [15] trap_fired | [14] bank_bad | [13] vdc_stall | [12] IRQ1_N
+               -- | [11] IRQ2_N | [10:6] cd_bridge state | [5:0] 0
+               -- Source frames gave up their slot to the IRQ1 count -- the 0x8x video
+               -- heartbeat already carries frames, and the open question now is whether
+               -- the VDC ever interrupts the CPU, which a level bit cannot answer.
+               dbg_trace_tag  <= x"D2";
+               dbg_trace_data <= std_logic_vector(dbg_cpu_cyc)
+                                 & std_logic_vector(dbg_vdc_cnt(15 downto 0))
+                                 & std_logic_vector(dbg_irq1_cnt)
+                                 & trap_fired & bank_bad & dbg_vdc_stall
+                                 & dbg_irq1_n & dbg_irq2_n
+                                 & cd_dbg_state_i & "000000";
+            elsif dbg_hb_cnt = 0 and dbg_fetch_cnt < 64 then
+               hb_alt        <= '0';
                dbg_fetch_cnt <= dbg_fetch_cnt + 1;
                -- 0x80+ so heartbeat tags can never be confused with a block checksum.
-               dbg_trace_tag <= std_logic_vector(dbg_fetch_cnt or x"80");
+               -- Mask to 5 bits BEFORE the 0x80: the tag is only a sample index, but
+               -- dbg_fetch_cnt now runs to 64 and "cnt or 0x80" would emit 0xA0-0xBF,
+               -- colliding with the whole CD tag block. That happened (2026-09-11) and
+               -- produced video heartbeats wearing CD tags, which read as live CD
+               -- counters. Tags repeat every 32 samples now; the index is cosmetic.
+               dbg_trace_tag <= std_logic_vector(("000" & dbg_fetch_cnt(4 downto 0)) or x"80");
                dbg_trace_req <= '1';
                -- [63:32] cumulative VDC0 write count | [31:16] ROM-read watchdog
                -- timeouts | [15:14] rd_state | [13:11] rom_rd/rom_rdy/romb_wait
@@ -2531,6 +2817,7 @@ begin
          if core_resetn = '0' then
             dbg_vdc_cnt <= (others => '0');
             dbg_vbl_cnt <= (others => '0');
+            dbg_irq1_cnt <= (others => '0');
          else
             if dbg_vdc_wr = '1' then
                dbg_vdc_cnt <= dbg_vdc_cnt + 1;

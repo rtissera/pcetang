@@ -125,7 +125,51 @@ entity cd_bridge is
 		-- never has to carry both at once -- verified against pcecd_drive.cpp directly.
 		CD_AUDIO_WR     : out std_logic;
 		CD_DM           : out std_logic;
-		SECTOR_IS_AUDIO : out std_logic
+		SECTOR_IS_AUDIO : out std_logic;
+
+		-- Live FSM state, so a board-level trace can tell "parked waiting for something"
+		-- apart from "back in SCSI_IDLE, host sent nothing". Leave unconnected if unused.
+		DBG_STATE       : out std_logic_vector(4 downto 0);
+
+		-- Free space in SCSI.vhd's DATA-IN FIFO. REAL BACK-PRESSURE, not a probe: this
+		-- FSM paces itself on bytes ARRIVING FROM THE MCU, not on the CPU draining them,
+		-- so without this it happily fetches sector after sector into a FIFO the CPU has
+		-- not emptied. Writes past full are silently dropped by the FIFO, the transfer
+		-- comes up short, and the host retries forever -- measured on Prince of Persia,
+		-- whose boot read is 16 consecutive sectors (32768 bytes through a 4096-byte
+		-- FIFO). Defaults to "plenty of room" so a board that leaves it unconnected
+		-- behaves exactly as before.
+		FIFO_SPACE      : in  unsigned(12 downto 0) := (others => '1');
+
+		-- SCSI BUS RESET, from cd.vhd's own `CD_RESET <= not SCSI_RST_N` (the CPU writing
+		-- bit 1 of $1802). This was left unconnected -- `CD_RESET => open` at the board
+		-- level -- and that is a real bug, not a missing nicety: a bus reset clears
+		-- SCSI.vhd but left THIS FSM parked wherever it happened to be. Measured on
+		-- Prince of Persia 2026-09-11: bridge stuck in SCSI_READ_WAIT_BYTE with SCSI.vhd's
+		-- own counters freshly zeroed, waiting for sector bytes belonging to a transfer
+		-- the host had already abandoned. No further requests, drive looks dead.
+		--
+		-- CURRENTLY ACCEPTED AND IGNORED -- port kept because the plumbing is right and
+		-- the underlying defect is real, but the obvious implementation is WRONG and was
+		-- reverted 2026-09-11 after a measured regression.
+		--
+		-- Tried: fold BUS_RST into this process's reset branch, so a bus reset returns
+		-- the FSM to SCSI_IDLE. Result on hardware: Bonk III went BACKWARDS (it had been
+		-- executing game code; it returned to LOAD ERROR) and Prince of Persia changed
+		-- failure mode. The tell was the MCU logging a sector request for LBA 43520 =
+		-- 0x00AA00 -- 0xAA is the UART frame header byte, so a corrupted/mis-framed
+		-- request was going out. That value appears in NO earlier run.
+		--
+		-- Why the naive version is wrong: $1804 bit 1 is a LATCH, not a strobe
+		-- (`SCSI_RST_N <= not EXT_DI(1)` in cd.vhd) -- the BIOS asserts it and releases
+		-- it later, so a level-sensitive abort holds this FSM in reset for as long as the
+		-- host leaves it asserted, and clearing read_lba underneath an in-flight
+		-- SECTOR_REQ lets a request escape with garbage.
+		--
+		-- A correct fix probably acts on the RISING EDGE only, and clears just the
+		-- transfer (scsi_state, read_count, SECTOR_REQ) while leaving read_lba and the
+		-- TOC alone. Not attempted yet -- do not re-try the level-sensitive version.
+		BUS_RST         : in  std_logic := '0'
 	);
 end entity;
 
@@ -169,6 +213,28 @@ architecture rtl of cd_bridge is
 		SCSI_CONV_SUB_M, SCSI_CONV_SUB_S, SCSI_CONV_DONE
 	);
 	signal scsi_state : scsi_state_t := SCSI_IDLE;
+
+	-- DBG_STATE encoding, in declaration order of scsi_state_t.
+	function state_code(st : scsi_state_t) return std_logic_vector is
+	begin
+		case st is
+			when SCSI_IDLE             => return "00000";
+			when SCSI_SENSE_PULSE      => return "00001";
+			when SCSI_SENSE_GAP        => return "00010";
+			when SCSI_SENSE_WAIT_END   => return "00011";
+			when SCSI_READ_REQ         => return "00100";
+			when SCSI_READ_WAIT_BYTE   => return "00101";
+			when SCSI_READ_GAP         => return "00110";
+			when SCSI_READ_NEXT_SECTOR => return "00111";
+			when SCSI_READ_WAIT_END    => return "01000";
+			when SCSI_DATA_PULSE       => return "01001";
+			when SCSI_DATA_GAP         => return "01010";
+			when SCSI_DATA_WAIT_END    => return "01011";
+			when SCSI_CONV_SUB_M       => return "01100";
+			when SCSI_CONV_SUB_S       => return "01101";
+			when SCSI_CONV_DONE        => return "01110";
+		end case;
+	end function;
 	signal sense_idx   : integer range 0 to 17 := 0;
 
 	-- Real pending sense state -- set by whichever command last needed to report an error
@@ -244,7 +310,28 @@ architecture rtl of cd_bridge is
 	-- native counting removes all 9. conv_f_bcd is the one real exception -- F is a
 	-- leftover remainder (0..74), not counted incrementally, so it keeps one real
 	-- u8_to_bcd call (in SCSI_CONV_SUB_S's own exit), the only one left in this path.
-	signal conv_total  : unsigned(16 downto 0) := (others => '0');  -- max real disc <100000
+	-- 20 bits, NOT 17. The old width carried the comment "max real disc <100000", which
+	-- is wrong: a 74-minute CD is 333000 frames and an 80-minute one 360000, and the
+	-- value converted here is LBA+150, not LBA. Measured on hardware 2026-09-11 with
+	-- Dungeon Explorer II: lead-out LBA 316011 -> 316161, which needs 19 bits; at 17 it
+	-- wrapped to 54017 and GETDIRINFO mode 1 returned 12:00:17 instead of 70:15:36.
+	-- 20 bits covers 1048575 frames (~233 minutes), past any real disc.
+	-- Watchdog for a LOST sector request. The FPGA->MCU request is a 5-byte UART frame
+	-- with no acknowledgement, and the MCU's RX FIFO high-water was measured at 25 of 32
+	-- bytes on hardware 2026-09-11 -- thin enough that a frame is occasionally lost. When
+	-- that happens this FSM waits in SCSI_READ_WAIT_BYTE forever and the drive appears
+	-- dead: observed on Prince of Persia, which served 3 sectors and then parked, with the
+	-- MCU logging no 4th request and no SERVE-FAIL.
+	--
+	-- Re-requesting is safe BECAUSE the timer is reset by every arriving byte: if the
+	-- request was actually served, data is flowing and the timeout never fires, so a
+	-- sector is never fetched twice. It only fires when nothing at all came back, which
+	-- is exactly the lost-frame case. ~100ms at 42.86MHz, far longer than a worst-case
+	-- libchdr hunk decode plus SD-logging, so a merely slow serve is not interrupted.
+	constant REQ_TIMEOUT : unsigned(22 downto 0) := to_unsigned(4286000, 23);
+	signal req_wdog    : unsigned(22 downto 0) := (others => '0');
+
+	signal conv_total  : unsigned(19 downto 0) := (others => '0');
 	signal conv_m_bcd  : std_logic_vector(7 downto 0) := (others => '0');
 	signal conv_s_bcd  : std_logic_vector(7 downto 0) := (others => '0');
 	signal conv_f_bcd  : std_logic_vector(7 downto 0) := (others => '0');
@@ -282,6 +369,8 @@ architecture rtl of cd_bridge is
 	end function;
 
 begin
+
+	DBG_STATE <= state_code(scsi_state);
 
 	SECTOR_LBA <= std_logic_vector(read_lba);
 
@@ -353,6 +442,7 @@ begin
 			read_lba      <= (others => '0');
 			read_count    <= (others => '0');
 			read_byte_ct  <= (others => '0');
+			req_wdog      <= (others => '0');
 			pending_key   <= SENSEKEY_NO_SENSE;
 			pending_asc   <= (others => '0');
 			cdda_status    <= CDDA_STOPPED;
@@ -578,7 +668,7 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
-									conv_total   <= resize(last_sapsp_lba, 17) + 150;
+									conv_total   <= resize(last_sapsp_lba, 20) + 150;
 									conv_is_subq <= '1';
 									scsi_state   <= SCSI_CONV_SUB_M;
 								end if;
@@ -641,13 +731,13 @@ begin
 										-- is_data flag: "00000100"=0x04(data) /
 										-- "00000000"=0x00(audio)
 										resp_buf(3)  <= "00000" & toc_control_tbl(to_integer(gdi_track)) & "00";
-										conv_total   <= resize(toc_lba_tbl(to_integer(gdi_track)), 17) + 150;
+										conv_total   <= resize(toc_lba_tbl(to_integer(gdi_track)), 20) + 150;
 										conv_is_subq <= '0';
 										resp_len     <= 4;  -- M + S + F + control
 										scsi_state   <= SCSI_CONV_SUB_M;
 									end if;
 								elsif CD_COMM(15 downto 8) = x"01" then  -- mode 1: lead-out
-									conv_total   <= resize(toc_leadout_lba, 17) + 150;
+									conv_total   <= resize(toc_leadout_lba, 20) + 150;
 									conv_is_subq <= '0';
 									resp_len     <= 3;  -- M + S + F (no control byte)
 									scsi_state   <= SCSI_CONV_SUB_M;
@@ -808,9 +898,19 @@ begin
 				when SCSI_READ_REQ =>
 					SECTOR_REQ      <= '1';
 					SECTOR_IS_AUDIO <= is_audio_read;
+					req_wdog        <= (others => '0');
 					scsi_state      <= SCSI_READ_WAIT_BYTE;
 
 				when SCSI_READ_WAIT_BYTE =>
+					-- lost-request watchdog (see req_wdog's declaration comment)
+					if SECTOR_DATA_VALID = '1' then
+						req_wdog <= (others => '0');
+					elsif req_wdog >= REQ_TIMEOUT then
+						req_wdog   <= (others => '0');
+						scsi_state <= SCSI_READ_REQ;   -- ask again for the SAME lba
+					else
+						req_wdog <= req_wdog + 1;
+					end if;
 					if SECTOR_DATA_VALID = '1' then
 						if is_audio_read = '1' then
 							-- Real audio byte: forwarded straight into cd.vhd's own CDDA_FIFO
@@ -848,6 +948,12 @@ begin
 				when SCSI_READ_NEXT_SECTOR =>
 					if read_count = 1 then
 						scsi_state <= SCSI_READ_WAIT_END;
+					elsif FIFO_SPACE < 2048 then
+						-- Wait here, not in READ_REQ: hold off asking the MCU for the next
+						-- sector until the CPU has drained enough for one to fit. Staying
+						-- in this state re-tests every cycle and issues no request, so
+						-- nothing is dropped and no request is duplicated.
+						null;
 					else
 						read_count <= read_count - 1;
 						read_lba   <= read_lba + 1;
