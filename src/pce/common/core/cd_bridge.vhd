@@ -328,6 +328,19 @@ architecture rtl of cd_bridge is
 	-- sector is never fetched twice. It only fires when nothing at all came back, which
 	-- is exactly the lost-frame case. ~100ms at 42.86MHz, far longer than a worst-case
 	-- libchdr hunk decode plus SD-logging, so a merely slow serve is not interrupted.
+	-- OFF by default, and this is a real decision rather than tidying. The watchdog was
+	-- added to survive a LOST sector request, but that loss had a proper cause -- the MCU
+	-- serving sectors on its polled UART RX task, which truncated request frames -- and
+	-- that is fixed in firmware. With requests no longer lost the watchdog has nothing to
+	-- catch, and it actively HARMS: measured 2026-09-12, a 2-sector read produced 12
+	-- SECTOR_REQs and 24576 bytes of sector data where 4096 were wanted. The bridge
+	-- consumed 4096 and discarded the surplus, and the corrupted transfer showed up as
+	-- LOAD ERROR. Any serve slower than the timeout (SD logging in the firmware makes
+	-- one) turns a working read into a duplicated one.
+	--
+	-- Re-enable only alongside evidence that requests are being lost again -- the MCU's
+	-- `rxhi=` figure in the cdprog line is the measurement for that.
+	constant REQ_WATCHDOG : boolean := false;
 	constant REQ_TIMEOUT : unsigned(22 downto 0) := to_unsigned(4286000, 23);
 	signal req_wdog    : unsigned(22 downto 0) := (others => '0');
 
@@ -905,7 +918,7 @@ begin
 					-- lost-request watchdog (see req_wdog's declaration comment)
 					if SECTOR_DATA_VALID = '1' then
 						req_wdog <= (others => '0');
-					elsif req_wdog >= REQ_TIMEOUT then
+					elsif req_wdog >= REQ_TIMEOUT and REQ_WATCHDOG then
 						req_wdog   <= (others => '0');
 						scsi_state <= SCSI_READ_REQ;   -- ask again for the SAME lba
 					else

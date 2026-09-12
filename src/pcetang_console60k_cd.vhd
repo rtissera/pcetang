@@ -1009,6 +1009,14 @@ architecture rtl of pcetang_console60k_cd is
    signal adpcm_end_cnt     : unsigned(15 downto 0) := (others => '0');
    signal adpcm_req_cnt     : unsigned(15 downto 0) := (others => '0');
    signal adpcm_req_r       : std_logic := '0';
+   -- SCSI command-phase state, to tell a real stalled command from a PHANTOM selection.
+   -- Any write to $1800 asserts SEL and SP_FREE treats that as a selection without
+   -- checking the data bus for a target ID -- so the game's routine that clears
+   -- $1800-$1807 starts a command phase nobody intended, and BSY never releases.
+   signal scsi_comm_pos_i   : unsigned(3 downto 0);
+   signal scsi_comm0_i      : std_logic_vector(7 downto 0);
+   signal scsi_comm1_i      : std_logic_vector(7 downto 0);
+   signal scsi_sel_cnt_i    : unsigned(15 downto 0);
    signal scsi_fifo_space_i : unsigned(12 downto 0);
    -- SCSI bus reset from cd.vhd (CPU writes $1802 bit 1). Was `CD_RESET => open`, which
    -- left cd_bridge parked mid-transfer across a host bus reset -- see BUS_RST's own
@@ -1082,7 +1090,35 @@ architecture rtl of pcetang_console60k_cd is
    signal cdreg_cnt         : unsigned(15 downto 0) := (others => '0');
    signal cdreg_acc_r       : std_logic := '0';
    signal cdreg_data        : std_logic_vector(7 downto 0);
+
+   -- ------------------------------------------------------------------ 0xDB
+   -- CONTINUOUS CD-register stream, as opposed to every probe above it, which is a
+   -- snapshot. The reason to switch: an instrumented mednafen run of this disc that
+   -- reaches the title screen logs 158645 CD-register accesses, but 94477 of those are
+   -- reads of $1800 (the busy poll) and 63488 are reads of $1808 (the sector payload,
+   -- 31 sectors x 2048 bytes). Drop those two and the ENTIRE boot is 680 accesses --
+   -- small enough to stream over this link in full and diff against the reference with
+   -- scripts/cd_golden_diff.py. Every snapshot probe in this file has cost a hardware
+   -- round trip and answered a question narrower than it looked; a 12-entry window over
+   -- a handful of writes is how "the game clears its registers" and "SP_COMM_END is
+   -- normal" both got read as smoking guns when neither was.
+   --
+   -- One entry per trace frame, with a sequence number, so a gap is VISIBLE rather than
+   -- silently changing the meaning of the stream. 680 frames over a boot is ~3.4 ms of
+   -- link time in total, so the wasted 32 bits per frame cost nothing and buy a single
+   -- 64:1 read mux instead of four.
+   constant CDREG_STREAM : boolean := true;
+   type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
+   signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
+   -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
+   -- cdtq_wr is driven only by the capture process, cdtq_rd only by the emitter, so the
+   -- two never share a driver (EX2000, hit in this file before).
+   signal cdtq_wr    : unsigned(6 downto 0) := (others => '0');
+   signal cdtq_rd    : unsigned(6 downto 0) := (others => '0');
+   signal cdt_seq    : unsigned(15 downto 0) := (others => '0');
+   signal cdt_drops  : unsigned(15 downto 0) := (others => '0');
    signal d7_tag_cnt        : unsigned(7 downto 0) := (others => '0');
+   signal da_tag_cnt        : unsigned(7 downto 0) := (others => '0');
    signal dbg_vce_wr        : std_logic;
    signal dbg_vce_do        : std_logic_vector(7 downto 0);
    signal vce_wr_cnt        : unsigned(15 downto 0) := (others => '0');
@@ -2383,6 +2419,10 @@ begin
       CD_DBG_FIRST8     => scsi_first8_i,
       CD_DBG_SP         => scsi_sp_i,
       CD_DBG_ADPCM      => adpcm_dbg_i,
+      CD_DBG_COMM_POS   => scsi_comm_pos_i,
+      CD_DBG_COMM0      => scsi_comm0_i,
+      CD_DBG_COMM1      => scsi_comm1_i,
+      CD_DBG_SEL_CNT    => scsi_sel_cnt_i,
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
@@ -2714,6 +2754,25 @@ begin
                -- dropped, only deferred -- every tag below re-emits on the next
                -- heartbeat, and the pend latches hold until they get the channel.
                null;
+            elsif CDREG_STREAM and cdtq_wr /= cdtq_rd then
+               -- 0xDB: ONE CD-register access, in order, as it happened.
+               -- [63:48] sequence number | [47:40] 1=write 0=read, then the register's
+               -- low 7 bits | [39:32] the byte written, or the byte read back
+               -- | [31:16] accesses dropped so far | [15:0] 0.
+               --
+               -- Not gated on dbg_hb_cnt: this is a stream, and the ~100 ms heartbeat
+               -- would let the 64-entry ring overflow between frames. It IS gated on
+               -- cd_link_busy above, so it never competes with sector delivery -- the
+               -- accesses that matter happen between transfers, not during them (the
+               -- in-transfer traffic is $1808, which is filtered out at capture).
+               dbg_trace_req  <= '1';
+               dbg_trace_tag  <= x"DB";
+               dbg_trace_data <= std_logic_vector(cdt_seq)
+                                 & cdt_mem(to_integer(cdtq_rd(5 downto 0)))
+                                 & std_logic_vector(cdt_drops)
+                                 & x"0000";
+               cdtq_rd <= cdtq_rd + 1;
+               cdt_seq <= cdt_seq + 1;
             elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
                rdcmd_cnt     <= rdcmd_cnt + 1;
@@ -2905,6 +2964,19 @@ begin
                                  & std_logic_vector(dbg_irq1_cnt)
                                  & std_logic_vector(adpcm_play_cnt)
                                  & std_logic_vector(adpcm_end_cnt);
+            elsif dbg_hb_cnt = 0 and da_tag_cnt < 24 then
+               da_tag_cnt <= da_tag_cnt + 1;
+               dbg_trace_req <= '1';
+               -- 0xDA: [63:48] SELECT count | [47:44] COMM_POS | [43:36] COMM(0)
+               -- | [35:28] COMM(1) | [27:12] commands completed | [11:0] 0.
+               -- SELECT count far above the command count means selections are being
+               -- started that never become commands -- i.e. phantom selects from the
+               -- register-clear sweep, not real commands that stall.
+               dbg_trace_tag  <= x"DA";
+               dbg_trace_data <= std_logic_vector(scsi_sel_cnt_i)
+                                 & std_logic_vector(scsi_comm_pos_i)
+                                 & scsi_comm0_i & scsi_comm1_i
+                                 & std_logic_vector(sum_cmd_cnt) & x"00000";
             elsif dbg_hb_cnt = 0 and d7_tag_cnt < 24 then
                d7_tag_cnt <= d7_tag_cnt + 1;
                dbg_trace_req <= '1';
@@ -3098,9 +3170,14 @@ begin
             if sum_cmd_cnt /= cdreg_cmd_r then
                cdreg_armed <= '1';
                cdreg_idx   <= (others => '0');
+            -- WRITES ONLY. The first version captured reads too and filled all twelve
+            -- slots with the same poll (RD $1800 => 80), which is just the normal ~40us
+            -- SP_COMM_BEFOREREQ delay -- the opening of the handshake, not its failure.
+            -- The signal is in the writes: $1800 selects the drive, $1801 carries each
+            -- command byte, $1802 bit 7 is ACK. Twelve writes span a whole command.
             elsif cdreg_acc_r = '0' and dbg_cpu_ce = '1'
                   and dbg_cpu_a(20 downto 10) = "11111111110"
-                  and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0')
+                  and dbg_cpu_wr_n = '0'
                   and cdreg_armed = '1' and cdreg_idx < 12 then
                cdreg_shot(191 - to_integer(cdreg_idx)*16
                           downto 176 - to_integer(cdreg_idx)*16)
@@ -3119,6 +3196,28 @@ begin
                              & cdreg_data;
                cdreg_cnt <= cdreg_cnt + 1;
 
+               -- Same access, also pushed to the 0xDB stream ring -- MINUS the two
+               -- high-volume accesses the reference trace is filtered on, so both sides
+               -- of the diff drop exactly the same thing:
+               --   RD $1800  the busy poll, 94477 of golden's 158645 accesses
+               --   $1808     the sector payload, 2048 reads per sector
+               -- Decoded on a(9:0) so it is the register itself, not a mirror of it
+               -- elsewhere in the 1 KiB page this ring already decodes.
+               if CDREG_STREAM
+                  and dbg_cpu_a(9 downto 0) /= "0000001000"                        -- $1808
+                  and not (dbg_cpu_a(9 downto 0) = "0000000000"
+                           and dbg_cpu_wr_n = '1') then                            -- RD $1800
+                  if (cdtq_wr - cdtq_rd) /= 64 then
+                     cdt_mem(to_integer(cdtq_wr(5 downto 0)))
+                        <= (not dbg_cpu_wr_n) & dbg_cpu_a(6 downto 0) & cdreg_data;
+                     cdtq_wr <= cdtq_wr + 1;
+                  else
+                     -- Ring full: the link was busy longer than 64 accesses. Counted, and
+                     -- reported in every frame, because a dropped access silently shifts
+                     -- the diff and would make a correct stream look divergent.
+                     cdt_drops <= cdt_drops + 1;
+                  end if;
+               end if;
             end if;
 
             if dbg_vce_wr = '1' then

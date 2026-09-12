@@ -50,6 +50,10 @@ entity cd is
 		DBG_FIRST8     : out std_logic_vector(63 downto 0);
 		DBG_SP         : out std_logic_vector(3 downto 0);
 		DBG_ADPCM      : out std_logic_vector(2 downto 0);
+		DBG_COMM_POS   : out unsigned(3 downto 0);
+		DBG_COMM0      : out std_logic_vector(7 downto 0);
+		DBG_COMM1      : out std_logic_vector(7 downto 0);
+		DBG_SEL_CNT    : out unsigned(15 downto 0);
 		DBG_FIFO_SPACE : out unsigned(12 downto 0);
 		DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		DBG_GDI        : out std_logic_vector(127 downto 0);
@@ -651,6 +655,10 @@ begin
 		DBG_DATAIN_CNT => DBG_DATAIN_CNT,
 		DBG_FIRST8     => DBG_FIRST8,
 		DBG_SP         => DBG_SP,
+		DBG_COMM_POS   => DBG_COMM_POS,
+		DBG_COMM0      => DBG_COMM0,
+		DBG_COMM1      => DBG_COMM1,
+		DBG_SEL_CNT    => DBG_SEL_CNT,
 		DBG_FIFO_SPACE => DBG_FIFO_SPACE,
 		DBG_FIFO_DROPS => DBG_FIFO_DROPS,
 		DBG_GDI        => DBG_GDI,

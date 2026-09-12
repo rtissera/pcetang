@@ -48,6 +48,14 @@ entity SCSI is
 		-- command) the first 16 bytes the CPU takes for any 0xDE.
 		-- Free space in the DATA-IN FIFO, so cd_bridge can throttle instead of
 		-- overrunning it (bytes written while full are dropped, see cd_fifos.vhd).
+		-- Command-phase state. Distinguishes a REAL command that stalls part-way from a
+		-- PHANTOM selection: any write to $1800 asserts SEL and SP_FREE takes that as a
+		-- selection without checking the data bus for a target ID, so a routine that
+		-- clears $1800-$1807 starts a command phase nobody intended.
+		DBG_COMM_POS  : out unsigned(3 downto 0);
+		DBG_COMM0     : out std_logic_vector(7 downto 0);
+		DBG_COMM1     : out std_logic_vector(7 downto 0);
+		DBG_SEL_CNT   : out unsigned(15 downto 0);
 		DBG_FIFO_SPACE: out unsigned(12 downto 0);
 		DBG_FIFO_DROPS: out unsigned(15 downto 0);
 		DBG_GDI       : out std_logic_vector(127 downto 0);
@@ -110,6 +118,8 @@ architecture rtl of SCSI is
 	
 	signal DATAIN_CNT 	: unsigned(15 downto 0);
 
+	signal SEL_COUNT     : unsigned(15 downto 0) := (others => '0');
+	signal SEL_N_R       : std_logic := '1';
 	signal FIFO_DROPS    : unsigned(15 downto 0);
 	signal FIFO_LEVEL    : unsigned(12 downto 0);
 	signal FIFO_Q_D1     : std_logic_vector(7 downto 0);
@@ -403,6 +413,10 @@ begin
 	
 	DBG_DATAIN_CNT <= DATAIN_CNT;
 	DBG_FIFO_DROPS <= FIFO_DROPS;
+	DBG_COMM_POS <= COMM_POS;
+	DBG_COMM0    <= COMM(0);
+	DBG_COMM1    <= COMM(1);
+	DBG_SEL_CNT  <= SEL_COUNT;
 	DBG_FIFO_SPACE <= to_unsigned(4096, 13) - FIFO_LEVEL;
 	DBG_FIRST8 <= DBG_BUF;
 	DBG_GDI <= DBG_GDI_BUF;
@@ -426,12 +440,18 @@ begin
 			DBG_POS <= (others => '0');
 			DBG_BUF <= (others => '0');
 			FIFO_Q_D1 <= (others => '0');
+			SEL_COUNT <= (others => '0');
+			SEL_N_R <= '1';
 			DBG_GDI_ARM <= '0';
 			DBG_GDI_POS <= (others => '0');
 			DBG_GDI_BUF <= (others => '0');
 			DBG_RD_CNT <= (others => '0');
 		elsif rising_edge(CLK) then
 			FIFO_Q_D1 <= FIFO_Q;
+			SEL_N_R <= SEL_N;
+			if SEL_N = '0' and SEL_N_R = '1' then
+				SEL_COUNT <= SEL_COUNT + 1;
+			end if;
 			if FIFO_RD_REQ = '1' then
 				DBG_RD_CNT <= DBG_RD_CNT + 1;
 			end if;

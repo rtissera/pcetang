@@ -327,6 +327,10 @@ entity pce_top is
 		-- and ADPCM_END/ADPCM_HALF feed IRQ_N -- so "started playing and never ended" has
 		-- exactly that shape. HuCard never touches any of this.
 		CD_DBG_ADPCM      : out std_logic_vector(2 downto 0);   -- PLAY, END, HALF
+		CD_DBG_COMM_POS   : out unsigned(3 downto 0);
+		CD_DBG_COMM0      : out std_logic_vector(7 downto 0);
+		CD_DBG_COMM1      : out std_logic_vector(7 downto 0);
+		CD_DBG_SEL_CNT    : out unsigned(15 downto 0);
 		CD_DBG_FIFO_SPACE : out unsigned(12 downto 0);
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
@@ -1260,6 +1264,10 @@ begin
 		DBG_FIRST8     => CD_DBG_FIRST8,
 		DBG_SP         => CD_DBG_SP,
 		DBG_ADPCM      => CD_DBG_ADPCM,
+		DBG_COMM_POS   => CD_DBG_COMM_POS,
+		DBG_COMM0      => CD_DBG_COMM0,
+		DBG_COMM1      => CD_DBG_COMM1,
+		DBG_SEL_CNT    => CD_DBG_SEL_CNT,
 		DBG_FIFO_SPACE => CD_DBG_FIFO_SPACE,
 		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
 		DBG_GDI        => CD_DBG_GDI,
@@ -1305,6 +1313,10 @@ begin
 	CD_DBG_FIRST8     <= (others => '0');
 	CD_DBG_SP         <= (others => '0');
 	CD_DBG_ADPCM      <= (others => '0');
+	CD_DBG_COMM_POS   <= (others => '0');
+	CD_DBG_COMM0      <= (others => '0');
+	CD_DBG_COMM1      <= (others => '0');
+	CD_DBG_SEL_CNT    <= (others => '0');
 	CD_DBG_FIFO_SPACE <= (others => '0');
 	CD_DBG_FIFO_DROPS <= (others => '0');
 	CD_DBG_GDI        <= (others => '0');
