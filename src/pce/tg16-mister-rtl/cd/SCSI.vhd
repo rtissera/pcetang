@@ -134,6 +134,39 @@ architecture rtl of SCSI is
 	signal STAT_COUNT    : unsigned(15 downto 0);
 	signal DELAY_COUNT   : unsigned(16 downto 0);
 
+	-- ------------------------------------------------------------------------------
+	-- SECTOR BUFFERING. A real PCE CD drive buffers a whole sector and only then hands it
+	-- over, and the system card depends on that completely: an instrumented mednafen run
+	-- of a working boot reads $1808 63488 times in exactly 31 bursts of 2048 CONSECUTIVE
+	-- reads, with no other register access anywhere inside a burst. It never rechecks REQ,
+	-- DTR, or anything else once a burst starts.
+	--
+	-- That is fatal to a target that streams. $1808 reads return SCSI_DBO combinationally
+	-- (cd.vhd) and nothing on the CD register page can stall the CPU -- WAIT_N comes only
+	-- from ROM_RDY/CD_RAM_RDY. So if the FIFO runs dry mid-burst, SP_DATAIN_END drops to
+	-- SP_FREE and the CPU keeps reading the SAME stale DBO until data returns: bytes are
+	-- silently duplicated, the CPU's 2048 reads no longer correspond to 2048 delivered
+	-- bytes, and every following sector is shifted. Our bytes arrive from the MCU at ~5 us
+	-- each against a CPU that reads one per ~1 us, so the FIFO runs dry on essentially
+	-- every sector. None of this is visible to a first-8-bytes check, which is how the
+	-- data path was previously declared byte-identical to the reference.
+	--
+	-- So do not begin a DATA IN burst until the whole response is buffered. Two cases:
+	--   * a sector is 2048 bytes, and cd_bridge's back-pressure only pauses BETWEEN
+	--     sectors (FIFO_SPACE < 2048), so the level always reaches 2048 for real reads;
+	--   * short responses (GETDIRINFO 2-4 bytes, REQUEST SENSE 18) are written back to
+	--     back, one idle cycle per byte, so once the writes stop the response is complete.
+	-- IDLE_MAX separates the two: 8192 cycles is ~191 us at 42.9 MHz, far longer than the
+	-- ~5 us between streamed bytes, and the MCU's ~100 us per-sector decode stall happens
+	-- while the FIFO is EMPTY, which this gate excludes. A burst already under way never
+	-- re-checks any of this -- SP_DATAIN_END loops straight back to SP_DATAIN_START -- so
+	-- this can only ever delay the START of a burst, never interrupt one.
+	constant IDLE_MAX    : unsigned(14 downto 0) := to_unsigned(8192, 15);
+	signal FIFO_IDLE     : unsigned(14 downto 0);
+	signal BURST_RDY     : std_logic;
+	-- Bursts that ran dry anyway, i.e. the gate failed. Should stay 0.
+	signal UNDERRUNS     : unsigned(15 downto 0);
+
 begin
 
 	process( RESET_N, CLK )
@@ -200,8 +233,18 @@ begin
 			DELAY_COUNT <= (others => '0');
 			
 			DATAIN_CNT  <= (others => '0');
+			FIFO_IDLE   <= (others => '0');
+			UNDERRUNS   <= (others => '0');
 
 		elsif rising_edge( CLK ) then
+			-- Cycles since the last byte was pushed into the DATA IN FIFO. Saturates, so
+			-- it is a "has been quiet for a while" flag rather than a wrapping counter.
+			if FIFO_WR_REQ = '1' then
+				FIFO_IDLE <= (others => '0');
+			elsif FIFO_IDLE < IDLE_MAX then
+				FIFO_IDLE <= FIFO_IDLE + 1;
+			end if;
+
 			if STAT_GET = '1' then
 				STAT_PEND <= '1';
 			end if;
@@ -249,7 +292,10 @@ begin
 								REQ_Nr <= '0';
 								SP <= SP_STAT_START;
 							end if;
-						elsif EMPTY = '0' then
+						elsif EMPTY = '0' and BURST_RDY = '1' then
+							-- See BURST_RDY's declaration: a DATA IN burst must not start
+							-- until the whole response is in the FIFO, because the CPU
+							-- reads every byte of it without ever looking back.
 							DBO <= FIFO_Q;
 							BSY_Nr <= '0';
 							MSG_Nr <= '1';
@@ -397,6 +443,13 @@ begin
 								FIFO_RD_REQ <= '1';
 								SP <= SP_DATAIN_START;
 							else
+								-- End of the response, OR the FIFO ran dry mid-burst. The
+								-- second case is the corruption described at BURST_RDY, so
+								-- count it: ending on a 2048-byte boundary is a real sector
+								-- handover, anything else is an underrun.
+								if DATAIN_CNT(10 downto 0) /= "11111111111" then
+									UNDERRUNS <= UNDERRUNS + 1;
+								end if;
 								CD_DATA_END <= '1';
 								SP <= SP_FREE;
 							end if;
@@ -448,6 +501,9 @@ begin
 	DBG_COMM1    <= COMM(1);
 	DBG_SEL_CNT  <= SEL_COUNT;
 	DBG_FIFO_SPACE <= to_unsigned(4096, 13) - FIFO_LEVEL;
+	-- A full sector is buffered, or the writer has gone quiet and the response is short.
+	BURST_RDY <= '1' when FIFO_LEVEL >= 2048
+	                      or (EMPTY = '0' and FIFO_IDLE >= IDLE_MAX) else '0';
 	DBG_FIRST8 <= DBG_BUF;
 	DBG_GDI <= DBG_GDI_BUF;
 	DBG_RD_TOTAL <= DBG_RD_CNT;

@@ -14,4 +14,4 @@ ghdl -a "${F[@]}" src/pce/common/mem/bram_gowin.vhd
 ghdl -a "${F[@]}" src/pce/common/mem/cd_fifos.vhd
 ghdl -a "${F[@]}" src/pce/tg16-mister-rtl/cd/SCSI.vhd
 ghdl -a "${F[@]}" sim/cd/tb_scsi_phase.vhd
-ghdl -r "${F[@]}" tb_scsi_phase "$@" 2>&1 | grep -avE "metavalue|NUMERIC_STD"
+ghdl -r "${F[@]}" tb_scsi_phase "$@" 2>&1 | stdbuf -oL grep --line-buffered -avE "metavalue|NUMERIC_STD"

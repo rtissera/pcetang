@@ -65,8 +65,15 @@ architecture sim of tb_scsi_phase is
 	signal dout_req       : std_logic := '0';
 	signal dout_s         : std_logic_vector(79 downto 0);
 	signal dout_send      : std_logic;
-	signal cd_data        : std_logic_vector(7 downto 0) := (others => '0');
-	signal cd_wr          : std_logic := '0';
+	-- cd_data/cd_wr are driven from exactly ONE place -- the mux below. Two processes
+	-- assigning them resolves to 'U' on a std_logic type, SCSI.vhd's CD_WR edge detect then
+	-- never fires, and the testbench hangs with no data and no error. Cost an hour.
+	signal cd_data        : std_logic_vector(7 downto 0);
+	signal cd_wr          : std_logic;
+	signal stim_data      : std_logic_vector(7 downto 0) := (others => '0');
+	signal stim_wr        : std_logic := '0';
+	signal feed_data      : std_logic_vector(7 downto 0) := (others => '0');
+	signal feed_wr        : std_logic := '0';
 	signal cd_data_end    : std_logic;
 	signal stop_snd       : std_logic;
 
@@ -85,6 +92,14 @@ architecture sim of tb_scsi_phase is
 	-- What the CPU would read at $1800, exactly as cd.vhd composes it.
 	signal reg1800 : std_logic_vector(7 downto 0);
 	signal errors  : integer := 0;
+	signal burst_bad : integer := 0;
+	signal gate_stuck : boolean := false;
+	-- SCSI.vhd reports free space; the level is what the gate keys on.
+	signal dbg_level_dbg : integer := 0;
+	signal feed_start  : boolean := false;
+	signal burst_check : boolean := false;
+	type bytes_t is array (0 to 2047) of std_logic_vector(7 downto 0);
+	signal burst_got : bytes_t := (others => (others => '0'));
 	signal seen    : std_logic_vector(255 downto 0) := (others => '0');
 
 	function hex(v : std_logic_vector) return string is
@@ -148,6 +163,11 @@ begin
 		DBG_FIFO_DROPS => dbg_fifo_drops, DBG_GDI => dbg_gdi, DBG_RD_TOTAL => dbg_rd_total
 	);
 
+	cd_data <= feed_data when feed_start else stim_data;
+	cd_wr   <= feed_wr   when feed_start else stim_wr;
+
+	dbg_level_dbg <= 4096 - to_integer(dbg_fifo_space);
+
 	reg1800 <= (not bsy_n) & (not req_n) & (not msg_n) & (not cd_n) & (not io_n) & "000";
 
 	-- The property, checked on every cycle and reported once per distinct value.
@@ -168,12 +188,66 @@ begin
 		end if;
 	end process;
 
+	-- Feeds one 2048-byte sector at the real MCU byte pace. Contents are a counting
+	-- pattern so a duplicate or a skip is unambiguous.
+	feeder : process
+		variable l2 : line;
+	begin
+		wait until feed_start;
+		wait for 100 us;                   -- the MCU's own decode stall before byte 0
+		for i in 0 to 2047 loop
+			if i mod 512 = 0 then
+				write(l2, string'("  [feeder] byte ")); write(l2, i);
+				write(l2, string'("  fifo_level_seen=")); write(l2, dbg_level_dbg);
+				writeline(output, l2);
+			end if;
+			feed_data <= std_logic_vector(to_unsigned(i mod 256, 8));
+			feed_wr   <= '1';
+			wait until rising_edge(clk);
+			feed_wr   <= '0';
+			for g in 0 to 212 loop         -- 214 cycles/byte = 2 Mbaud
+				wait until rising_edge(clk);
+			end loop;
+		end loop;
+		wait;
+	end process;
+
+	-- Checks the burst the CPU actually took.
+	checker : process
+		variable l : line;
+		variable bad, firstbad : integer := -1;
+		variable nbad : integer := 0;
+	begin
+		wait until burst_check;
+		for i in 0 to 2047 loop
+			if burst_got(i) /= std_logic_vector(to_unsigned(i mod 256, 8)) then
+				nbad := nbad + 1;
+				if firstbad < 0 then firstbad := i; end if;
+			end if;
+		end loop;
+		if nbad = 0 then
+			write(l, string'("  all 2048 bytes correct, in order"));
+		else
+			write(l, string'("  ")); write(l, nbad);
+			write(l, string'(" of 2048 bytes WRONG, first at index ")); write(l, firstbad);
+			write(l, string'(" -- the FIFO ran dry mid-burst and the CPU reread stale DBO"));
+			burst_bad <= nbad;
+		end if;
+		writeline(output, l);
+		write(l, string'("  SCSI.vhd underrun counter: "));
+		write(l, integer'image(to_integer(unsigned(dbg_rd_total))));
+		write(l, string'(" bytes delivered in total"));
+		writeline(output, l);
+		wait;
+	end process;
+
 	stim : process
 		-- GETDIRINFO mode 2 for track 34, the command a real boot issues right after the
 		-- third READ(6), with the reply bytes mednafen returns for this disc.
 		constant CDB   : std_logic_vector(79 downto 0) := x"DE023400000000000000";
 		constant REPLY : std_logic_vector(31 downto 0) := x"66295204";
 		variable l : line;
+		variable waited : integer := 0;
 
 		procedure cpu_ack_byte(b : std_logic_vector(7 downto 0)) is
 		begin
@@ -228,10 +302,10 @@ begin
 
 		-- Reply bytes arrive, one DATA IN handshake each.
 		for i in 0 to 3 loop
-			cd_data <= REPLY(31 - i*8 downto 24 - i*8);
-			cd_wr   <= '1';
+			stim_data <= REPLY(31 - i*8 downto 24 - i*8);
+			stim_wr   <= '1';
 			wait for CLK_PERIOD * 2;
-			cd_wr   <= '0';
+			stim_wr   <= '0';
 			wait for CLK_PERIOD * 2;
 			cpu_take_byte;
 		end loop;
@@ -247,17 +321,89 @@ begin
 		cpu_take_byte;      -- STATUS
 		cpu_take_byte;      -- MESSAGE IN
 
-		wait for CLK_PERIOD * 200;
+		-- SP_MSGIN_HOLD sits for 6600 cycles (154 us) before it releases BSY, so wait for
+		-- the bus to actually go free rather than guessing a delay. A SELECT asserted while
+		-- the target is still in MSGIN_HOLD is simply ignored.
+		while reg1800 /= x"00" loop
+			wait until rising_edge(clk);
+		end loop;
+		wait for CLK_PERIOD * 20;
+
+		-- ------------------------------------------------------------------ burst test
+		-- The second property, and the one the phase check above cannot see: a whole
+		-- sector must survive the way the system card actually reads it.
+		--
+		-- A working boot reads $1808 63488 times in exactly 31 bursts of 2048 CONSECUTIVE
+		-- reads -- measured, no other register access appears anywhere inside a burst. The
+		-- CPU does not recheck REQ per byte, and cd.vhd cannot stall it: $1808 returns
+		-- SCSI_DBO combinationally and WAIT_N is driven only by ROM_RDY/CD_RAM_RDY. So the
+		-- CPU model below reads DBO every 8 cycles come what may, and auto-ACKs only when
+		-- REQ happens to be asserted, exactly as cd.vhd does.
+		--
+		-- Meanwhile the feeder supplies bytes at 214 cycles each -- the real 2 Mbaud MCU
+		-- pace, ~5 us per byte against a CPU taking one per ~0.2 us here. Without the
+		-- BURST_RDY gate the FIFO runs dry within a few bytes and the CPU reads the same
+		-- stale DBO over and over, which is silent corruption: the count still comes to
+		-- 2048.
+		writeline(output, l);
+		write(l, string'("burst test: 2048 bytes fed at MCU pace, read as one burst"));
+		writeline(output, l);
+
+		sel_n <= '0';
+		wait for CLK_PERIOD * 4;
+		sel_n <= '1';
+		for i in 0 to 5 loop
+			cpu_ack_byte(x"08");            -- a 6-byte CDB, opcode 0x08 = READ(6)
+		end loop;
+		wait until rising_edge(clk) and comm_send = '1';
+
+		feed_start <= true;                -- feeder process takes it from here
+
+		-- Poll $1800 for DATA IN, as the system card does, then burst without looking back.
+		-- Bounded: a gate that never opens is a bug to report, not a reason to hang.
+		waited := 0;
+		while reg1800 /= x"c8" and reg1800 /= x"88" and waited < 1200000 loop
+			wait until rising_edge(clk);
+			waited := waited + 1;
+		end loop;
+		if waited >= 1200000 then
+			write(l, string'("  FAIL: DATA IN never started -- BURST_RDY did not open"));
+			writeline(output, l);
+			gate_stuck <= true;
+		end if;
+
+		for i in 0 to 2047 loop
+			for g in 0 to 6 loop
+				wait until rising_edge(clk);
+			end loop;
+			burst_got(i) <= dbo;            -- the $1808 read itself
+			if req_n = '0' then              -- cd.vhd's auto-ACK, only when REQ is up
+				ack_n <= '0';
+				wait until rising_edge(clk);
+				ack_n <= '1';
+			end if;
+			wait until rising_edge(clk);
+		end loop;
+
+		burst_check <= true;
+		wait for CLK_PERIOD * 20;
 
 		writeline(output, l);
-		if errors = 0 then
-			write(l, string'("PASS: every $1800 value the CPU could read is one a real boot produces"));
+		if gate_stuck then
+			write(l, string'("FAIL: the DATA IN gate never opened"));
+			writeline(output, l);
+		end if;
+		if errors = 0 and burst_bad = 0 and not gate_stuck then
+			write(l, string'("PASS: phase lines match the reference AND the 2048-byte burst is intact"));
+		elsif burst_bad /= 0 and errors = 0 then
+			write(l, integer'image(burst_bad));
+			write(l, string'(" byte(s) of the burst corrupted -- see above"));
 		else
 			write(l, integer'image(errors));
 			write(l, string'(" $1800 value(s) outside the reference -- see the marked lines above"));
 		end if;
 		writeline(output, l);
-		if errors /= 0 then
+		if errors /= 0 or burst_bad /= 0 or gate_stuck then
 			report "tb_scsi_phase FAILED" severity error;
 		end if;
 		done <= true;
