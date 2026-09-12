@@ -830,6 +830,209 @@ begin
 		-- cd_bridge.vhd. A green test for behaviour the RTL no longer has is worse than
 		-- no test, so it is gone until the fix is redone properly.
 
+		-- 18. THE REAL BOOT, byte for byte. Every command below, and every expected
+		-- reply byte, is transcribed from an instrumented mednafen run of Dungeon
+		-- Explorer II that reaches the game's title screen (scratchpad/golden/
+		-- de2_registers.txt, 158645 register accesses). That run issues exactly 11 SCSI
+		-- commands and reads exactly 31 sectors, so this is the whole of what a real boot
+		-- asks the drive for -- not a plausible sequence, the actual one.
+		--
+		-- Why this test exists: tests 8-10 above cover the same three GETDIRINFO modes
+		-- against a 2-track synthetic TOC whose lead-out is LBA 0x2000. A real disc's TOC
+		-- is nothing like that, and the real boot's 9th command is `de 02 34` -- mode 2,
+		-- BCD track 34 -- which on this disc is a DATA track at LBA 299077, four and a
+		-- half minutes into the AMSF range. Nothing in tests 8-10 exercises a track index
+		-- above 2, a minutes field above 1, or a READ address above 8192.
+		--
+		-- The TOC values are scripts/cd_toc.py's output for the real .chd, and they are
+		-- confirmed three ways against the golden trace: mode 0 answers last track 0x34,
+		-- mode 1's lead-out AMSF 70:15:36 is LBA 316011, and mode 2 track 34's 66:29:52
+		-- is LBA 299077.
+		mcu_mode <= false;
+		wait for CLK_PERIOD * 4;
+
+		-- Real DE2 TOC, in the MCU's own send order. Track 34 last of the real tracks, so
+		-- toc_last_track (and therefore mode 0's answer) ends up 34, not 2.
+		toc_track <= x"01"; toc_control <= x"00"; toc_lba <= x"000000";
+		toc_wr <= '1'; wait until rising_edge(clk); toc_wr <= '0';
+		wait until rising_edge(clk);
+		toc_track <= x"02"; toc_control <= x"04";
+		toc_lba <= std_logic_vector(to_unsigned(3590, 24));
+		toc_wr <= '1'; wait until rising_edge(clk); toc_wr <= '0';
+		wait until rising_edge(clk);
+		toc_track <= x"22"; toc_control <= x"04";          -- 0x22 = track 34
+		toc_lba <= std_logic_vector(to_unsigned(299077, 24));
+		toc_wr <= '1'; wait until rising_edge(clk); toc_wr <= '0';
+		wait until rising_edge(clk);
+		toc_track <= x"64"; toc_control <= x"00";          -- 0x64 = 100 = lead-out
+		toc_lba <= std_logic_vector(to_unsigned(316011, 24));
+		toc_wr <= '1'; wait until rising_edge(clk); toc_wr <= '0';
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 1: TEST UNIT READY -> GOOD, no data.
+		cd_comm <= (others => '0');
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd1 TEST UNIT READY status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 2: de 00 ca -> 01 34 (first/last track, BCD)
+		cd_comm(7 downto 0)   <= x"DE";
+		cd_comm(15 downto 8)  <= x"00";
+		cd_comm(23 downto 16) <= x"CA";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"01", "boot cmd2 mode0 first track");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"34", "boot cmd2 mode0 LAST track (real disc has 34)");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd2 status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 3: de 01 ca -> 70 15 36 (lead-out AMSF, LBA 316011)
+		cd_comm(7 downto 0)   <= x"DE";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(23 downto 16) <= x"CA";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"70", "boot cmd3 lead-out M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"15", "boot cmd3 lead-out S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"36", "boot cmd3 lead-out F");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd3 status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 4: de 02 01 -> 00 02 00 00 (track 1, LBA 0, audio)
+		cd_comm(7 downto 0)   <= x"DE";
+		cd_comm(15 downto 8)  <= x"02";
+		cd_comm(23 downto 16) <= x"01";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"00", "boot cmd4 track1 M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"02", "boot cmd4 track1 S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"00", "boot cmd4 track1 F");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"00", "boot cmd4 track1 control (audio)");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd4 status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 5: de 02 02 -> 00 49 65 04 (track 2, LBA 3590, data)
+		cd_comm(7 downto 0)   <= x"DE";
+		cd_comm(15 downto 8)  <= x"02";
+		cd_comm(23 downto 16) <= x"02";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"00", "boot cmd5 track2 M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"49", "boot cmd5 track2 S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"65", "boot cmd5 track2 F");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"04", "boot cmd5 track2 control (data)");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd5 status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden commands 6-8: READ(6) 3590+2, 3592+1, 3624+3. Checked as LBAs requested
+		-- and bytes delivered, the same properties test 14 established.
+		mcu_mode <= true;
+		wait for CLK_PERIOD;
+		mon_clear <= true; wait for CLK_PERIOD * 2; mon_clear <= false;
+		wait for CLK_PERIOD * 2;
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"0E";
+		cd_comm(31 downto 24) <= x"06";   -- sa = 0x000E06 = 3590
+		cd_comm(39 downto 32) <= x"02";   -- 2 sectors
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd6 READ(6) 3590+2 status");
+		check_eq(errors, req_lba_1, x"000E06", "boot cmd6 first LBA 3590");
+		check_eq(errors, req_lba_2, x"000E07", "boot cmd6 second LBA 3591");
+		if req_count /= 2 then
+			report "FAIL: boot cmd6 issued " & integer'image(req_count)
+			     & " SECTOR_REQ pulse(s), expected 2" severity error;
+			errors <= errors + 1;
+		end if;
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 9 is the one that matters: de 02 34 -> 66 29 52 04.
+		-- Track 34 (BCD 0x34), a DATA track at LBA 299077. 66 minutes needs a 20-bit
+		-- conv_total and 66 BCD-native minute increments; the earlier mode-2 check only
+		-- ever asked for 1 minute and a 13-bit address.
+		mcu_mode <= false;
+		wait for CLK_PERIOD * 4;
+		cd_comm(7 downto 0)   <= x"DE";
+		cd_comm(15 downto 8)  <= x"02";
+		cd_comm(23 downto 16) <= x"34";   -- cdb[2] = BCD track 34
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"66", "boot cmd9 track34 M (golden 0x66)");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"29", "boot cmd9 track34 S (golden 0x29)");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"52", "boot cmd9 track34 F (golden 0x52)");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"04", "boot cmd9 track34 control (data)");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd9 status");
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 10: READ(6) LBA 0x2F28 = 12072, 1 sector. Past the old synthetic
+		-- lead-out of 8192, so this address only becomes legal with a real TOC.
+		mcu_mode <= true;
+		wait for CLK_PERIOD;
+		mon_clear <= true; wait for CLK_PERIOD * 2; mon_clear <= false;
+		wait for CLK_PERIOD * 2;
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"2F";
+		cd_comm(31 downto 24) <= x"28";   -- sa = 0x002F28 = 12072
+		cd_comm(39 downto 32) <= x"01";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd10 READ(6) 12072+1 status");
+		check_eq(errors, req_lba_1, x"002F28", "boot cmd10 LBA 12072");
+		if req_count /= 1 then
+			report "FAIL: boot cmd10 issued " & integer'image(req_count)
+			     & " SECTOR_REQ pulse(s), expected 1" severity error;
+			errors <= errors + 1;
+		end if;
+		wait for CLK_PERIOD * 4;
+
+		-- golden command 11: READ(6) LBA 0x2EA8 = 11944, 24 sectors -- the game itself.
+		-- The longest real transfer of the whole boot, and the one that has to survive 24
+		-- MCU decode stalls back to back.
+		mon_clear <= true; wait for CLK_PERIOD * 2; mon_clear <= false;
+		wait for CLK_PERIOD * 2;
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"2E";
+		cd_comm(31 downto 24) <= x"A8";   -- sa = 0x002EA8 = 11944
+		cd_comm(39 downto 32) <= x"18";   -- 24 sectors
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "boot cmd11 READ(6) 11944+24 status");
+		check_eq(errors, req_lba_1, x"002EA8", "boot cmd11 first LBA 11944");
+		check_eq(errors, req_lba_2, x"002EA9", "boot cmd11 second LBA 11945");
+		if req_count /= 24 then
+			report "FAIL: boot cmd11 issued " & integer'image(req_count)
+			     & " SECTOR_REQ pulse(s), expected 24 -- the game's own load" severity error;
+			errors <= errors + 1;
+		end if;
+		if wr_count /= 24 * 2048 then
+			report "FAIL: boot cmd11 delivered " & integer'image(wr_count)
+			     & " bytes, expected " & integer'image(24 * 2048) severity error;
+			errors <= errors + 1;
+		end if;
+		mcu_mode <= false;
+		wait for CLK_PERIOD * 4;
+
 		if errors = 0 then
 			report "PASS: all cd_bridge checks passed";
 		else

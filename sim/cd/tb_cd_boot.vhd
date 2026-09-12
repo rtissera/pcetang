@@ -51,11 +51,26 @@ entity tb_cd_boot is
 		ROM_LAT    : integer := 0;
 		-- Flat sector slice produced by scripts/cd_slice.py from a chdman-extracted .bin:
 		-- one line per sector, 4096 hex chars of USER data (2048 bytes, Mode 1 offset 16).
+		-- Two accepted forms, and which one a line is in is decided per line:
+		--   "<4096 hex chars>"        the Nth such line is LBA SECTOR_BASE+N
+		--   "<lba> <4096 hex chars>"  the sector is at exactly that LBA
+		-- The sparse form exists because a real boot's reads are not contiguous: Dungeon
+		-- Explorer II touches 31 sectors spread from LBA 3590 to 11967, which as one run
+		-- would be 8378 sectors of hex for GHDL to load at elaboration.
 		SECTOR_FILE : string := "de2_sectors.hex";
 		SECTOR_BASE : integer := 3584;
 		SECTOR_CNT  : integer := 160;
-		-- TOC the bridge is told about, matching the real disc (Dungeon Explorer II):
-		-- track 1 audio at LBA 0, track 2 DATA at 3590, lead-out at 316011.
+		-- Real TOC, one "<track> <control> <lba>" line per track (track 100 = lead-out),
+		-- as produced by scripts/cd_toc.py straight from the .chd. Leave it empty to fall
+		-- back to the 2-track stand-in below.
+		--
+		-- A stand-in TOC cannot reproduce a real boot, and that is not a detail: this
+		-- testbench used to report only tracks 1, 2 and the lead-out, so GETDIRINFO mode
+		-- 0 answered "last track = 2" and the system card never issued the `de 02 34`
+		-- (mode 2, track 34) that an instrumented mednafen run shows it asks for right
+		-- after the third READ(6) -- exactly the point real hardware stops. The sim was
+		-- structurally incapable of reaching the failure.
+		TOC_FILE    : string := "";
 		TOC_T2_LBA  : integer := 3590;
 		TOC_LEADOUT : integer := 316011;
 		-- The system card sits in a "PUSH RUN BUTTON" loop until a pad reports RUN, so a
@@ -184,6 +199,10 @@ architecture sim of tb_cd_boot is
 
 	-- Sector slice, read once at elaboration.
 	type sec_t is array (0 to SECTOR_CNT*2048 - 1) of std_logic_vector(7 downto 0);
+	-- LBA of each loaded slot, -1 = empty. Filled by load_sectors below, searched by
+	-- sector_proc, so a slice needs no fixed base and no contiguity.
+	type sec_lba_t is array (0 to SECTOR_CNT - 1) of integer;
+	shared variable sec_lba : sec_lba_t := (others => -1);
 	impure function load_sectors(fn : string) return sec_t is
 		file f      : text;
 		variable st : file_open_status;
@@ -192,6 +211,7 @@ architecture sim of tb_cd_boot is
 		variable idx, nsec : integer := 0;
 		variable c  : character;
 		variable nyb, hi : integer;
+		variable base_off, lba_v : integer := 0;
 		variable l2 : line;
 	begin
 		file_open(st, f, fn, read_mode);
@@ -202,11 +222,28 @@ architecture sim of tb_cd_boot is
 		end if;
 		while not endfile(f) and nsec < SECTOR_CNT loop
 			readline(f, ln);
-			if ln'length >= 4096 then
+			-- Decide the line's form from its length: exactly the hex payload is the
+			-- contiguous form, anything longer carries a decimal LBA in front.
+			base_off := 0;
+			if ln'length > 4096 then
+				lba_v := 0;
+				while base_off < ln'length and ln.all(base_off + 1) /= ' ' loop
+					c := ln.all(base_off + 1);
+					if c >= '0' and c <= '9' then
+						lba_v := lba_v * 10 + (character'pos(c) - character'pos('0'));
+					end if;
+					base_off := base_off + 1;
+				end loop;
+				base_off := base_off + 1;          -- step over the separating space
+				sec_lba(nsec) := lba_v;
+			else
+				sec_lba(nsec) := SECTOR_BASE + nsec;
+			end if;
+			if ln'length - base_off >= 4096 then
 				for b in 0 to 2047 loop
 					hi := 0;
 					for half in 0 to 1 loop
-						c := ln.all(b*2 + half + 1);
+						c := ln.all(base_off + b*2 + half + 1);
 						case c is
 							when '0' to '9' => nyb := character'pos(c) - character'pos('0');
 							when 'a' to 'f' => nyb := character'pos(c) - character'pos('a') + 10;
@@ -445,25 +482,68 @@ begin
 
 	-- TOC + mount, the same order the real MCU uses (TOC first, then mount).
 	toc_proc : process
+		file tf       : text;
+		variable st   : file_open_status;
+		variable ln   : line;
+		variable t, ctl, lba, ntoc : integer;
+		variable good : boolean;
+		variable l    : line;
 	begin
 		wait until reset = '0';
 		wait for CLK_PERIOD * 20;
-		-- track 1: audio at LBA 0
-		toc_track_s <= x"01"; toc_ctl_s <= x"00"; toc_lba_s <= x"000000";
-		wait until rising_edge(clk); toc_wr_s <= '1';
-		wait until rising_edge(clk); toc_wr_s <= '0';
-		wait until rising_edge(clk);
-		-- track 2: DATA
-		toc_track_s <= x"02"; toc_ctl_s <= x"04";
-		toc_lba_s <= std_logic_vector(to_unsigned(TOC_T2_LBA, 24));
-		wait until rising_edge(clk); toc_wr_s <= '1';
-		wait until rising_edge(clk); toc_wr_s <= '0';
-		wait until rising_edge(clk);
-		-- lead-out
-		toc_track_s <= x"64"; toc_ctl_s <= x"00";
-		toc_lba_s <= std_logic_vector(to_unsigned(TOC_LEADOUT, 24));
-		wait until rising_edge(clk); toc_wr_s <= '1';
-		wait until rising_edge(clk); toc_wr_s <= '0';
+		ntoc := 0;
+		if TOC_FILE /= "" then
+			file_open(st, tf, TOC_FILE, read_mode);
+			if st /= open_ok then
+				write(l, string'("TOC FILE NOT FOUND: ")); write(l, TOC_FILE);
+				writeline(output, l);
+			else
+				while not endfile(tf) loop
+					readline(tf, ln);
+					-- Skip blanks and the "# ..." comment scripts/cd_toc.py may emit.
+					good := ln'length > 0;
+					if good then good := ln.all(1) /= '#'; end if;
+					if good then
+						read(ln, t, good);
+						if good then read(ln, ctl, good); end if;
+						if good then read(ln, lba, good); end if;
+					end if;
+					if good then
+						toc_track_s <= std_logic_vector(to_unsigned(t, 8));
+						toc_ctl_s   <= std_logic_vector(to_unsigned(ctl, 8));
+						toc_lba_s   <= std_logic_vector(to_unsigned(lba, 24));
+						wait until rising_edge(clk); toc_wr_s <= '1';
+						wait until rising_edge(clk); toc_wr_s <= '0';
+						wait until rising_edge(clk);
+						ntoc := ntoc + 1;
+					end if;
+				end loop;
+				file_close(tf);
+				write(l, string'("TOC entries sent: ")); write(l, ntoc);
+				write(l, string'(" from ")); write(l, TOC_FILE);
+				writeline(output, l);
+			end if;
+		end if;
+		if ntoc = 0 then
+			-- Stand-in TOC. Enough to make a READ(6) legal, NOT enough to reproduce a real
+			-- boot -- see TOC_FILE's own comment in the generic clause.
+			-- track 1: audio at LBA 0
+			toc_track_s <= x"01"; toc_ctl_s <= x"00"; toc_lba_s <= x"000000";
+			wait until rising_edge(clk); toc_wr_s <= '1';
+			wait until rising_edge(clk); toc_wr_s <= '0';
+			wait until rising_edge(clk);
+			-- track 2: DATA
+			toc_track_s <= x"02"; toc_ctl_s <= x"04";
+			toc_lba_s <= std_logic_vector(to_unsigned(TOC_T2_LBA, 24));
+			wait until rising_edge(clk); toc_wr_s <= '1';
+			wait until rising_edge(clk); toc_wr_s <= '0';
+			wait until rising_edge(clk);
+			-- lead-out
+			toc_track_s <= x"64"; toc_ctl_s <= x"00";
+			toc_lba_s <= std_logic_vector(to_unsigned(TOC_LEADOUT, 24));
+			wait until rising_edge(clk); toc_wr_s <= '1';
+			wait until rising_edge(clk); toc_wr_s <= '0';
+		end if;
 		wait for CLK_PERIOD * 4;
 		disc_mounted_s <= '1';
 		wait;
@@ -474,7 +554,7 @@ begin
 	-- under test -- an infinitely fast source would hide exactly the class of bug that
 	-- back-pressure and the request watchdog exist to handle.
 	sector_proc : process
-		variable lba, off : integer;
+		variable lba, off, slot : integer;
 		variable l : line;
 	begin
 		sector_dv_s   <= '0';
@@ -486,12 +566,16 @@ begin
 			lba := to_integer(unsigned(sector_lba_s));
 		end if;
 		write(l, string'("[sector] req LBA ")); write(l, lba);
-		if lba < SECTOR_BASE or lba >= SECTOR_BASE + SECTOR_CNT then
+		slot := -1;
+		for i in 0 to SECTOR_CNT - 1 loop
+			if sec_lba(i) = lba then slot := i; end if;
+		end loop;
+		if slot < 0 then
 			write(l, string'("  *** OUTSIDE THE SLICE -- not served"));
 			writeline(output, l);
 		else
 			writeline(output, l);
-			off := (lba - SECTOR_BASE) * 2048;
+			off := slot * 2048;
 			wait for 100 us;                       -- decode stall, as the MCU has
 			for i in 0 to 2047 loop
 				for g in 0 to SECTOR_BYTE_CYCLES - 2 loop
