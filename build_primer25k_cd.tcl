@@ -80,7 +80,16 @@ set_option -bit_compress 1
 # clk_pce margin (+0.019%->+1.85%, see pcetang_status_matrix.md lever 13) for free --
 # place_option/route_option default to 0 (compile-speed/congestion) on every board in
 # this project, never tried otherwise. Pure PnR-algorithm change, no netlist edit.
-set_option -place_option 0
+# place_option 1 ("routability priority"), 2026-09-12. Swept 0/1/2 on identical trees at
+# c525c16, all real gw_sh runs:
+#   0 : closes, clk_pce 42.864 MHz, +0.016% margin  <- 7 kHz, effectively none
+#   1 : closes, clk_pce 43.081 MHz, +0.523% margin  <- this
+#   2 : FAILS, PR0004, 20 unrouted nets
+# Worth measuring because this session's CD work narrowed option 0's margin from +0.266%
+# (c1cba4f, measured in a worktree) to +0.016% while logic utilisation went DOWN, 93% ->
+# 92% -- so it was placement variance, not area pressure, and the placer just needed a
+# different objective. Option 1 now beats the pre-session baseline as well.
+set_option -place_option 1
 set_option -route_option 0
 # 2026-09-06 real fix, CONFIRMED by a 3-way sweep: place_option 1 (below) stopped routing
 # this board once the sdram.sv port-B deadlock fix landed -- ERROR (PR0004), 15 unrouted
