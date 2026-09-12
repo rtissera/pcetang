@@ -289,7 +289,37 @@ begin
 							if COMM_POS = COMM_LEN(to_integer(unsigned(COMM(0)(7 downto 4)))) then
 								COMM_POS <= (others => '0');
 								COMM_OUT <= '1';
-								CD_Nr <= '1';
+								-- CD_Nr DELIBERATELY LEFT ASSERTED (2026-09-12).
+								--
+								-- The donor cleared it here, which drops every phase line
+								-- while BSY stays asserted. MSG=CD=IO all deasserted is not
+								-- a neutral state -- it is DATA OUT. So the CPU reads $1800
+								-- as 0x80, i.e. "drive is in DATA OUT phase, REQ not yet
+								-- asserted", and it reads that for as long as the target
+								-- takes to produce the first byte. A real boot never enters
+								-- DATA OUT at all (neither 0x80 nor 0xC0 ever appears).
+								--
+								-- An instrumented mednafen run of a CD boot that reaches the
+								-- title screen reads $1800 94477 times and NEVER ONCE sees
+								-- 0x80. The only values that occur are 00, 88, 90, 98, b8,
+								-- c8, d0, d8, f8 -- BUS FREE plus COMMAND, DATA IN, STATUS
+								-- and MESSAGE IN, each with and without REQ. Its two
+								-- dominant values are exactly the two
+								-- busy-waits: 0x90 (BSY|CD, 50583 reads) waiting for the
+								-- drive to answer a command, and 0x88 (BSY|IO, 43649 reads)
+								-- waiting for the next data byte. So the reference holds
+								-- COMMAND phase across the whole seek, and we announced an
+								-- unassigned phase instead.
+								--
+								-- Why it matters here and not on MiSTer, running this same
+								-- donor code: there the sector comes from SDRAM in
+								-- microseconds, so the illegal window is invisible. Our
+								-- sectors come from the MCU over a 2 Mbaud UART, ~10 ms per
+								-- sector -- a thousand times longer. Nothing else changes:
+								-- every SP_FREE branch sets all four lines explicitly when
+								-- it picks the next phase, and cd.vhd's CD_DTR/CD_DTD and
+								-- ADPCM-DMA conditions all test REQ together with the phase
+								-- lines, so none of them can trigger during the wait.
 								SP <= SP_FREE;
 								if ((COMM(0) = x"08") or (COMM(0) = x"DA")) then	-- READ6 and PAUSE commands should mute sound, but still drain FIFO
 									STOP_CD_SND <= '1';
