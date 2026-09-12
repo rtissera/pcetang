@@ -61,7 +61,13 @@ entity SCSI is
 		DBG_GDI       : out std_logic_vector(127 downto 0);
 		-- Cumulative, reset only on RESET_N -- unlike DATAIN_CNT, which restarts on every
 		-- SELECT, so only this one can show bytes left stranded in the FIFO across commands.
-		DBG_RD_TOTAL  : out unsigned(15 downto 0)
+		DBG_RD_TOTAL  : out unsigned(15 downto 0);
+		-- DATA IN bursts that ended anywhere other than a 2048-byte boundary, i.e. the
+		-- FIFO ran dry mid-burst and the CPU reread a stale DBO. See BURST_RDY. This must
+		-- be observable on HARDWARE, not just in simulation: "the game still does not boot"
+		-- and "the sector gate is not working" are otherwise indistinguishable, and that
+		-- distinction is the whole point of the gate.
+		DBG_UNDERRUNS : out unsigned(15 downto 0)
 	);
 end SCSI;
 
@@ -501,6 +507,7 @@ begin
 	DBG_COMM1    <= COMM(1);
 	DBG_SEL_CNT  <= SEL_COUNT;
 	DBG_FIFO_SPACE <= to_unsigned(4096, 13) - FIFO_LEVEL;
+	DBG_UNDERRUNS  <= UNDERRUNS;
 	-- A full sector is buffered, or the writer has gone quiet and the response is short.
 	BURST_RDY <= '1' when FIFO_LEVEL >= 2048
 	                      or (EMPTY = '0' and FIFO_IDLE >= IDLE_MAX) else '0';

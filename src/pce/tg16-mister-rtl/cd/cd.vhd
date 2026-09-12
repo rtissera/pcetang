@@ -58,6 +58,7 @@ entity cd is
 		DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		DBG_GDI        : out std_logic_vector(127 downto 0);
 		DBG_RD_TOTAL   : out unsigned(15 downto 0);
+		DBG_UNDERRUNS  : out unsigned(15 downto 0);
 
 		DM				: in std_logic;
 		
@@ -662,7 +663,8 @@ begin
 		DBG_FIFO_SPACE => DBG_FIFO_SPACE,
 		DBG_FIFO_DROPS => DBG_FIFO_DROPS,
 		DBG_GDI        => DBG_GDI,
-		DBG_RD_TOTAL   => DBG_RD_TOTAL
+		DBG_RD_TOTAL   => DBG_RD_TOTAL,
+		DBG_UNDERRUNS  => DBG_UNDERRUNS
 	);
 
 

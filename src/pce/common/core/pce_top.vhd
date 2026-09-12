@@ -335,6 +335,9 @@ entity pce_top is
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
 		CD_DBG_RD_TOTAL   : out unsigned(15 downto 0);
+		-- DATA IN bursts that ran dry mid-burst; see SCSI.vhd's BURST_RDY. 0 = the sector
+		-- gate is doing its job.
+		CD_DBG_UNDERRUNS  : out unsigned(15 downto 0);
 		CD_DM			: in  std_logic;
 
 		CDDA_SL		: out signed(15 downto 0);
@@ -1272,6 +1275,7 @@ begin
 		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
 		DBG_GDI        => CD_DBG_GDI,
 		DBG_RD_TOTAL   => CD_DBG_RD_TOTAL,
+		DBG_UNDERRUNS  => CD_DBG_UNDERRUNS,
 
 		CD_REGION   => CD_REGION,
 		CD_RESET		=> CD_RESET,
@@ -1321,6 +1325,7 @@ begin
 	CD_DBG_FIFO_DROPS <= (others => '0');
 	CD_DBG_GDI        <= (others => '0');
 	CD_DBG_RD_TOTAL   <= (others => '0');
+	CD_DBG_UNDERRUNS  <= (others => '0');
 	CD_RESET    <= '0';
 	CDDA_SL     <= (others => '0');
 	CDDA_SR     <= (others => '0');

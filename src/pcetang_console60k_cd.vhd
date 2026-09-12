@@ -1127,6 +1127,7 @@ architecture rtl of pcetang_console60k_cd is
    signal hb_alt            : std_logic := '0';
    signal cd_quiet_ct       : unsigned(19 downto 0) := (others => '0');
    signal cd_link_busy      : std_logic := '0';
+   signal scsi_underruns_i  : unsigned(15 downto 0);
    signal scsi_rd_total_i   : unsigned(15 downto 0);
    signal cd_dbg_state_i    : std_logic_vector(4 downto 0) := (others => '0');
    -- Opcodes of the first eight commands of the boot sequence, one byte each, oldest
@@ -2427,6 +2428,7 @@ begin
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
       CD_DBG_RD_TOTAL   => scsi_rd_total_i,
+      CD_DBG_UNDERRUNS  => scsi_underruns_i,
       CD_DM => cd_dm_i,
 
       CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s, PSG_SL => psg_sl, PSG_SR => psg_sr,
@@ -2877,10 +2879,15 @@ begin
                dbg_trace_tag <= x"AF";
                -- [63:48] SECTOR_DATA_VALID pulses | [47:32] CD_DATA_WR pulses
                -- | [31:16] SECTOR_REQ pulses | [15:0] 0
+               -- [15:0] was padding; now DATA IN bursts that ran dry mid-burst. This is
+               -- THE number that says whether SCSI.vhd's sector gate works on real
+               -- hardware: 0 means every burst was served from a full FIFO, nonzero means
+               -- the CPU reread stale bytes and the sector is corrupt. Without it, "the
+               -- game still does not boot" and "the gate is not working" look identical.
                dbg_trace_data <= std_logic_vector(sd_valid_cnt)
                                  & std_logic_vector(cd_wr_cnt)
                                  & std_logic_vector(sect_req_cnt)
-                                 & x"0000";
+                                 & std_logic_vector(scsi_underruns_i);
             elsif dbg_hb_cnt = 0 and cd_rot_left /= 0 and toc_sent_cnt = 4 then
                sum_alt <= "0001";
                -- 0xAE, re-emitted every heartbeat so the LAST one in the log is current.
