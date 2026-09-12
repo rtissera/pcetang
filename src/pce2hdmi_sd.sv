@@ -508,6 +508,32 @@ reg [7:0] vt_frac = 8'd0;                             // sigma-delta accumulator
 reg out_frame_tog = 1'b0;
 reg [9:0] vs_cy_snap = 10'd0;
 
+// The servo below is SPREAD OVER FOUR CYCLES, and that is the whole reason it exists in
+// this shape (2026-09-12). It used to run as one combinational blob in the single cycle
+// where cx/cy hit the last pixel of the frame: a 13-bit wrap, a 24-bit PI update, a
+// sigma-delta, and two saturating clamps, all between one pair of flops. gw_sh measured it
+// at 42 levels of logic and -1.692 ns on clk_pixel (74.25 MHz, 13.47 ns) -- comfortably the
+// worst path on the board, and 33 of its 35 violated endpoints.
+//
+// It never needed to be fast. It runs ONCE PER OUTPUT FRAME, so the real budget is ~16.7 ms,
+// or about 1.24 million clk_pixel cycles, and it was being asked to close in one. Splitting
+// it into four stages costs four cycles of a budget that large and nothing else.
+//
+// It is also timing-transparent. hdmi.sv latches `vtotal_extra_lat <= vtotal_extra` on that
+// same last-pixel edge, so a new value has ALWAYS taken effect one frame later, never the
+// current one; settling four cycles after the edge instead of on it changes nothing that
+// anything downstream can observe. frameHeight is captured into fh_lat at the frame edge for
+// the same reason -- it moves when vtotal_extra_lat moves, and stage 1 must see the value
+// the original combinational version saw.
+reg [2:0]         servo_st = 3'd0;
+reg [9:0]         vs_cy_lat;
+reg [9:0]         fh_lat;
+reg signed [12:0] e_r;
+reg signed [23:0] ctrl_r;
+reg [8:0]         sd_r;
+reg signed [16:0] tgt_r;
+reg signed [23:0] i_next_r;
+
 always_ff @(posedge clk_pixel) begin
 	reg signed [12:0] e;
 	reg signed [12:0] raw;
@@ -524,41 +550,62 @@ always_ff @(posedge clk_pixel) begin
 		vs_seen <= 1'b1;
 	end
 
-	// End of the output frame: the one instant vtotal_extra may change.
+	// End of the output frame: latch the inputs and start the servo.
 	if (cx == frameWidth - 1'b1 && cy == frameHeight - 1'b1) begin
 		if (vs_seen) begin
-			// Phase error about the target, wrapped signed so a source that starts just
-			// BEFORE the output frame reads as a small negative error rather than a
-			// nearly-full-frame positive one.
-			raw = $signed({3'b0, vs_cy}) - $signed(13'(VT_PHASE_TARGET));
-			if (raw < 13'sd0)
-				raw = raw + $signed({3'b0, frameHeight});
-			e = (raw > $signed({4'b0, frameHeight[9:1]}))
-			      ? raw - $signed({3'b0, frameHeight})
-			      : raw;
-
-			// PI, then sigma-delta the fractional part of the whole control value.
-			ctrl   = vt_i + ($signed({{11{e[12]}}, e}) <<< 5);   // Kp = 32/256 = 1/8
-			sd_sum = {1'b0, vt_frac} + {1'b0, ctrl[7:0]};
-			vt_frac <= sd_sum[7:0];
-			tgt    = $signed(ctrl[23:8]) + $signed({16'b0, sd_sum[8]});
-
-			if (tgt < $signed(17'(VT_LO)))      tgt = $signed(17'(VT_LO));
-			else if (tgt > $signed(17'(VT_HI))) tgt = $signed(17'(VT_HI));
-
-			// One line per frame, so the sink never sees an abrupt jump.
-			if      ($signed({9'b0, vtotal_extra}) < tgt) vtotal_extra <= vtotal_extra + 8'd1;
-			else if ($signed({9'b0, vtotal_extra}) > tgt) vtotal_extra <= vtotal_extra - 8'd1;
-
-			// Integral with anti-windup, clamped to the same authority as the output.
-			i_next = vt_i + $signed({{11{e[12]}}, e});  // Ki = 1/256
-			if (i_next < $signed(24'(VT_LO <<< 8)))      i_next = $signed(24'(VT_LO <<< 8));
-			else if (i_next > $signed(24'(VT_HI <<< 8))) i_next = $signed(24'(VT_HI <<< 8));
-			vt_i <= i_next;
+			vs_cy_lat <= vs_cy;
+			fh_lat    <= frameHeight;
+			servo_st  <= 3'd1;
 		end
 		vs_seen <= 1'b0;
 		out_frame_tog <= ~out_frame_tog;   // one flip per output frame
 		vs_cy_snap    <= vs_cy;            // snapshot at the same instant the servo acts
+	end else begin
+		case (servo_st)
+			3'd1: begin
+				// Phase error about the target, wrapped signed so a source that starts
+				// just BEFORE the output frame reads as a small negative error rather
+				// than a nearly-full-frame positive one.
+				raw = $signed({3'b0, vs_cy_lat}) - $signed(13'(VT_PHASE_TARGET));
+				if (raw < 13'sd0)
+					raw = raw + $signed({3'b0, fh_lat});
+				e_r <= (raw > $signed({4'b0, fh_lat[9:1]}))
+				         ? raw - $signed({3'b0, fh_lat})
+				         : raw;
+				servo_st <= 3'd2;
+			end
+			3'd2: begin
+				// PI, then sigma-delta the fractional part of the whole control value.
+				ctrl   = vt_i + ($signed({{11{e_r[12]}}, e_r}) <<< 5);  // Kp = 32/256 = 1/8
+				sd_sum = {1'b0, vt_frac} + {1'b0, ctrl[7:0]};
+				ctrl_r  <= ctrl;
+				sd_r    <= sd_sum;
+				vt_frac <= sd_sum[7:0];
+				tgt_r   <= $signed(ctrl[23:8]) + $signed({16'b0, sd_sum[8]});
+				servo_st <= 3'd3;
+			end
+			3'd3: begin
+				tgt = tgt_r;
+				if (tgt < $signed(17'(VT_LO)))      tgt = $signed(17'(VT_LO));
+				else if (tgt > $signed(17'(VT_HI))) tgt = $signed(17'(VT_HI));
+
+				// One line per frame, so the sink never sees an abrupt jump.
+				if      ($signed({9'b0, vtotal_extra}) < tgt) vtotal_extra <= vtotal_extra + 8'd1;
+				else if ($signed({9'b0, vtotal_extra}) > tgt) vtotal_extra <= vtotal_extra - 8'd1;
+
+				// Integral with anti-windup, clamped to the same authority as the output.
+				i_next_r <= vt_i + $signed({{11{e_r[12]}}, e_r});      // Ki = 1/256
+				servo_st <= 3'd4;
+			end
+			3'd4: begin
+				i_next = i_next_r;
+				if (i_next < $signed(24'(VT_LO <<< 8)))      i_next = $signed(24'(VT_LO <<< 8));
+				else if (i_next > $signed(24'(VT_HI <<< 8))) i_next = $signed(24'(VT_HI <<< 8));
+				vt_i <= i_next;
+				servo_st <= 3'd0;
+			end
+			default: servo_st <= 3'd0;
+		endcase
 	end
 end
 
