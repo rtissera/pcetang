@@ -242,3 +242,41 @@ either.** A clean gw_sh run proves synthesis and timing. It does not prove a pic
 - **UART RX margin is thin** — FIFO high-water 25 of 32 bytes.
 - Trace counters are 16-bit and have been misread via wraparound three times. Widen
   before trusting them again.
+
+## CD on real hardware — measured 2026-09-13
+
+The CD data path now delivers sectors **cleanly on real hardware**. This is the first time
+that has been true, and it is measured from the board's own counters, not inferred:
+
+| disc | commands | bytes from MCU | underruns | FIFO drops |
+|---|---|---|---|---|
+| Dungeon Explorer II | 8 | 12288 = exactly 6.00 sectors | 0 | 0 |
+| Prince of Persia | 7 | 36864 = exactly 18.00 sectors | 0 | 0 |
+| Bonk III | 6 | 0 | 0 | 0 |
+
+Prince of Persia sustaining eighteen consecutive sectors with zero underruns is the
+strongest evidence that the two DATA IN fixes in `SCSI.vhd` hold at real UART timing, not
+only in simulation.
+
+**No CD game boots yet.** Three different failures remain, and they are not the same bug:
+
+* **Dungeon Explorer II** loads its first 6 sectors correctly and then stops at command 8 --
+  it never issues the `de 02 34` that the reference shows next. Black screen. In simulation
+  the identical RTL issues commands 9, 10 and 11 and completes the boot, so the board
+  diverges *after* correct data has arrived. Leading suspect is CD-RAM: the system card
+  writes loaded sectors there and executes from them, simulation models CD-RAM as an ideal
+  array, and the board uses the SDRAM window. CD-RAM has only ever been tested by a
+  standalone sweep, never under concurrent CPU-and-bridge load.
+* **Prince of Persia** takes 18 sectors and then returns to the RUN prompt.
+* **Bonk III** never receives a byte. Its CHD has `hunkbytes=2448, sectors_per_hunk=1`
+  where Dungeon Explorer II has `19584, 8`; `DECODE-START` is logged and no `SERVED` ever
+  follows, so `chd_read` does not complete for that layout. That is a firmware/libchdr
+  issue, entirely separate from the SCSI work.
+
+### What the counters do and do not prove
+
+They prove the right NUMBER of bytes arrived and that the FIFO never ran dry or overflowed.
+They do not prove the byte VALUES are right, and they say nothing about what reached CD-RAM.
+Closing that gap is the next step: dump CD-RAM on hardware after the 6-sector load and
+compare it against the same region in simulation and against the reference bytes in
+`sim/cd/golden/`.

@@ -94,7 +94,12 @@ entity tb_cd_boot is
 		-- the ~1.3x speed of ghdl-llvm sets PROBE_EN=0 and gives up the MPR/bad-bank
 		-- diagnostics. An integer, not a boolean, because compiled backends can only
 		-- override integer and string generics.
-		PROBE_EN : integer := 1
+		PROBE_EN : integer := 1;
+		-- Dump the CD-RAM region the system card has written, once this many sectors have
+		-- been served. 0 = off. This is the reference for comparing against a dump taken
+		-- on real hardware, where CD-RAM is SDRAM rather than an ideal array.
+		CDRAM_DUMP_AFTER : integer := 0;
+		CDRAM_DUMP_BYTES : integer := 512
 	);
 end entity;
 
@@ -143,6 +148,7 @@ architecture sim of tb_cd_boot is
 	-- Bytes the producer has pulsed SECTOR_DATA_VALID for, visible every heartbeat so
 	-- 'the producer stalled' and 'the consumer missed pulses' can be told apart.
 	signal served_sig     : integer := 0;
+	signal sector_served_cnt : integer := 0;
 
 	-- video
 	signal video_vs, video_hs, video_vbl, video_hbl, video_ce : std_logic;
@@ -521,11 +527,50 @@ begin
 	-- 'U', and numeric_std's to_integer then emits a metavalue warning EVERY clock -- the
 	-- first run of this testbench wrote a 19.4 GB log and filled the disk.
 	cdram_proc : process (clk)
+		variable lo, hi, nw : integer := -1;
+		variable l : line;
+		variable dumped : boolean := false;
 	begin
 		if rising_edge(clk) then
+			-- CD-RAM write-extent tracking. The point of comparison for a hardware dump is
+			-- "what did the system card put in CD-RAM, and where", so record the address
+			-- range it touches and print the region once a chosen number of sectors has
+			-- been delivered. Simulation models CD-RAM as this plain array, so it CANNOT
+			-- reproduce an SDRAM fault -- which is exactly why this is the reference side
+			-- of the comparison and the board is the side under test.
+			if CDRAM_DUMP_AFTER > 0 and not dumped
+			   and sector_served_cnt >= CDRAM_DUMP_AFTER then
+				dumped := true;
+				write(l, string'("[cdram] after ")); write(l, sector_served_cnt);
+				write(l, string'(" sectors: writes=")); write(l, nw);
+				if lo >= 0 then
+					write(l, string'("  range=0x")); write(l, to_hstring(to_unsigned(lo,24)));
+					write(l, string'("..0x")); write(l, to_hstring(to_unsigned(hi,24)));
+				end if;
+				writeline(output, l);
+				if lo >= 0 then
+					for a in lo to minimum(hi, lo + CDRAM_DUMP_BYTES - 1) loop
+						if (a - lo) mod 32 = 0 then
+							if a > lo then writeline(output, l); end if;
+							write(l, string'("[cdram] "));
+							write(l, to_hstring(to_unsigned(a, 24)));
+							write(l, string'(": "));
+						end if;
+						write(l, to_hstring(cdram(a)));
+					end loop;
+					writeline(output, l);
+				end if;
+			end if;
 			if not is_x(cd_ram_a_s(17 downto 0)) then
 				if cd_ram_wr_s = '1' then
 					cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0)))) := cd_ram_do_s;
+					nw := nw + 1;
+					if lo < 0 or to_integer(unsigned(cd_ram_a_s(17 downto 0))) < lo then
+						lo := to_integer(unsigned(cd_ram_a_s(17 downto 0)));
+					end if;
+					if to_integer(unsigned(cd_ram_a_s(17 downto 0))) > hi then
+						hi := to_integer(unsigned(cd_ram_a_s(17 downto 0)));
+					end if;
 				end if;
 				cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
 			end if;
@@ -621,6 +666,7 @@ begin
 		else
 			lba := to_integer(unsigned(sector_lba_s));
 		end if;
+		sector_served_cnt <= sector_served_cnt + 1;
 		write(l, string'("[sector] req LBA ")); write(l, lba);
 		write(l, string'("  served_total=")); write(l, served_total);
 		slot := -1;
