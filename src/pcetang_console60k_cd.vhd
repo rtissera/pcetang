@@ -1108,7 +1108,20 @@ architecture rtl of pcetang_console60k_cd is
    -- silently changing the meaning of the stream. 680 frames over a boot is ~3.4 ms of
    -- link time in total, so the wasted 32 bits per frame cost nothing and buy a single
    -- 64:1 read mux instead of four.
-   constant CDREG_STREAM : boolean := true;
+   -- OFF (2026-09-13). Turning this on regressed real hardware: the CPU issued all six
+   -- of the boot's opening commands and asked the MCU for LBA 3590, and the MCU never saw
+   -- the request -- no cdprog/DECODE-START/SERVED line for that run at all, while earlier
+   -- runs in the same log served it correctly. A frame per CD register access is ~110
+   -- frames (~1 KB at 2 Mbaud) before the first READ even happens, and the BL616's polled
+   -- RX has ~7 bytes of margin (rxhi=21 of 32): it desyncs and swallows the opcode-6
+   -- sector request along with the trace. This is the hazard already recorded in
+   -- pcetang_trace_channel_vs_cd_protocol.md, and gating on cd_link_busy is not enough
+   -- because the flood happens BEFORE any sector transfer is in flight.
+   --
+   -- Re-enable only with the link problem solved first -- chunk-level flow control, or a
+   -- second wire. Until then the golden-trace diff has to come from simulation, which
+   -- reproduces the full boot anyway.
+   constant CDREG_STREAM : boolean := false;
    type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
    signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
    -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
