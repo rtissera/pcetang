@@ -41,21 +41,33 @@ different claims.
 
 ### What works on the CD path
 
-The CD data path is verified **byte-for-byte against a reference implementation**. An
-instrumented build of beetle-pce-fast produces a golden trace of every SCSI command and
-every sector it reads; the board's own served-sector log is diffed against it. On four
-discs (Dungeon Explorer II, Prince of Persia, Bonk III, Double Dragon II) every sector
-matches in both LBA and data, and the system card's boot command sequence matches
-command-for-command. See [docs/ANNOUNCEMENT.md](docs/ANNOUNCEMENT.md) §0 for how that
-trace is captured.
+**In simulation, the system card completes a full boot.** `sim/cd/tb_cd_boot.vhd` runs the
+real system card against the real `cd_bridge` and a real disc's sectors, and it issues all
+eleven SCSI commands an instrumented mednafen boot of Dungeon Explorer II issues, in the
+same order, then a twelfth the reference capture never recorded — the game loading itself.
+All 31 boot sectors, 63488 bytes, compare **byte-identical** to that reference, with zero
+FIFO drops and zero DATA IN underruns.
+
+The reference and the tooling to diff against it are in the repo: `sim/cd/golden/` holds
+the decoded boot (the 680 register accesses that remain once the busy-poll and the sector
+payload are filtered out, plus the per-command reply bytes), and `scripts/cd_golden_diff.py`
+normalises a mednafen trace, a GHDL log or a hardware trace to one token stream and reports
+the first divergence.
 
 ### What does not
 
-Games load, hand control to game code, and then fail with a dark screen. The CPU runs at
-full speed with VBlank interrupts firing and no bad-bank trap, but stops programming the
-video chip — which is what a game waiting on something that never arrives looks like.
-CD-RAM has been ruled out (a full 256KB address-derived read-back sweep passes). The
-current suspect is the CD interrupt path.
+**No CD game boots on real hardware yet.** The simulation result above is a strong claim
+about the RTL and a weak one about the board: it does not model SDRAM, the BL616 companion,
+or real UART timing.
+
+An earlier version of this section claimed the CD data path was "verified byte-for-byte on
+four discs". That claim was wrong. It rested on a probe that captured the first eight bytes
+of each sector; when the whole sector was finally compared against the reference, sectors
+were corrupt from byte 91 onward. Two real faults were behind it, both in `SCSI.vhd`'s DATA
+IN path — a burst that ran across sector boundaries, and `CD_DATA_END` being asserted early
+so `cd_bridge` completed a multi-sector read while data was still streaming. Both are fixed;
+the byte-for-byte claim is only made for simulation, because that is the only place it has
+actually been checked end to end.
 
 ## Building
 
@@ -64,10 +76,22 @@ inside its own `libgwsyn.so` on these designs):
 
     gw_sh build_console60k_cd.tcl      # also build_primer25k_cd.tcl, build_nano20k_cd.tcl
 
-Simulation (GHDL) for the CD bridge and the FIFOs:
+Simulation (GHDL). The unit suites take seconds and need no ROM or disc image:
 
-    cd sim/cd && ghdl -a --std=08 --workdir=work ../../src/pce/common/core/cd_bridge.vhd tb_cd_bridge.vhd
-    ghdl -e --std=08 --workdir=work tb_cd_bridge && ghdl -r --std=08 --workdir=work tb_cd_bridge
+    sim/cd/run_cd_bridge.sh      # 18 cd_bridge checks, incl. the 11 real boot commands
+    sim/cd/run_scsi_phase.sh     # SCSI phase lines + a 2048-byte burst at real MCU pace
+
+The full-system boot simulation needs a system card and a sector slice, and is much faster
+on GHDL's LLVM backend than on mcode (about 3.5 s versus 30 s of wall clock per simulated
+millisecond):
+
+    scripts/cd_toc.py game.chd > toc.txt
+    chdman extractcd -i game.chd -o g.cue -ob g.bin
+    scripts/cd_slice.py g.bin --lbas 3588-3600,3620-3632,11940-11975,12070-12078 > sec.hex
+    TOC_FILE=toc.txt SECTOR_CNT=80 sim/cd/run_cd_boot_llvm.sh syscard3.pce sec.hex
+
+See the header of `run_cd_boot_llvm.sh` for the three things ghdl-llvm needs before it will
+start at all.
 
 The MCU-side firmware lives in a separate repo (a fork of nand2mario's
 `firmware-bl616`); the CD sector server is `core/pcecd.cpp` there.

@@ -7,3 +7,7 @@ sim/*/work/
 # Python bytecode from scripts/
 __pycache__/
 *.pyc
+
+# Local AI-assistant working notes, deliberately untracked
+CLAUDE.md
+docs/ANNOUNCEMENT.md
