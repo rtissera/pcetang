@@ -27,9 +27,14 @@ entity tb_cd_boot is
 		ROM_FILE   : string  := "rom.bin";
 		-- pce_top's ROM_SZ bucket. X"080" = 512K, matching a 524288-byte HuCard --
 		-- the same value the board's own rom_sz_r traced as on real hardware.
-		ROM_SZ_G   : std_logic_vector(11 downto 0) := X"080";
-		SGX_G      : std_logic := '1';
-		CD_EN_G    : std_logic := '0';
+		-- CD-appropriate defaults (2026-09-12). A COMPILED ghdl backend (gcc/llvm) cannot
+		-- override std_logic or std_logic_vector generics at run time -- it rejects them
+		-- with "unhandled type for generic override" -- while mcode's -r can. Strings and
+		-- integers override fine on both. Since this testbench only ever runs a CD boot,
+		-- these three now default to what that needs, and neither runner has to pass them.
+		ROM_SZ_G   : std_logic_vector(11 downto 0) := X"040";
+		SGX_G      : std_logic := '0';
+		CD_EN_G    : std_logic := '1';
 		-- Simulated wall-clock to run for, in microseconds. One PCE frame is ~16.7 ms.
 		RUN_US     : integer := 120000;
 		-- Print every VDC/VCE register write (verbose) or just the summary.
@@ -81,7 +86,14 @@ entity tb_cd_boot is
 		-- clk_pce cycles between served bytes. 214 is the real 2Mbaud UART pace (a sector
 		-- then takes ~10ms of simulated time); lower it when the question under test is
 		-- not the pacing itself, to finish a run in minutes rather than an hour.
-		SECTOR_BYTE_CYCLES : integer := 214
+		SECTOR_BYTE_CYCLES : integer := 214;
+		-- The `probe` process is 16 VHDL-2008 external names deep into the DUT, including
+		-- CPU.CORE.MPR_DBG. Those work under GHDL's mcode backend and abort with "NULL
+		-- access dereferenced" at time 0 under both compiled backends, so a run that wants
+		-- the ~1.3x speed of ghdl-llvm sets PROBE_EN=0 and gives up the MPR/bad-bank
+		-- diagnostics. An integer, not a boolean, because compiled backends can only
+		-- override integer and string generics.
+		PROBE_EN : integer := 1
 	);
 end entity;
 
@@ -110,6 +122,26 @@ architecture sim of tb_cd_boot is
 
 	signal dbg_cpu_a_s  : std_logic_vector(20 downto 0);
 	signal dbg_vdc_wr_s : std_logic;
+	-- The CPU bus, taken from pce_top's REAL debug ports rather than VHDL-2008 external
+	-- names. cdregmon used `alias cpu_a is << signal dut.CPU_A >>` and friends, which
+	-- work under GHDL's mcode backend and fail with "NULL access dereferenced" at time 0
+	-- under both compiled backends (gcc and llvm). Since pce_top already exports exactly
+	-- these signals, the external names bought nothing and cost the faster backends.
+	signal dbg_cpu_wr_n_s : std_logic;
+	signal dbg_cpu_rd_n_s : std_logic;
+	signal dbg_cpu_do_s   : std_logic_vector(7 downto 0);
+	signal dbg_cpu_di_s   : std_logic_vector(7 downto 0);
+	signal dbg_cpu_ce_s   : std_logic;
+	signal dbg_irq2_n_s   : std_logic;
+	signal dbg_irq1_n_s   : std_logic;
+	signal irq1_cnt_s     : integer := 0;
+	signal irq2_cnt_s     : integer := 0;
+	signal fifo_drops_s   : unsigned(15 downto 0);
+	signal underruns_s    : unsigned(15 downto 0);
+	signal fifo_space_s   : unsigned(12 downto 0);
+	-- Bytes the producer has pulsed SECTOR_DATA_VALID for, visible every heartbeat so
+	-- 'the producer stalled' and 'the consumer missed pulses' can be told apart.
+	signal served_sig     : integer := 0;
 
 	-- video
 	signal video_vs, video_hs, video_vbl, video_hbl, video_ce : std_logic;
@@ -374,6 +406,12 @@ begin
 		-- independent count via CPU_VDC0_SEL_N. If those two ever disagree, the
 		-- hardware number would be meaningless.
 		DBG_CPU_A => dbg_cpu_a_s, DBG_VDC_WR => dbg_vdc_wr_s,
+		DBG_CPU_WR_N => dbg_cpu_wr_n_s, DBG_CPU_RD_N => dbg_cpu_rd_n_s,
+		DBG_CPU_DO   => dbg_cpu_do_s,   DBG_CPU_DI   => dbg_cpu_di_s,
+		DBG_CPU_CE   => dbg_cpu_ce_s,   DBG_IRQ2_N => dbg_irq2_n_s,
+		DBG_IRQ1_N => dbg_irq1_n_s,
+		CD_DBG_FIFO_DROPS => fifo_drops_s, CD_DBG_UNDERRUNS => underruns_s,
+		CD_DBG_FIFO_SPACE => fifo_space_s,
 
 		ROM_RD    => rom_rd,
 		ROM_RDY   => rom_rdy,
@@ -425,7 +463,20 @@ begin
 	-- All four buttons (I, II, SELECT, RUN) rather than the single bit I guessed as RUN:
 	-- the first attempt pressed only bit 3 and the system card never left its wait loop,
 	-- and this removes the guess from the experiment. Directions stay released.
-	joy_in_s <= "0000" when (run_pressed = '1' and joy_out(0) = '0') else "1111";
+	-- RUN ONLY. This used to drive "0000", i.e. all four buttons at once, and that is
+	-- SELECT+RUN -- the PC Engine's soft-reset combination -- held for 120 ms and repeated
+	-- every 200 ms forever. The system card duly left its "PUSH RUN BUTTON" loop and then
+	-- never got anywhere: it sat in a display loop at $00296A-$00297B for over a second of
+	-- simulated time, drawing every frame and never touching the CD again after the
+	-- $18C5/C6/C7 signature read.
+	--
+	-- Mapping is the one the real board uses (pcetang_console60k_cd.vhd), active LOW:
+	--    SEL = 1 -> D0 UP, D1 RIGHT, D2 DOWN,   D3 LEFT
+	--    SEL = 0 -> D0 I,  D1 II,    D2 SELECT, D3 RUN
+	-- so RUN alone is "0111". An earlier attempt at bit 3 alone is recorded as having
+	-- failed, which is presumably why it was widened to all four; with the mapping above
+	-- confirmed against the shipping board, the narrow press is the correct one.
+	joy_in_s <= "0111" when (run_pressed = '1' and joy_out(0) = '0') else "1111";
 	-- PULSED, not held. Holding RUN from a fixed time onward means there is never a
 	-- press EDGE after the system card puts its prompt up -- a real person presses after
 	-- seeing it, and a card that debounces or edge-detects would ignore a button already
@@ -556,6 +607,10 @@ begin
 	sector_proc : process
 		variable lba, off, slot : integer;
 		variable l : line;
+		-- Bytes this process has handed to cd_bridge, cumulative. If the CPU is short of
+		-- data but this number says everything was delivered, the loss is downstream of
+		-- the producer -- which is the distinction the FIFO drop counter failed to make.
+		variable served_total : integer := 0;
 	begin
 		sector_dv_s   <= '0';
 		sector_last_s <= '0';
@@ -566,6 +621,7 @@ begin
 			lba := to_integer(unsigned(sector_lba_s));
 		end if;
 		write(l, string'("[sector] req LBA ")); write(l, lba);
+		write(l, string'("  served_total=")); write(l, served_total);
 		slot := -1;
 		for i in 0 to SECTOR_CNT - 1 loop
 			if sec_lba(i) = lba then slot := i; end if;
@@ -583,6 +639,8 @@ begin
 				end loop;
 				sector_data_s <= sec_img(off + i);
 				sector_dv_s   <= '1';
+				served_total := served_total + 1;
+				served_sig <= served_total + 1;
 				if i = 2047 then sector_last_s <= '1'; end if;
 				wait until rising_edge(clk);
 				sector_dv_s   <= '0';
@@ -595,8 +653,49 @@ begin
 	-- the data path is verified byte-for-byte and CD-RAM is verified across all 256KB,
 	-- yet games load and then stop. If the CD never interrupts the CPU, the BIOS's
 	-- transfer-complete wait never returns, which looks exactly like this from outside.
+	-- IRQ edge counters. A display loop that never advances while VBlank interrupts are
+	-- NOT arriving is a stuck wait; the same loop with interrupts arriving is just an
+	-- animation. These two counters are what tells those apart.
+	irqcnt : process (clk)
+		variable p1, p2 : std_logic := '1';
+	begin
+		if rising_edge(clk) then
+			if dbg_irq1_n_s = '0' and p1 = '1' then irq1_cnt_s <= irq1_cnt_s + 1; end if;
+			if dbg_irq2_n_s = '0' and p2 = '1' then irq2_cnt_s <= irq2_cnt_s + 1; end if;
+			p1 := dbg_irq1_n_s; p2 := dbg_irq2_n_s;
+		end if;
+	end process;
+
+	-- Progress marker for PROBE_EN=0 runs, where the heartbeat inside `probe` is gone.
+	-- Wakes once per simulated millisecond, not once per clock, so it costs nothing.
+	hb_lite : process
+		variable l : line;
+	begin
+		if PROBE_EN /= 0 then wait; end if;
+		loop
+			wait for 1 ms;
+			write(l, string'("HB ")); write(l, now);
+			-- Where is the CPU? dbg_cpu_a_s is a real pce_top port, so this costs one
+			-- signal read per simulated millisecond and works on the compiled backends
+			-- that the external-name version of this probe aborts.
+			write(l, string'("  cpu_a=")); write(l, hex(dbg_cpu_a_s));
+			write(l, string'("  irq1=")); write(l, irq1_cnt_s);
+			write(l, string'("  irq2=")); write(l, irq2_cnt_s);
+			-- Bytes the DATA IN FIFO threw away because it was full, and bursts that ran
+			-- dry. Either being nonzero names the failure without further guessing.
+			write(l, string'("  drops=")); write(l, integer'image(to_integer(fifo_drops_s)));
+			write(l, string'("  underrun=")); write(l, integer'image(to_integer(underruns_s)));
+			-- FIFO level. If a READ(6) stalls, this says whether the gate's 2048 threshold
+			-- is simply never reached -- e.g. the producer delivered exactly 2048 but the
+			-- level reads one short because the FIFO output is registered.
+			write(l, string'("  lvl=")); write(l, integer'image(4096 - to_integer(fifo_space_s)));
+			write(l, string'("  served=")); write(l, served_sig);
+			writeline(output, l);
+		end loop;
+	end process;
+
 	cdmon : process
-		alias cd_irq_n is << signal dut.CD_IRQ_N : std_logic >>;
+		alias cd_irq_n is dbg_irq2_n_s;   -- pce_top port, not an external name
 		variable l : line;
 		variable ncmd, nirq : integer := 0;
 		variable irq_r : std_logic := '1';
@@ -628,24 +727,34 @@ begin
 	-- in what it reads back from those. Bounded print count -- an unbounded per-cycle
 	-- print in this testbench once wrote a 19.4 GB log.
 	cdregmon : process
-		alias cpu_a    is << signal dut.CPU_A     : std_logic_vector(20 downto 0) >>;
-		alias cpu_do   is << signal dut.CPU_DO    : std_logic_vector(7 downto 0) >>;
-		alias cpu_di   is << signal dut.CPU_DI    : std_logic_vector(7 downto 0) >>;
-		alias cpu_wr_n is << signal dut.CPU_WR_N  : std_logic >>;
-		alias cpu_rd_n is << signal dut.CPU_RD_N  : std_logic >>;
-		alias cpu_ce   is << signal dut.CPU_CE    : std_logic >>;
+		-- Plain aliases onto pce_top's debug ports. NOT external names -- see the signal
+		-- declarations above for why that matters.
+		alias cpu_a    is dbg_cpu_a_s;
+		alias cpu_do   is dbg_cpu_do_s;
+		alias cpu_di   is dbg_cpu_di_s;
+		alias cpu_wr_n is dbg_cpu_wr_n_s;
+		alias cpu_rd_n is dbg_cpu_rd_n_s;
+		alias cpu_ce   is dbg_cpu_ce_s;
 		variable l : line;
 		variable n : integer := 0;
 		variable lo : std_logic_vector(11 downto 0);
 	begin
 		wait until rising_edge(clk);
-		if cpu_ce = '1' and n < 2000 and not is_x(cpu_a) then
+		if cpu_ce = '1' and n < 200000 and not is_x(cpu_a) then
 			lo := cpu_a(11 downto 0);
 			-- PHYSICAL address, not logical. The PCE I/O page is bank $FF, i.e.
 			-- 0x1FE000-0x1FFFFF, so the CD registers ($1800 in the page) are at
 			-- 0x1FF800 and the pad ($1000) at 0x1FF000. Decoding the logical form is
 			-- why the first version of this probe printed nothing at all.
-			if cpu_a(20 downto 10) = "11111111110" then      -- 0x1FF800: CD registers
+			if cpu_a(20 downto 10) = "11111111110"            -- 0x1FF800: CD registers
+			   and not (cpu_a(9 downto 0) = "0000000000"
+			            and cpu_wr_n = '1') then              -- drop RD $1800 (busy poll)
+				-- $1808 IS logged: the reference trace carries all 63488 sector bytes with
+				-- their values, so the bytes the CPU actually loads can be diffed against a
+				-- boot that works. That is the one comparison that says whether the code it
+				-- jumps into is the right code.
+				-- Exactly the filter sim/cd/golden/de2_boot_filtered.txt was built with, so
+				-- scripts/cd_golden_diff.py can compare the two streams directly.
 				if cpu_wr_n = '0' then
 					n := n + 1;
 					write(l, string'("[cdreg] WR $18")); write(l, hex(cpu_a(7 downto 0)));
@@ -763,6 +872,10 @@ begin
 		variable hb_next  : time := 0 ns;
 		variable first_vdc : time := 0 ns;
 	begin
+		if PROBE_EN = 0 then
+			wait;   -- see PROBE_EN in the generic clause
+		end if;
+
 		wait until reset = '0';
 		hb_next := now;
 

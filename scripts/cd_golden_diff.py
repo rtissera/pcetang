@@ -66,8 +66,13 @@ def normalise(path, with_polls=False):
             continue
         m = CDB_SIM.search(raw)
         if m:
+            # The testbench prints cd_comm as one hex number, so byte 0 of the CDB comes
+            # out LAST. Reverse it before comparing, or every command reads as a mismatch
+            # while actually matching -- which is exactly what this tool did at first.
             hexs = m.group(2).lower()
-            by = [hexs[i:i + 2] for i in range(0, len(hexs), 2)]
+            by = [hexs[i:i + 2] for i in range(0, len(hexs), 2)][::-1]
+            while by and by[0] == "00" and len(by) > 6:
+                by.pop(0)
             n_used = 10 if by[0] == "de" else 6
             by = (by + ["00"] * n_used)[:n_used]
             out.append(("CDB " + " ".join(by), n, raw.rstrip()))

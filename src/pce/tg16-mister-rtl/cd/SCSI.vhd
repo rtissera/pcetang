@@ -443,17 +443,54 @@ begin
 					
 					when SP_DATAIN_END =>
 						if REQ_Nr = '1' and ACK_N = '1' then
-							if EMPTY = '0' then
+							-- END THE BURST ON EVERY 2048-BYTE BOUNDARY for READ(6).
+							--
+							-- BURST_RDY only gates where a burst STARTS. Without this test a
+							-- burst that began with a full sector kept going while the FIFO
+							-- happened to be non-empty, ran straight through the sector
+							-- boundary into the next sector's bytes, and then ended wherever
+							-- the producer fell behind -- in the middle of a sector. The CPU
+							-- carries on reading its 2048, gets SCSI_DBI (zeros) once BSY
+							-- drops, and the sector is corrupt from that byte on.
+							--
+							-- Measured, against an instrumented mednafen boot of the same
+							-- disc: sectors 0-4 byte-perfect, sector 5 -- the third sector of
+							-- a 3-sector READ(6) -- correct to byte 90 then 1907 zeros.
+							--
+							-- The reference does exactly this: 31 separate bursts of exactly
+							-- 2048 bytes, with $1800 polls in between, because a real drive
+							-- hands over one buffered sector and stops. DATAIN_CNT resets on
+							-- SELECT, so bit 10..0 = all ones is the 2048th byte of a sector.
+							if EMPTY = '0'
+							   and not (COMM(0) = x"08"
+							            and DATAIN_CNT(10 downto 0) = "11111111111") then
 								DBO <= FIFO_Q;
 								REQ_Nr <= '0';
 								FIFO_RD_REQ <= '1';
 								SP <= SP_DATAIN_START;
+							elsif EMPTY = '0' then
+								-- Sector boundary with more data still queued: PAUSE the
+								-- burst, and deliberately do NOT pulse CD_DATA_END.
+								--
+								-- cd_bridge's SCSI_READ_WAIT_END completes the whole command
+								-- on CD_DATA_END, so pulsing it at every 2048-byte boundary
+								-- finishes a multi-sector READ(6) while later sectors are
+								-- still streaming: GOOD status goes out early, the FIFO keeps
+								-- bytes nobody asked for, and the next burst starts partway
+								-- into a sector. Measured as sector 5 arriving 4 bytes late
+								-- with drops=0 -- nothing was lost, the stream was misaligned.
+								SP <= SP_FREE;
 							else
-								-- End of the response, OR the FIFO ran dry mid-burst. The
-								-- second case is the corruption described at BURST_RDY, so
-								-- count it: ending on a 2048-byte boundary is a real sector
-								-- handover, anything else is an underrun.
-								if DATAIN_CNT(10 downto 0) /= "11111111111" then
+								-- FIFO empty: the response really is over. For a sector read
+								-- that means the last sector's 2048th byte; for a short reply
+								-- it is whatever length the reply was.
+								--
+								-- NOTE: UNDERRUNS as written counts every short response as an
+								-- underrun, because those legitimately end off a 2048-byte
+								-- boundary. Restricted to READ(6), where 2048 is the only
+								-- correct place to end.
+								if COMM(0) = x"08"
+								   and DATAIN_CNT(10 downto 0) /= "11111111111" then
 									UNDERRUNS <= UNDERRUNS + 1;
 								end if;
 								CD_DATA_END <= '1';
@@ -508,9 +545,27 @@ begin
 	DBG_SEL_CNT  <= SEL_COUNT;
 	DBG_FIFO_SPACE <= to_unsigned(4096, 13) - FIFO_LEVEL;
 	DBG_UNDERRUNS  <= UNDERRUNS;
-	-- A full sector is buffered, or the writer has gone quiet and the response is short.
+	-- A full sector is buffered, or -- for a command that is NOT a sector read -- the
+	-- writer has gone quiet and the short response is complete.
+	--
+	-- The opcode test is load-bearing (2026-09-13). The first version of this gate allowed
+	-- the idle path for ANY command, on the reasoning that the MCU's per-sector decode
+	-- stall happens while the FIFO is empty so it could not mis-fire mid-sector. That was
+	-- wrong: during the gap between two sectors of a multi-sector READ(6) the FIFO can hold
+	-- a PARTIAL sector, and the idle timer then opens the gate on it. A real boot
+	-- simulation caught it -- the 6th sector of the boot (LBA 3626, the third sector of a
+	-- 3-sector read) arrived correct for 90 bytes and was then followed by 1907 zero bytes,
+	-- which is what the CPU reads once the target has left DATA IN and released BSY
+	-- ($1808 returns SCSI_DBI, not SCSI_DBO). Byte-for-byte against an instrumented
+	-- mednafen boot: sectors 0-4 perfect, sector 5 wrong from byte 91.
+	--
+	-- READ(6) is opcode 0x08 and its response is ALWAYS 2048 bytes, so for that command the
+	-- only correct condition is a full sector. Everything that answers with a short burst
+	-- (GETDIRINFO 2-4 bytes, REQUEST SENSE 18, READSUBQ 10) has a different opcode, so the
+	-- idle path still serves them and needs no length signal plumbed in from cd_bridge.
 	BURST_RDY <= '1' when FIFO_LEVEL >= 2048
-	                      or (EMPTY = '0' and FIFO_IDLE >= IDLE_MAX) else '0';
+	                      or (COMM(0) /= x"08"
+	                          and EMPTY = '0' and FIFO_IDLE >= IDLE_MAX) else '0';
 	DBG_FIRST8 <= DBG_BUF;
 	DBG_GDI <= DBG_GDI_BUF;
 	DBG_RD_TOTAL <= DBG_RD_CNT;
