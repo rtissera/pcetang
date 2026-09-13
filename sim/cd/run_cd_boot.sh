@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 # Real-syscard CD boot simulation: pce_top + cd_bridge + a real disc's sectors.
 #
 # sim/boot/run.sh ties the whole CD interface off (CD_STAT => x"00", CD_COMM => open,

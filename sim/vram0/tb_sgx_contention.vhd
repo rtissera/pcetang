@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
+
 -- SGX TWO-VDC CONTENTION VARIANT (2026-08-30): forked from tb_cg_check.vhd to answer a
 -- real, direct question -- if VDC1's own VRAM moved to SDRAM (a real EXT_VRAM1 lever
 -- for SGX, currently unbuilt -- see pcetang_status_matrix.md), sharing sdram.sv's

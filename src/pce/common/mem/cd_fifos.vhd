@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Gowin-clean replacements for TurboGrafx16_MiSTer's three Quartus dcfifo_mixed_widths
 -- megafunction wizard files (rtl/cd/SCSI_FIFO.vhd, CDDA_FIFO.vhd, CDSUBC_FIFO.vhd) --

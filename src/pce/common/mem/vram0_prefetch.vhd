@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- PCE PORT (2026-08-28): VDC-side BAT prefetch buffer for VRAM0. Sits BETWEEN huc6270's
 -- RAM_A/RAM_DI/RAM_DO/RAM_WE and vram0_cache's address_a/q_a/data_a/wren_a, transparently

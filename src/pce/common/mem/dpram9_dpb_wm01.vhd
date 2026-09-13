@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Direct Gowin DPX9B primitive instantiation, forcing WRITE_MODE0/1 = 2'b01
 -- (write-through) explicitly via defparam-equivalent generics, bypassing automatic

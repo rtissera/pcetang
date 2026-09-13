@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
+
 // PCE video to HDMI converter -- first cut, 2026-08-26.
 //
 // New file, not a port -- PCE's HuC6260 VCE outputs raw 9-bit RGB (VIDEO_R/G/B, 3 bits

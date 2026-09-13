@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 # SCSI.vhd phase-line property test. See the header of tb_scsi_phase.vhd.
 #   ./run_scsi_phase.sh [-gTURNAROUND_US=...]
 set -euo pipefail

@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
+
 -- SCSI.vhd phase-line property test, derived from a reference trace rather than from the
 -- implementation.
 --

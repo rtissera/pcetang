@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 
 # pcetang Phase 1: Tang Primer 25K, TangCore-integrated (iosys_bl616), HuCard-only,
 # EXT_VRAM0 (real Tang SDRAM V1.3 PMOD). Run from the repo root: gw_sh build_primer25k.tcl

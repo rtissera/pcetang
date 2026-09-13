@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 # Real-syscard CD boot simulation on GHDL's LLVM backend -- 8.6x faster than mcode
 # (3.5 s vs 30.4 s of wall clock per simulated ms), which is what makes a full 31-sector
 # boot reachable in about an hour instead of a day.

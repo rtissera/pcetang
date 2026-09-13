@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 
 # pcetang Phase 2: Tang Console 60K, CD/SCSI/ADPCM elaborated, full 64KB ADPCM RAM
 # (real CD-ROM2 spec) via a scandoubler-based HDMI path (pce2hdmi_sd.sv) instead of

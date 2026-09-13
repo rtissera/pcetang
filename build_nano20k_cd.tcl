@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 
 # RETRY 2026-08-30 (real, not reference-only) -- see pcetang_nano20k_cd.vhd's own header
 # for why this is being retried now (alternate PnR algorithm + ROM also moved to SDRAM)

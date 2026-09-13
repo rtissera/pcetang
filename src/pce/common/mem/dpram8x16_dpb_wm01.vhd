@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Direct Gowin DPB primitive instantiation, forcing WRITE_MODE0/1 = 2'b01 explicitly,
 -- same technique and same reason as dpram9_dpb_wm01.vhd (see that file's header for the

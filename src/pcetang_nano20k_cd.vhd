@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- pcetang Phase 1: Tang Nano 20K, TangCore-integrated (iosys_bl616: ROM load, joypad,
 -- OSD), full PCE+PCE-CD combo (NO_CD=>0), EXT_VRAM0=>1 (Nano 20K's whole engine does

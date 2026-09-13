@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Block RAM wrappers for the PC Engine / SuperGrafx / TurboGrafx-16 core, retargeted from
 -- Altera altsyncram to Gowin GW2AR/GW5A BSRAM inference.

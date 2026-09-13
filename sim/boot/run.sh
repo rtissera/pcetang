@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 #
 # Real-ROM boot simulation of pce_top. See tb_pce_boot.vhd's header for what this does
 # and does NOT prove.

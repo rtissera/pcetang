@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Real SCSI target for PCE-CD, shared across all 3 boards (2026-08-31, extended 2026-08-31b).
 --

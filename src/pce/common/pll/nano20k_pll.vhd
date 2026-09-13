@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Clock generation for the Tang Nano 20K (GW2AR-18C), PCE/SGX/TG16 core.
 --

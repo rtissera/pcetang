@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 """Diff a CD register/command stream against an instrumented-mednafen golden trace.
 
     scripts/cd_golden_diff.py golden/de2_registers.txt sim/cd/cdboot.log

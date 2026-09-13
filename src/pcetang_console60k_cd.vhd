@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- pcetang Phase 2: Tang Console 60K, the combined target -- PCE + PCE-CD + SGX all
 -- elaborated together (NO_CD=>0, LITE=>0, SGX=>'1'), not a separate SGX variant file.

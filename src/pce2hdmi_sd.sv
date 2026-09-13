@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
+
 // PCE video to HDMI via a line-doubling scandoubler -- new sibling to pce2hdmi.sv, not a
 // replacement. Used only by pcetang_console60k_cd.vhd's video path (see
 // docs/OVERHEAD.md sections 5-7 for the full real research and measurement history

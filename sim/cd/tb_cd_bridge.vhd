@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
+
 -- Real GHDL testbench for src/pce/common/core/cd_bridge.vhd, driven by a synthetic SCSI
 -- initiator (not SCSI.vhd itself -- that state machine's own bus-phase timing is donor,
 -- unmodified, real, and out of scope here) and a synthetic sector source, standing in for

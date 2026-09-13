@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 --
 -- Real-ROM boot testbench for pce_top, built to answer ONE question that several rounds
 -- of on-hardware probing could not: when a plain HuCard is loaded on Console 60K, does

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
 //
 // Port-B back-to-back same-line read test for sdram.sv.
 //

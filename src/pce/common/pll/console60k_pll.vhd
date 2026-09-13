@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- Clock generation for the Tang Console 60K (GW5AT-60B), PCE/SGX/TG16 core.
 --

@@ -1,4 +1,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Modifications copyright (c) 2026 Romain Tisserand.
+-- This file is derived from third-party code and is NOT original work of
+-- this project; only the changes made here are covered by the line above.
+-- See THIRD_PARTY_LICENSES.md for the upstream project, author and licence.
 
 -- Forked from upstream/tg16-mister rtl/huc6270.vhd (TurboGrafx16_MiSTer, traces to
 -- Gregory Estrade's FPGAPCE -- see THIRD_PARTY_LICENSES.md for the licensing situation on

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 """Emit a disc's TOC in the exact convention firmware-bl616's pcecd_read_toc() uses.
 
     scripts/cd_toc.py game.chd > de2_toc.txt

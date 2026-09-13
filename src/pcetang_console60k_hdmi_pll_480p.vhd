@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 
 -- 480p60 HDMI PLL for pcetang's Console 60K CD-capable scandoubler path
 -- (pcetang_console60k_cd.vhd + pce2hdmi_sd.sv, see docs/OVERHEAD.md sections 5-7).

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Modifications copyright (c) 2026 Romain Tisserand.
+// This file is derived from third-party code and is NOT original work of
+// this project; only the changes made here are covered by the line above.
+// See THIRD_PARTY_LICENSES.md for the upstream project, author and licence.
 
 // SDRAM controller for the ZX Spectrum Next core, retargeted to Gowin GW5A.
 //

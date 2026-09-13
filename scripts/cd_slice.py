@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 """Extract a sector slice from a chdman-extracted .bin, for sim/cd/tb_cd_boot.vhd.
 
     chdman extractcd -i game.chd -o game.cue -ob game.bin

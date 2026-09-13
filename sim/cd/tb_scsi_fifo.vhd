@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
+
 -- Regression test for the SCSI_FIFO show-ahead bubble (cd_fifos.vhd's own header calls
 -- this out as a KNOWN SIMPLIFICATION, "not yet verified", and asks for exactly this
 -- testbench before CD_EN is driven high in a real build).

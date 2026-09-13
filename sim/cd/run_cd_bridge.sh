@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+
 # cd_bridge unit + golden-vector tests. Seconds to run, no ROM, no disc image.
 #   ./run_cd_bridge.sh
 set -euo pipefail

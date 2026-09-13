@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 """Reference implementation of the ROM self-test checksum.
 
 pcetang_console60k_cd.vhd sweeps the loaded ROM back out of SDRAM between the end of the

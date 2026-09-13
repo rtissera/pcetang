@@ -1,4 +1,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+-- Modifications copyright (c) 2026 Romain Tisserand.
+-- This file is derived from third-party code and is NOT original work of
+-- this project; only the changes made here are covered by the line above.
+-- See THIRD_PARTY_LICENSES.md for the upstream project, author and licence.
 
 -- Forked from upstream/tg16-mister rtl/HUC6280/psg.vhd -- one change, search "GOWIN FIX":
 -- `DATA := CH(1).WF_DATA(...) xor "1000"` xors a 5-bit value (wavedata_t is

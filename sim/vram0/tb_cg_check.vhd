@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
+
 -- Real-trace measurement testbench for src/pce/common/mem/vram0_cache.vhd, driven by a
 -- REAL src/pce/common/core/huc6270.vhd (the VDC, unmodified) and a real
 -- src/pce/tg16-mister-rtl/huc6260.vhd (the VCE, unmodified, only source of DCK_CE/HSYNC/
