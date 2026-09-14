@@ -11,3 +11,10 @@ __pycache__/
 # Local AI-assistant working notes, deliberately untracked
 CLAUDE.md
 docs/ANNOUNCEMENT.md
+
+# Verilator build output and the generated copy of sdram.sv (see sim/sdram/run_sdram_test.sh)
+sim/sdram/obj_dir/
+sim/sdram/sdram_vlt.sv
+# GHDL work libraries
+sim/*/bootwork_llvm/
+sim/*/work/

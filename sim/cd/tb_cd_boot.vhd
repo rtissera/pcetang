@@ -98,8 +98,29 @@ entity tb_cd_boot is
 		-- Dump the CD-RAM region the system card has written, once this many sectors have
 		-- been served. 0 = off. This is the reference for comparing against a dump taken
 		-- on real hardware, where CD-RAM is SDRAM rather than an ideal array.
+		-- CD-RAM wait states, in clk_pce cycles. 0 keeps the original zero-latency model.
+		--
+		-- This is the single biggest sim/hardware gap found (2026-09-14): the board's
+		-- CD-RAM lives in SDRAM behind the cdr_owner arbiter and drops cd_ram_rdy_i on
+		-- EVERY access, stalling the CPU through `CPU_WAIT_N_I <= ROM_RDY and CD_RAM_RDY`
+		-- (pce_top.vhd:1379) for the whole SDRAM round trip -- the arbiter's settle window
+		-- alone is 16 clk_pce cycles. This testbench tied CD_RAM_RDY to '1', so the CPU was
+		-- never stalled once, and the model therefore CANNOT reproduce any fault that
+		-- depends on CD-RAM latency. The syscard reads $1808 in 2048-byte bursts with no
+		-- handshake and stores into CD-RAM, so on hardware every store in that burst
+		-- stalls the CPU and in simulation none of them do.
+		CDRAM_WAIT       : integer := 0;
 		CDRAM_DUMP_AFTER : integer := 0;
-		CDRAM_DUMP_BYTES : integer := 512
+		CDRAM_DUMP_BYTES : integer := 512;
+		-- Write one PPM per output frame, starting at this frame number. 0 = off.
+		-- The point: every other check in this testbench proves the CD TRANSACTIONS are
+		-- right -- commands matching the reference, sectors byte-identical. None of them
+		-- prove the machine is running the GAME. The system card can load perfect data,
+		-- jump into it and execute rubbish, and the SCSI log would look exactly the same.
+		-- A picture is the only thing that distinguishes "loaded the disc" from "booted".
+		FRAME_DUMP_FROM : integer := 0;
+		FRAME_DUMP_N    : integer := 0;
+		FRAME_DIR       : string  := ""
 	);
 end entity;
 
@@ -235,6 +256,7 @@ architecture sim of tb_cd_boot is
 	signal cd_ram_a_s    : std_logic_vector(21 downto 0);
 	signal cd_ram_do_s   : std_logic_vector(7 downto 0);
 	signal cd_ram_di_s   : std_logic_vector(7 downto 0) := x"00";
+	signal cd_ram_rdy_s  : std_logic := '1';
 
 	-- Sector slice, read once at elaboration.
 	type sec_t is array (0 to SECTOR_CNT*2048 - 1) of std_logic_vector(7 downto 0);
@@ -438,7 +460,7 @@ begin
 
 		CD_EN => disc_mounted_s, CD_RAM_A => cd_ram_a_s, CD_RAM_DO => cd_ram_do_s,
 		CD_RAM_DI => cd_ram_di_s, CD_RAM_RD => cd_ram_rd_s, CD_RAM_WR => cd_ram_wr_s,
-		CD_RAM_RDY => '1',
+		CD_RAM_RDY => cd_ram_rdy_s,
 
 		ADPCM_RAM_A => open, ADPCM_RAM_DO => open,
 		ADPCM_RAM_WE => adpcm_we_s, ADPCM_RAM_REQ => adpcm_req_s,
@@ -530,6 +552,8 @@ begin
 		variable lo, hi, nw : integer := -1;
 		variable l : line;
 		variable dumped : boolean := false;
+		variable cd_ram_rd_prev : std_logic := '0';
+		variable cdrd_n : integer := 0;
 	begin
 		if rising_edge(clk) then
 			-- CD-RAM write-extent tracking. The point of comparison for a hardware dump is
@@ -561,6 +585,23 @@ begin
 					writeline(output, l);
 				end if;
 			end if;
+			-- CD-RAM READ LOG (2026-09-13). Mirrors the board's 0xC0-0xC8 snoop so the
+			-- two can be diffed directly. The board, after the boot's 8th command, reads
+			-- bank $68 correctly (0x10003 -> 0x4C, matching this model) and then reads
+			-- bank $83 (CPU_A(17:0) = 0x06xxx, the base CD-ROM2 64K RAM) getting mostly
+			-- 0x55 -- and restarts instead of issuing command 9. This says whether the
+			-- known-good model reads that same region, and what it finds there.
+			if cd_ram_rd_s = '1' and cd_ram_rd_prev = '0'
+			   and not is_x(cd_ram_a_s(17 downto 0)) and cdrd_n < 40 then
+				cdrd_n := cdrd_n + 1;
+				write(l, string'("[cdrd] a=0x"));
+				write(l, to_hstring(to_unsigned(to_integer(unsigned(cd_ram_a_s(17 downto 0))), 24)));
+				write(l, string'(" d=0x"));
+				write(l, to_hstring(cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))))));
+				writeline(output, l);
+			end if;
+			cd_ram_rd_prev := cd_ram_rd_s;
+
 			if not is_x(cd_ram_a_s(17 downto 0)) then
 				if cd_ram_wr_s = '1' then
 					cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0)))) := cd_ram_do_s;
@@ -574,6 +615,42 @@ begin
 				end if;
 				cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
 			end if;
+		end if;
+	end process;
+
+	-- CD-RAM wait-state model (see CDRAM_WAIT's own comment). Mirrors the board's
+	-- arbiter handshake shape rather than its internals: ready drops on the cycle an
+	-- access is accepted and comes back CDRAM_WAIT cycles later. cd_ram_di_s is already
+	-- driven combinationally from the array by the process above, so the data is valid
+	-- when ready returns, exactly as the board publishes cd_ram_di_i at completion.
+	cdram_wait_model : process(clk)
+		variable cnt      : integer := 0;
+		variable busy     : boolean := false;
+		variable rd_prev  : std_logic := '0';
+		variable wr_prev  : std_logic := '0';
+	begin
+		if rising_edge(clk) then
+			if CDRAM_WAIT = 0 then
+				cd_ram_rdy_s <= '1';
+			else
+				if not busy then
+					if (cd_ram_rd_s = '1' and rd_prev = '0')
+					   or (cd_ram_wr_s = '1' and wr_prev = '0') then
+						busy := true;
+						cnt  := CDRAM_WAIT;
+						cd_ram_rdy_s <= '0';
+					end if;
+				else
+					if cnt > 0 then
+						cnt := cnt - 1;
+					else
+						busy := false;
+						cd_ram_rdy_s <= '1';
+					end if;
+				end if;
+			end if;
+			rd_prev := cd_ram_rd_s;
+			wr_prev := cd_ram_wr_s;
 		end if;
 	end process;
 
@@ -1159,6 +1236,73 @@ begin
 	end process;
 
 	-- ------------------------------------------------------------- stop clock
+	-- Frame grabber. VIDEO_CE is the dot-clock enable, VIDEO_HBL/VBL the blanking, so a
+	-- frame is reconstructed by counting active dots between blanking edges. Output is
+	-- binary PPM (P6), 8 bits per channel from the PCE's native 3.
+	framedump : process
+		file f          : text;
+		variable st     : file_open_status;
+		variable l      : line;
+		variable x, y   : integer := 0;
+		variable frame  : integer := 0;
+		variable prev_vbl : std_logic := '1';
+		variable written : integer := 0;
+		type row_t is array (0 to 559) of std_logic_vector(8 downto 0);
+		type img_t is array (0 to 279) of row_t;
+		variable img    : img_t;
+		variable px     : std_logic_vector(8 downto 0);
+	begin
+		if FRAME_DUMP_N = 0 then wait; end if;
+		loop
+			wait until rising_edge(clk);
+			if video_ce = '1' then
+				if video_hbl = '0' and video_vbl = '0' then
+					if y <= 279 and x <= 559 then
+						img(y)(x) := video_r & video_g & video_b;
+					end if;
+					x := x + 1;
+				end if;
+			end if;
+			if video_hbl = '1' and x > 0 then
+				x := 0; y := y + 1;
+			end if;
+			-- falling edge of VBL = start of a new visible frame
+			if video_vbl = '0' and prev_vbl = '1' then
+				if frame >= FRAME_DUMP_FROM and written < FRAME_DUMP_N and y > 8 then
+					file_open(st, f, FRAME_DIR & "/frame_" &
+					          integer'image(frame) & ".ppm", write_mode);
+					if st = open_ok then
+						write(l, string'("P3")); writeline(f, l);
+						write(l, integer'image(512)); write(l, string'(" "));
+						write(l, integer'image(240)); writeline(f, l);
+						write(l, string'("255")); writeline(f, l);
+						for yy in 0 to 239 loop
+							for xx in 0 to 511 loop
+								px := img(yy)(xx);
+								-- 3 bits -> 8 bits, replicate so 7 maps to 255
+								write(l, integer'image(to_integer(unsigned(px(8 downto 6))) * 36));
+								write(l, string'(" "));
+								write(l, integer'image(to_integer(unsigned(px(5 downto 3))) * 36));
+								write(l, string'(" "));
+								write(l, integer'image(to_integer(unsigned(px(2 downto 0))) * 36));
+								write(l, string'(" "));
+							end loop;
+							writeline(f, l);
+						end loop;
+						file_close(f);
+						written := written + 1;
+						write(l, string'("[frame] wrote frame_"));
+						write(l, frame); write(l, string'(".ppm  lines=")); write(l, y);
+						writeline(output, l);
+					end if;
+				end if;
+				frame := frame + 1;
+				x := 0; y := 0;
+			end if;
+			prev_vbl := video_vbl;
+		end loop;
+	end process;
+
 	stopper : process
 	begin
 		wait for RUN_US * 1 us;

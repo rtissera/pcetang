@@ -15,7 +15,14 @@
 #                    /usr/lib/x86_64-linux-gnu/libLLVM-18.so.18.1 && sudo ldconfig
 #   2. --max-stack-alloc=0 and ulimit -s unlimited -- compiled backends cap stack objects
 #      at 128 kB and this testbench declares one of 1280 kB.
-#   3. PROBE_EN=0 -- the `probe` process uses VHDL-2008 external names, which abort every
+#   3. --ieee-asserts=disable -- NOT optional for speed. The grep at the bottom filters
+#      the metavalue/NUMERIC_STD warning TEXT, but without this flag every one of those
+#      assertions is still evaluated, formatted into a string and piped before being
+#      thrown away. Measured 2026-09-14: 5.7 s per simulated ms without it against the
+#      3.5 s/ms this header quotes, i.e. a ~1.6x penalty for output nobody reads. It used
+#      to be passed by hand on the command line, which meant any run launched through the
+#      script silently lost it.
+#   4. PROBE_EN=0 -- the `probe` process uses VHDL-2008 external names, which abort every
 #      compiled backend with "NULL access dereferenced" at time 0. cdregmon and cdmon were
 #      rewritten onto pce_top's real debug ports and work everywhere; probe was not.
 #
@@ -61,5 +68,7 @@ ulimit -s unlimited
     -gVERBOSE=0 -gAC_BUILD_G=0 -gNO_CD_G=0 \
     -gRUN_PRESS_US="${RUN_PRESS_US:-30000}" \
     -gSECTOR_BYTE_CYCLES="${SECTOR_BYTE_CYCLES:-214}" \
-    -gPROBE_EN="${PROBE_EN:-0}" --max-stack-alloc=0 2>&1 \
+    -gPROBE_EN="${PROBE_EN:-0}" \
+    -gROM_LAT="${ROM_LAT:-0}" -gCDRAM_WAIT="${CDRAM_WAIT:-0}" \
+    --max-stack-alloc=0 --ieee-asserts=disable 2>&1 \
   | stdbuf -oL grep --line-buffered -avE "metavalue|NUMERIC_STD|numeric_std|std_logic_arith|assertion warning"
