@@ -338,6 +338,8 @@ entity pce_top is
 		CD_DBG_FIFO_SPACE : out unsigned(12 downto 0);
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
+		-- cd_bridge's CD_DATA_END accounting: [31:16] consumed, [15:0] LOST.
+		CD_DBG_DEND       : out std_logic_vector(31 downto 0);
 		CD_DBG_RD_TOTAL   : out unsigned(15 downto 0);
 		-- DATA IN bursts that ran dry mid-burst; see SCSI.vhd's BURST_RDY. 0 = the sector
 		-- gate is doing its job.
@@ -1278,6 +1280,7 @@ begin
 		DBG_FIFO_SPACE => CD_DBG_FIFO_SPACE,
 		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
 		DBG_GDI        => CD_DBG_GDI,
+		DBG_DEND       => CD_DBG_DEND,
 		DBG_RD_TOTAL   => CD_DBG_RD_TOTAL,
 		DBG_UNDERRUNS  => CD_DBG_UNDERRUNS,
 
@@ -1328,6 +1331,7 @@ begin
 	CD_DBG_FIFO_SPACE <= (others => '0');
 	CD_DBG_FIFO_DROPS <= (others => '0');
 	CD_DBG_GDI        <= (others => '0');
+	CD_DBG_DEND       <= (others => '0');
 	CD_DBG_RD_TOTAL   <= (others => '0');
 	CD_DBG_UNDERRUNS  <= (others => '0');
 	CD_RESET    <= '0';

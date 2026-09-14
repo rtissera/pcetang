@@ -825,7 +825,19 @@ architecture rtl of pcetang_console60k_cd is
    -- cleared a CD-RAM that was in fact completely broken by the inverted RAM_C_RD_n.
    -- Both bugs are fixed, so this now sweeps for real -- and its results are finally
    -- reported (tag 0xC9), which they never were either.
-   constant CDRAM_SELFTEST : boolean := true;
+   -- OFF by default, and turning it on is not free. The sweep runs with the core HALTED,
+   -- so it delays core_resetn release by ~1.4 s. On 2026-09-14 that delay pushed the
+   -- MCU's TOC upload inside the reset window and cd_bridge's (then) async reset dropped
+   -- the whole TOC, sending every disc to the CD player -- a full round trip spent
+   -- diagnosing the instrument. cd_bridge no longer resets its TOC, so that hazard is
+   -- closed, but the 1.4 s delay and the extra port-C traffic remain real side effects.
+   --
+   -- Its answer is already banked: 256 KiB verified, 0 bad bytes, 0 port-C timeouts, and
+   -- CD-RAM contents separately verified byte-for-byte against the real CHD. Turn it on
+   -- only to re-check memory itself, never as a passenger on some other experiment.
+   -- Read it ONE direction only: bad /= 0 is conclusive, bad = 0 is not -- with the core
+   -- halted there is no ADPCM port-C traffic, no ROM contention, no refresh pressure.
+   constant CDRAM_SELFTEST : boolean := false;
    type cdt_state_t is (CDT_IDLE, CDT_W, CDT_W_WAIT, CDT_R, CDT_R_WAIT, CDT_DONE);
    signal cdt_state  : cdt_state_t := CDT_IDLE;
    -- FULL 256KB sweep, not a 1KB sample. The first version wrote 1024 bytes at offset 0
@@ -1086,6 +1098,7 @@ architecture rtl of pcetang_console60k_cd is
    signal scsi_first8_i     : std_logic_vector(63 downto 0);
    signal scsi_sp_i         : std_logic_vector(3 downto 0);
    signal scsi_gdi_i        : std_logic_vector(127 downto 0);
+   signal scsi_dend_i       : std_logic_vector(31 downto 0);
    -- ADPCM activity: PLAY/END/HALF, plus counters for how often the offloaded ADPCM
    -- RAM is actually accessed. A game stuck waiting for an ADPCM end that never comes
    -- keeps rendering (VDC writes and frames climb) while issuing no further CD command
@@ -1208,7 +1221,30 @@ architecture rtl of pcetang_console60k_cd is
    -- Re-enable only with the link problem solved first -- chunk-level flow control, or a
    -- second wire. Until then the golden-trace diff has to come from simulation, which
    -- reproduces the full boot anyway.
+   -- DO NOT SET THIS TRUE. It was tried on 2026-09-14 and killed the run it was meant
+   -- to measure: streaming one trace frame per CD register access floods the FPGA->BL616
+   -- link, the MCU's polled UART RX desyncs (payloads come back containing `aa aa aa`,
+   -- the next frame's protocol header read as data), and SECTOR REQUESTS ARE EATEN. The
+   -- board got 6 commands, 1 READ(6), REQRING "0 traced of 0 total" -- zero sectors
+   -- served -- and hung on "just a moment" waiting for LBA 3890 forever. The changed
+   -- symptom looks like new information; it is the instrument.
+   --
+   -- Volume, not timing, is the constraint on this link. To observe CD register
+   -- behaviour, aggregate in RTL and report on the heartbeat: tags 0xB0/0xB1 record only
+   -- DISTINCT $1800 phase values plus counters, which is bounded by construction (the
+   -- reference polls $1800 430047 times per boot but changes value ~10 times per
+   -- command). See memory pcetang_broken_probes.
    constant CDREG_STREAM : boolean := false;
+   -- SCSI phase-transition recorder; see the capture site for why this is a change
+   -- recorder and not a stream. ph_last starts at 0xFF, which $1800 can never return
+   -- (bits 2..0 read as 0), so the very first real value always registers as a change.
+   signal ph_last : std_logic_vector(7 downto 0)  := x"FF";
+   signal ph_ring : std_logic_vector(63 downto 0) := (others => '0');
+   signal ph_chg  : unsigned(15 downto 0) := (others => '0');
+   signal ph_d8   : unsigned(15 downto 0) := (others => '0');
+   signal ph_f8   : unsigned(15 downto 0) := (others => '0');
+   signal ph_bf   : unsigned(15 downto 0) := (others => '0');
+   signal ph_tag  : unsigned(4 downto 0)  := (others => '0');
    type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
    signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
    -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
@@ -2678,6 +2714,7 @@ begin
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
+      CD_DBG_DEND       => scsi_dend_i,
       CD_DBG_RD_TOTAL   => scsi_rd_total_i,
       CD_DBG_UNDERRUNS  => scsi_underruns_i,
       CD_DM => cd_dm_i,
@@ -3004,6 +3041,11 @@ begin
             if rom_loading(0) = '1' and rom_loading_r = '0' then
                cdv_sent <= '0';
             end if;
+            -- Phase-tag slot selector: advanced here, unconditionally, so it keeps
+            -- moving regardless of which branch of the emit ladder wins this heartbeat.
+            if dbg_hb_cnt = 0 then
+               ph_tag <= ph_tag + 1;
+            end if;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             -- 32, not 64: two checksum passes now emit 32 lines before the core is even
             -- released, and the heartbeat comes LAST -- so if the log were ever
@@ -3071,6 +3113,53 @@ begin
                dbg_trace_data <= std_logic_vector(cdv_ok) & std_logic_vector(cdv_bad)
                                  & cdv_first & std_logic_vector(toc_wr_inrst)
                                  & std_logic_vector(dbg_cdr_timeout_cnt);
+            elsif dbg_hb_cnt = 0 and ph_tag(1 downto 0) = "00" then
+               -- RE-EMITTED FOREVER, never bounded by a total count. The first version
+               -- used `ph_tag < 16`, which advances once per ~100 ms heartbeat and so
+               -- spent all sixteen emissions in the first 1.6 SECONDS -- before RUN is
+               -- pressed and before any CD activity exists. Every field came back zero
+               -- and the run was wasted. These are cumulative counters, so the LAST line
+               -- in the log is always the current value.
+               --
+               -- One heartbeat in four, so the 0xA* rotation below is not starved: this
+               -- branch sits ABOVE it in the ladder and an unconditional
+               -- `dbg_hb_cnt = 0` here would take the channel every single time.
+               -- ph_tag is advanced unconditionally next to the heartbeat counter, not
+               -- here -- incrementing it inside a branch gated on its own value would
+               -- stop it after one step.
+               dbg_trace_req <= '1';
+               if ph_tag(3 downto 2) = "01" then
+                  -- 0xB2: CD_DATA_END accounting from cd_bridge.
+                  -- [63:48] pulses CONSUMED by a *_WAIT_END state
+                  -- | [47:32] pulses LOST (fired while nothing was listening)
+                  -- | [31:21] 0 | [20:16] cd_bridge FSM state now | [15:0] 0.
+                  --
+                  -- CD_DATA_END is a one-cycle pulse with no handshake, and SCSI.vhd
+                  -- fires it at ANY sector boundary where the FIFO is empty -- including
+                  -- non-final boundaries mid-command, where cd_bridge is still fetching
+                  -- and none of the three *_WAIT_END states is active. Those are the
+                  -- LOST count and are expected to be nonzero and harmless. What matters
+                  -- is the END STATE: if the board is stalled and cd_bridge's state is
+                  -- SCSI_READ_WAIT_END (01000) with CONSUMED one short of the number of
+                  -- commands, the final pulse was lost and that IS the bug.
+                  dbg_trace_tag  <= x"B2";
+                  dbg_trace_data <= scsi_dend_i & "00000000000" & cd_dbg_state_i & x"0000";
+               elsif ph_tag(3 downto 2) = "10" then
+                  -- 0xB0: the last 8 DISTINCT $1800 (SCSI phase) values, oldest first.
+                  -- Read against the golden end-of-command walk:
+                  --   c8/88 DATA IN (with/without REQ) -> d8 STATUS+REQ -> f8 MSG IN+REQ
+                  --   -> 00 BUS FREE -> next command.
+                  -- Ending ...c8 88 c8 88 with no d8 means the status walk never starts.
+                  dbg_trace_tag  <= x"B0";
+                  dbg_trace_data <= ph_ring;
+               else
+                  -- 0xB1: [63:48] phase changes seen | [47:32] times STATUS+REQ (0xd8)
+                  -- | [31:16] times MESSAGE IN+REQ (0xf8) | [15:0] times BUS FREE (0x00).
+                  -- d8 = 0 with a nonzero change count is the whole answer.
+                  dbg_trace_tag  <= x"B1";
+                  dbg_trace_data <= std_logic_vector(ph_chg) & std_logic_vector(ph_d8)
+                                    & std_logic_vector(ph_f8) & std_logic_vector(ph_bf);
+               end if;
             elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
                rdcmd_cnt     <= rdcmd_cnt + 1;
@@ -3597,6 +3686,32 @@ begin
             if dbg_cpu_ce = '1' and cdreg_acc_r = '0'
                and dbg_cpu_a(20 downto 10) = "11111111110"
                and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0') then
+               -- SCSI PHASE TRANSITIONS (2026-09-14). $1800 read is the phase register
+               -- in BOTH this design and mednafen, bit-identical: 0x80 BSY, 0x40 REQ,
+               -- 0x20 MSG, 0x10 CD, 0x08 IO. What matters is the SEQUENCE of DISTINCT
+               -- values, not the polls -- the reference polls $1800 430047 times in one
+               -- boot but only changes value about ten times per command, so recording
+               -- only changes is bounded by construction and cannot flood the link.
+               --
+               -- This exists because streaming every access (CDREG_STREAM/0xDB) DOES
+               -- flood it: trace frames block the BL616's polled UART RX, sector requests
+               -- are eaten, and the run dies at the first READ(6) with 0 sectors served.
+               -- Aggregate in RTL, report periodically -- never stream.
+               --
+               -- The values being hunted, from the golden trace's end-of-command walk:
+               --   0xC8 DATA IN + REQ     0x88 DATA IN, REQ low (the inter-sector poll)
+               --   0xD8 STATUS + REQ      0xF8 MESSAGE IN + REQ      0x00 BUS FREE
+               -- A board that never shows 0xD8 never started the status walk at all.
+               if dbg_cpu_a(9 downto 0) = "0000000000" and dbg_cpu_wr_n = '1'
+                  and cdreg_data /= ph_last then
+                  ph_last <= cdreg_data;
+                  ph_ring <= ph_ring(55 downto 0) & cdreg_data;
+                  if ph_chg /= x"FFFF" then ph_chg <= ph_chg + 1; end if;
+                  if cdreg_data = x"D8" and ph_d8 /= x"FFFF" then ph_d8 <= ph_d8 + 1; end if;
+                  if cdreg_data = x"F8" and ph_f8 /= x"FFFF" then ph_f8 <= ph_f8 + 1; end if;
+                  if cdreg_data = x"00" and ph_bf /= x"FFFF" then ph_bf <= ph_bf + 1; end if;
+               end if;
+
                -- entry = [15] 1=write 0=read | [14:8] register low bits | [7:0] data
                -- (what was written, or what was read back)
                cdreg_ring <= cdreg_ring(47 downto 0)

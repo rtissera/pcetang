@@ -131,6 +131,16 @@ entity cd_bridge is
 		-- Live FSM state, so a board-level trace can tell "parked waiting for something"
 		-- apart from "back in SCSI_IDLE, host sent nothing". Leave unconnected if unused.
 		DBG_STATE       : out std_logic_vector(4 downto 0);
+		-- CD_DATA_END accounting. [31:16] pulses CONSUMED by a *_WAIT_END state,
+		-- [15:0] pulses LOST because none of the three states that listen for it was
+		-- active. CD_DATA_END is a one-cycle pulse with NO handshake, and SCSI.vhd
+		-- fires it at ANY sector boundary where the FIFO is empty -- including
+		-- non-final boundaries mid-command, where cd_bridge is still fetching and
+		-- nobody is listening. A lost pulse at the FINAL boundary would leave
+		-- SCSI_READ_WAIT_END hung forever, no STATUS phase would ever be entered, and
+		-- the system card would time out and reset the SCSI bus -- exactly the
+		-- observed hardware failure. This counter decides whether that actually happens.
+		DBG_DEND        : out std_logic_vector(31 downto 0);
 
 		-- Free space in SCSI.vhd's DATA-IN FIFO. REAL BACK-PRESSURE, not a probe: this
 		-- FSM paces itself on bytes ARRIVING FROM THE MCU, not on the CPU draining them,
@@ -289,6 +299,9 @@ architecture rtl of cd_bridge is
 	signal toc_first_track_bcd : std_logic_vector(7 downto 0) := (others => '0');
 	signal toc_last_track_bcd  : std_logic_vector(7 downto 0) := (others => '0');
 	signal disc_mounted_r  : std_logic := '0';
+	-- see DBG_DEND's port comment
+	signal dend_ok   : unsigned(15 downto 0) := (others => '0');
+	signal dend_lost : unsigned(15 downto 0) := (others => '0');
 
 	-- Real CDDA play state -- minimum needed for SAPSP/SAPEP/PAUSE/READSUBQ to be self-
 	-- consistent without real audio streaming (see file header).
@@ -385,6 +398,7 @@ architecture rtl of cd_bridge is
 begin
 
 	DBG_STATE <= state_code(scsi_state);
+	DBG_DEND  <= std_logic_vector(dend_ok) & std_logic_vector(dend_lost);
 
 	SECTOR_LBA <= std_logic_vector(read_lba);
 
@@ -1005,6 +1019,18 @@ begin
 			-- SCSI_IDLE is reached.
 			if CD_COMM_SEND = '1' and scsi_state /= SCSI_IDLE then
 				comm_pending <= '1';
+			end if;
+
+			-- CD_DATA_END accounting; see DBG_DEND. Counted here rather than inside the
+			-- case so that a pulse arriving in ANY state is accounted for exactly once.
+			if CD_DATA_END = '1' then
+				if scsi_state = SCSI_READ_WAIT_END
+				   or scsi_state = SCSI_DATA_WAIT_END
+				   or scsi_state = SCSI_SENSE_WAIT_END then
+					if dend_ok /= x"FFFF" then dend_ok <= dend_ok + 1; end if;
+				else
+					if dend_lost /= x"FFFF" then dend_lost <= dend_lost + 1; end if;
+				end if;
 			end if;
 		end if;
 	end process;
