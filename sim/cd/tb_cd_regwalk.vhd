@@ -44,7 +44,15 @@ entity tb_cd_regwalk is
 		FEED_CYCLES   : integer := 214;
 		CPU_CYCLES    : integer := 43;
 		HUNK_EVERY    : integer := 0;
-		HUNK_EXTRA_US : integer := 0
+		HUNK_EXTRA_US : integer := 0;
+		-- VBlank interruption. On real hardware IRQ1 fires every ~16.7 ms while a single
+		-- sector takes ~10 ms to arrive over the 2 Mbaud link, so the system card's read
+		-- loop IS interrupted mid-DATA-IN, repeatedly, and the target sits with REQ
+		-- asserted and no ACK for the duration of the ISR. An initiator that polls without
+		-- ever being interrupted -- which is every testbench here until now -- cannot see
+		-- a target that mishandles that pause. 0 = no interruption.
+		VBLANK_EVERY_US : integer := 0;
+		VBLANK_LEN_US   : integer := 0
 	);
 end entity;
 
@@ -79,6 +87,10 @@ architecture sim of tb_cd_regwalk is
 	signal sector_data_valid : std_logic := '0';
 	signal sector_data_last  : std_logic := '0';
 	signal sector_is_audio   : std_logic;
+	-- SECTOR_REQ latch (see the mcu process): pulses counted, never polled for.
+	signal req_pending : integer := 0;
+	signal req_lba     : integer := 0;
+	signal req_taken   : std_logic := '0';
 
 	signal toc_wr      : std_logic := '0';
 	signal toc_track   : std_logic_vector(7 downto 0)  := (others => '0');
@@ -103,33 +115,50 @@ architecture sim of tb_cd_regwalk is
 	signal cd_sl, cd_sr, ad_s : signed(15 downto 0);
 
 	signal bytes_read : integer := 0;
+	signal vbl_count  : integer := 0;
 	signal polls      : integer := 0;
 
 	-- Golden Rondo boot, commands 1..13, exactly as an instrumented beetle-pce-fast run
 	-- dispatches them (all from the system card ROM, PC $E95E-$EA3A, bank 00).
-	type cdb_t is array (0 to 12) of std_logic_vector(47 downto 0);
+	-- 10 bytes wide, because CDB LENGTH DEPENDS ON THE OPCODE GROUP. SCSI takes it from
+	-- the top nibble: 0x08 >> 4 = 0 -> 6 bytes, 0xDE >> 4 = 0xD -> 10 bytes. The reference
+	-- shows both plainly -- "08 00 0f 32 02 00" is six, "de 00 ca 00 00 00 00 00 00 00" is
+	-- ten. Sending six for everything leaves the target still in COMMAND phase asking for
+	-- more ($1800 reads 0xd0 forever), which is exactly how the first version of this
+	-- table hung on command 2.
+	type cdb_t is array (0 to 12) of std_logic_vector(79 downto 0);
 	constant GOLDEN : cdb_t := (
-		x"000000000000",    --  1  TEST UNIT READY
-		x"de00ca000000",    --  2  GETDIRINFO mode 0
-		x"de01ca000000",    --  3  GETDIRINFO mode 1 (lead-out)
-		x"de0201000000",    --  4  GETDIRINFO mode 2 track 1
-		x"de0202000000",    --  5  GETDIRINFO mode 2 track 2
-		x"08000f320200",    --  6  READ(6) LBA 3890 x2   (boot header)
-		x"08000f340100",    --  7  READ(6) LBA 3892 x1
-		x"de0202000000",    --  8  GETDIRINFO mode 2 track 2 (again -- reference does this)
-		x"de0222000000",    --  9  GETDIRINFO mode 2 track 0x22 (last track)
-		x"08000f750a00",    -- 10  READ(6) LBA 3957 x10
-		x"08000f7f0c00",    -- 11  READ(6) LBA 3967 x12
-		x"08000f8b0800",    -- 12  READ(6) LBA 3979 x8   <-- board completes this, then stops
-		x"08000ff30800"     -- 13  READ(6) LBA 4083 x8   <-- board never issues this
+		x"00000000000000000000",    --  1  TEST UNIT READY              (6)
+		x"de00ca00000000000000",    --  2  GETDIRINFO mode 0            (10)
+		x"de01ca00000000000000",    --  3  GETDIRINFO mode 1 (lead-out) (10)
+		x"de020100000000000000",    --  4  GETDIRINFO mode 2 track 1    (10)
+		x"de020200000000000000",    --  5  GETDIRINFO mode 2 track 2    (10)
+		x"08000f3202000000_0000",   --  6  READ(6) LBA 3890 x2 (boot header)
+		x"08000f3401000000_0000",   --  7  READ(6) LBA 3892 x1
+		x"de020200000000000000",    --  8  GETDIRINFO mode 2 track 2 again (reference does this)
+		x"de022200000000000000",    --  9  GETDIRINFO mode 2 track 0x22 (last track)
+		x"08000f750a000000_0000",   -- 10  READ(6) LBA 3957 x10
+		x"08000f7f0c000000_0000",   -- 11  READ(6) LBA 3967 x12
+		x"08000f8b08000000_0000",   -- 12  READ(6) LBA 3979 x8  <-- board completes, then stops
+		x"08000ff308000000_0000"    -- 13  READ(6) LBA 4083 x8  <-- board never issues this
 	);
 
-	function sectors_of(cdb : std_logic_vector(47 downto 0)) return integer is
+	-- Same rule SCSI.vhd's RequiredCDBLen uses: length from the opcode's top nibble.
+	function cdb_len(cdb : std_logic_vector(79 downto 0)) return integer is
 	begin
-		if cdb(47 downto 40) = x"08" then
-			return to_integer(unsigned(cdb(15 downto 8)));
+		case cdb(79 downto 76) is
+			when x"0"   => return 6;
+			when x"d"   => return 10;
+			when others => return 6;
+		end case;
+	end function;
+
+	function sectors_of(cdb : std_logic_vector(79 downto 0)) return integer is
+	begin
+		if cdb(79 downto 72) = x"08" then
+			return to_integer(unsigned(cdb(47 downto 40)));
 		else
-			return 0;    -- not a READ(6); reply length is short and ends on FIFO empty
+			return 0;    -- not a READ(6); reply is short and ends on FIFO empty
 		end if;
 	end function;
 
@@ -187,6 +216,20 @@ begin
 		DBG_STATE => dbg_state, DBG_DEND => dbg_dend
 	);
 
+	-- Request latch: counts SECTOR_REQ pulses so none can be missed, and holds the LBA
+	-- that came with the most recent one.
+	req_latch : process(clk)
+	begin
+		if rising_edge(clk) then
+			if sector_req = '1' then
+				req_pending <= req_pending + 1;
+				req_lba     <= to_integer(unsigned(sector_lba));
+			elsif req_taken = '1' and req_pending > 0 then
+				req_pending <= req_pending - 1;
+			end if;
+		end if;
+	end process;
+
 	mcu : process
 		variable sect  : integer := 0;
 		variable nsect : integer := 0;
@@ -194,13 +237,23 @@ begin
 		sector_data_valid <= '0'; sector_data_last <= '0';
 		wait until rst_n = '1';
 		loop
-			wait until rising_edge(clk) and sector_req = '1';
-			sect := to_integer(unsigned(sector_lba));
+			-- LATCH the request, do not poll for it. SECTOR_REQ is a ONE-CYCLE PULSE and
+			-- cd_bridge issues the next one ~2 cycles after the previous sector's last
+			-- byte -- while this process is still returning from its feed loop. A model
+			-- that only listens at a `wait until sector_req='1'` statement MISSES it, and
+			-- cd_bridge then sits in SCSI_READ_WAIT_BYTE forever. That looks exactly like
+			-- an RTL hang and is not one; the real firmware queues requests. Cost one
+			-- false "reproduced hang" on 2026-09-14.
+			while req_pending = 0 loop wait until rising_edge(clk); end loop;
+			sect := req_lba;
+			req_taken <= '1';
+			wait until rising_edge(clk);
+			req_taken <= '0';
 			nsect := nsect + 1;
 			if HUNK_EVERY > 0 and (nsect mod HUNK_EVERY) = 0 then
-				wait for (SECTOR_LAT_US + HUNK_EXTRA_US) * 1 us / 1000;
+				wait for (SECTOR_LAT_US + HUNK_EXTRA_US) * 1 us;
 			else
-				wait for SECTOR_LAT_US * 1 us / 1000;
+				wait for SECTOR_LAT_US * 1 us;
 			end if;
 			for i in 0 to 2047 loop
 				for c in 1 to FEED_CYCLES loop wait until rising_edge(clk); end loop;
@@ -253,7 +306,11 @@ begin
 				polls <= polls + 1;
 				exit when v = want;
 				g := g + 1;
-				assert g < 2_000_000
+				-- 20M polls ~= 2.8 s of simulated time. The old 2M bound was ~280 ms, which
+				-- is SHORTER than some modelled MCU delays -- a 400 ms hunk stall tripped
+				-- the guard and looked exactly like an RTL hang. A guard must outlast every
+				-- delay the testbench itself injects.
+				assert g < 20_000_000
 					report "TIMEOUT waiting for " & what & " (want "
 					     & integer'image(to_integer(unsigned(want))) & ", last saw "
 					     & integer'image(to_integer(unsigned(v))) & ", bridge_state="
@@ -276,8 +333,11 @@ begin
 		end procedure;
 
 		variable v    : std_logic_vector(7 downto 0);
-		variable cdb  : std_logic_vector(47 downto 0);
+		variable cdb  : std_logic_vector(79 downto 0);
+		variable nlen : integer := 6;
 		variable nsec : integer := 0;
+		variable gshort : integer := 0;
+		variable last_vbl : time := 0 ns;
 		variable ncmd : integer := 1;
 	begin
 		if COMMANDS > 0 then ncmd := COMMANDS; end if;
@@ -293,21 +353,22 @@ begin
 		for c in 0 to ncmd - 1 loop
 			if COMMANDS = 0 then
 				cdb := x"08" & x"00" & x"10" & x"00"
-				     & std_logic_vector(to_unsigned(SECTORS, 8)) & x"00";
+				     & std_logic_vector(to_unsigned(SECTORS, 8)) & x"00" & x"00000000";
 				nsec := SECTORS;
 			else
 				cdb  := GOLDEN(c);
 				nsec := sectors_of(cdb);
 			end if;
+			nlen := cdb_len(cdb);
 
 			-- SELECT: target id on the data bus, then any write to $1800 asserts SEL
 			wr_reg(1, x"81");
 			wr_reg(0, x"00");
 
-			for b in 0 to 5 loop
+			for b in 0 to nlen - 1 loop
 				wait_phase(x"d0", "cmd " & integer'image(c + 1) & " COMMAND REQ byte "
 				                  & integer'image(b));
-				wr_reg(1, cdb(47 - b*8 downto 40 - b*8));
+				wr_reg(1, cdb(79 - b*8 downto 72 - b*8));
 				ack_pulse;
 			end loop;
 
@@ -320,11 +381,24 @@ begin
 						rd_reg(8, v);            -- $1808; cd.vhd AUTO_ACKs this read
 						bytes_read <= bytes_read + 1;
 						tick(CPU_CYCLES);
+						-- VBlank: stop servicing the bus entirely for the ISR duration,
+						-- leaving the target mid-burst with REQ up and no ACK coming.
+						if VBLANK_EVERY_US > 0 then
+							if now - last_vbl >= VBLANK_EVERY_US * 1 us then
+								last_vbl := now;
+								vbl_count <= vbl_count + 1;
+								wait for VBLANK_LEN_US * 1 us;
+							end if;
+						end if;
 					end loop;
 				end loop;
 			else
 				-- short reply (GETDIRINFO / TEST UNIT READY): drain until the target
 				-- leaves DATA IN, since the length is not known to the initiator up front
+				-- GUARDED. Every other wait in this testbench has a bound; this one did
+				-- not, and a short reply that never reaches STATUS spins here forever with
+				-- no diagnostic -- which is indistinguishable from "the sim is just slow".
+				gshort := 0;
 				loop
 					rd_reg(0, v);
 					exit when v = x"d8";                       -- STATUS reached
@@ -332,6 +406,15 @@ begin
 						rd_reg(8, v);
 						bytes_read <= bytes_read + 1;
 					end if;
+					gshort := gshort + 1;
+					assert gshort < 400_000
+						report "TIMEOUT draining short reply for cmd "
+						     & integer'image(c + 1) & " (last $1800 = "
+						     & integer'image(to_integer(unsigned(v)))
+						     & ", bytes so far " & integer'image(bytes_read)
+						     & ", bridge_state="
+						     & integer'image(to_integer(unsigned(dbg_state))) & ")"
+						severity failure;
 				end loop;
 			end if;
 
@@ -358,7 +441,8 @@ begin
 		     & " polls=" & integer'image(polls)
 		     & " dend_consumed=" & integer'image(to_integer(unsigned(dbg_dend(31 downto 16))))
 		     & " dend_LOST=" & integer'image(to_integer(unsigned(dbg_dend(15 downto 0))))
-		     & " underruns=" & integer'image(to_integer(dbg_underruns));
+		     & " underruns=" & integer'image(to_integer(dbg_underruns))
+		     & " vblanks=" & integer'image(vbl_count);
 		if COMMANDS = 0 then
 			assert bytes_read = SECTORS * 2048 report "WRONG BYTE COUNT" severity error;
 		end if;

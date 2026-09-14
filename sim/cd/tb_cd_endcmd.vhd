@@ -94,6 +94,10 @@ architecture sim of tb_cd_endcmd is
 	signal sector_data_valid : std_logic := '0';
 	signal sector_data_last  : std_logic := '0';
 	signal sector_is_audio   : std_logic;
+	-- SECTOR_REQ latch (see the mcu process): pulses counted, never polled for.
+	signal req_pending : integer := 0;
+	signal req_lba     : integer := 0;
+	signal req_taken   : std_logic := '0';
 	signal cd_audio_wr, cd_dm : std_logic;
 
 	signal toc_wr      : std_logic := '0';
@@ -162,6 +166,20 @@ begin
 
 	-- MCU: answer each SECTOR_REQ after a real turnaround, then stream 2048 bytes at
 	-- the real 2 Mbaud byte pace. Byte value encodes the sector so mis-ordering shows up.
+	-- Request latch: counts SECTOR_REQ pulses so none can be missed, and holds the LBA
+	-- that came with the most recent one.
+	req_latch : process(clk)
+	begin
+		if rising_edge(clk) then
+			if sector_req = '1' then
+				req_pending <= req_pending + 1;
+				req_lba     <= to_integer(unsigned(sector_lba));
+			elsif req_taken = '1' and req_pending > 0 then
+				req_pending <= req_pending - 1;
+			end if;
+		end if;
+	end process;
+
 	mcu : process
 		variable sect  : integer := 0;
 		variable nsect : integer := 0;
@@ -169,13 +187,23 @@ begin
 		sector_data_valid <= '0'; sector_data_last <= '0';
 		wait until reset_n = '1';
 		loop
-			wait until rising_edge(clk) and sector_req = '1';
-			sect := to_integer(unsigned(sector_lba));
+			-- LATCH the request, do not poll for it. SECTOR_REQ is a ONE-CYCLE PULSE and
+			-- cd_bridge issues the next one ~2 cycles after the previous sector's last
+			-- byte -- while this process is still returning from its feed loop. A model
+			-- that only listens at a `wait until sector_req='1'` statement MISSES it, and
+			-- cd_bridge then sits in SCSI_READ_WAIT_BYTE forever. That looks exactly like
+			-- an RTL hang and is not one; the real firmware queues requests. Cost one
+			-- false "reproduced hang" on 2026-09-14.
+			while req_pending = 0 loop wait until rising_edge(clk); end loop;
+			sect := req_lba;
+			req_taken <= '1';
+			wait until rising_edge(clk);
+			req_taken <= '0';
 			nsect := nsect + 1;
 			if HUNK_EVERY > 0 and (nsect mod HUNK_EVERY) = 0 then
-				wait for (SECTOR_LAT_US + HUNK_EXTRA_US) * 1 us / 1000;
+				wait for (SECTOR_LAT_US + HUNK_EXTRA_US) * 1 us;
 			else
-				wait for SECTOR_LAT_US * 1 us / 1000;
+				wait for SECTOR_LAT_US * 1 us;
 			end if;
 			for i in 0 to 2047 loop
 				for c in 1 to FEED_CYCLES loop wait until rising_edge(clk); end loop;
