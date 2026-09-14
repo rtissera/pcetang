@@ -390,16 +390,27 @@ begin
 
 	-- Real TOC write + self-resetting extents, independent process (real, simple, no
 	-- interaction with the main command FSM's own state).
-	TOC_CAPTURE : process (CLK, RST_N)
+	--
+	-- DELIBERATELY NOT RESET BY RST_N (2026-09-14). The TOC is disc state, written by
+	-- the MCU, not core state: RST_N here is pce_top's core_resetn, which the top level
+	-- holds low from the start of the ROM upload until its SDRAM verify sweep finishes.
+	-- The MCU sends the TOC right after the syscard bytes ("loadpcecd: TOC sent" follows
+	-- "loadpce: ... core_running=true"), so every TOC_WR that lands inside that window
+	-- used to be dropped on the floor -- an async reset holds the whole process, so not
+	-- just these extents but every toc_lba_tbl entry was lost too.
+	--
+	-- Measured: a build whose reset window was ~1.4s longer (the CD-RAM self-test sweep)
+	-- lost the TOC on all three discs tested. GETDIRINFO then answered from these reset
+	-- values -- mode 0 "first 00 last 00", mode 1 lead-out LBA 0 = MSF 00:02:00, mode 2
+	-- track start LBA 0 -- so the system card concluded the disc has no data track and
+	-- dropped to the CD player, deterministically, instead of booting.
+	--
+	-- Power-on values come from the signal declarations instead (toc_first_track's x"FF"
+	-- is the "no track seen yet" sentinel). Per-disc clearing is the DISC_MOUNTED falling
+	-- edge below, which is the correct hook: it is the MCU's own pcecd_unload().
+	TOC_CAPTURE : process (CLK)
 	begin
-		if RST_N = '0' then
-			disc_mounted_r      <= '0';
-			toc_first_track     <= x"FF";
-			toc_last_track      <= (others => '0');
-			toc_first_track_bcd <= (others => '0');
-			toc_last_track_bcd  <= (others => '0');
-			toc_leadout_lba     <= (others => '0');
-		elsif rising_edge(CLK) then
+		if rising_edge(CLK) then
 			disc_mounted_r <= DISC_MOUNTED;
 			if DISC_MOUNTED = '0' and disc_mounted_r = '1' then
 				-- real falling edge = MCU's pcecd_unload(), about to load a new disc's TOC
