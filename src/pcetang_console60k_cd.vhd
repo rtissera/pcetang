@@ -1314,6 +1314,7 @@ architecture rtl of pcetang_console60k_cd is
    signal cdcmd_pend      : std_logic := '0';
    signal cdcmd_data      : std_logic_vector(63 downto 0) := (others => '0');
    signal cd_data_i      : std_logic_vector(7 downto 0);
+   signal cd_datain_sectors_i : unsigned(8 downto 0);
    signal cd_data_wr_i   : std_logic;
    signal cd_data_end_i  : std_logic;
 
@@ -2531,6 +2532,7 @@ begin
       CD_COMM_SEND => cd_comm_send_i,
       CD_DATA      => cd_data_i,
       CD_DATA_WR   => cd_data_wr_i,
+      CD_DATAIN_SECTORS => cd_datain_sectors_i,
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,
@@ -2547,6 +2549,7 @@ begin
       SECTOR_DATA_VALID => cd_sector_data_valid_i,
       SECTOR_DATA_LAST  => cd_sector_data_last_i,
       DBG_STATE         => cd_dbg_state_i,
+      DATAIN_SECTORS    => cd_datain_sectors_i,
       DBG_DEND          => scsi_dend_i,
       FIFO_SPACE        => scsi_fifo_space_i,
       BUS_RST           => cd_bus_rst_i
@@ -2566,6 +2569,7 @@ begin
       cd_audio_wr_i        <= '0';
       cd_dm_i              <= '0';
       cd_sector_is_audio_i <= '0';
+      cd_datain_sectors_i  <= (others => '0');
       scsi_dend_i          <= (others => '0');
    end generate;
 

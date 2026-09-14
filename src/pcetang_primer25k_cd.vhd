@@ -514,6 +514,7 @@ architecture rtl of pcetang_primer25k_cd is
    signal cd_comm_i      : std_logic_vector(95 downto 0);
    signal cd_comm_send_i : std_logic;
    signal cd_data_i      : std_logic_vector(7 downto 0);
+   signal cd_datain_sectors_i : unsigned(8 downto 0);
    signal cd_data_wr_i   : std_logic;
    signal cd_data_end_i  : std_logic;
 
@@ -1069,6 +1070,7 @@ begin
       CD_COMM_SEND => cd_comm_send_i,
       CD_DATA      => cd_data_i,
       CD_DATA_WR   => cd_data_wr_i,
+      CD_DATAIN_SECTORS => cd_datain_sectors_i,
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,

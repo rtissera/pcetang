@@ -39,6 +39,24 @@ entity SCSI is
 		CD_DATA		: in std_logic_vector(7 downto 0);
 		CD_WR			: in std_logic;
 		CD_DATA_END	: out std_logic;
+		-- Expected sector count for the CURRENT DATA-IN transfer, driven by cd_bridge from
+		-- the READ(6) CDB. 0 = unknown (short replies: GETDIRINFO, REQUEST SENSE, READSUBQ),
+		-- which keeps the original "response ends when the FIFO runs dry" rule.
+		--
+		-- WHY THIS EXISTS (2026-09-14, real bug, reproduced in simulation). CD_DATA_END
+		-- used to be pulsed at ANY sector boundary where the FIFO happened to be empty,
+		-- and cd_bridge enters SCSI_READ_WAIT_END as soon as the last sector has been
+		-- WRITTEN into the FIFO -- not when the CPU has drained it. So a boundary pulse
+		-- inside that window was consumed as end-of-command: GOOD status, MESSAGE IN, BUS
+		-- FREE, all while the CPU was still mid-transfer. The system card's fast loop reads
+		-- 2048 bytes BLINDLY without polling per byte, so it then read a dead bus ($1808
+		-- returns SCSI_DBI = 0xFF once BSY drops) and hung.
+		--
+		-- Only visible with realistic memory latency: with CD-RAM and ROM stalling every
+		-- CPU access the CPU drains far slower than the MCU fills, so the window is huge.
+		-- With ideal zero-wait memory the CPU keeps pace and it almost never happens, which
+		-- is why every earlier simulation passed.
+		DATAIN_SECTORS : in unsigned(8 downto 0) := (others => '0');
 		STOP_CD_SND	: out std_logic;
 		
 		DBG_DATAIN_CNT: out unsigned(15 downto 0);
@@ -127,6 +145,10 @@ architecture rtl of SCSI is
 	signal DOUT_PEND  : std_logic;
 	
 	signal DATAIN_CNT 	: unsigned(15 downto 0);
+	-- Sectors the CPU has fully ACKed in the current DATA-IN transfer. Counting SECTORS
+	-- rather than bytes on purpose: a READ(6) can ask for 32 sectors (the reference boot
+	-- does -- `08 00 10 1f 20 00`), which is 65536 bytes and overflows DATAIN_CNT's 16 bits.
+	signal DATAIN_SECT	: unsigned(8 downto 0);
 
 	signal SEL_COUNT     : unsigned(15 downto 0) := (others => '0');
 	signal SEL_N_R       : std_logic := '1';
@@ -243,6 +265,7 @@ begin
 			DELAY_COUNT <= (others => '0');
 			
 			DATAIN_CNT  <= (others => '0');
+			DATAIN_SECT <= (others => '0');
 			FIFO_IDLE   <= (others => '0');
 			UNDERRUNS   <= (others => '0');
 
@@ -285,7 +308,8 @@ begin
 							IO_Nr <= '1';
 							SP <= SP_COMM_BEFOREREQ;
 							DELAY_COUNT <= to_unsigned(1700, DELAY_COUNT'LENGTH);		-- Wait 40 microseconds after control signals are set up, before triggering REQ in COMMAND phase
-							DATAIN_CNT <= (others => '0');
+							DATAIN_CNT  <= (others => '0');
+							DATAIN_SECT <= (others => '0');
 						elsif STAT_PEND = '1' then
 							STAT_COUNT <= STAT_COUNT + 1;
 
@@ -465,7 +489,24 @@ begin
 							-- 2048 bytes, with $1800 polls in between, because a real drive
 							-- hands over one buffered sector and stops. DATAIN_CNT resets on
 							-- SELECT, so bit 10..0 = all ones is the 2048th byte of a sector.
-							if EMPTY = '0'
+							-- A READ(6) ends when the CPU has ACKed every sector the CDB
+							-- asked for -- NOT when the FIFO happens to run dry. See
+							-- DATAIN_SECTORS' port comment for the bug that motivates this.
+							if COMM(0) = x"08" and DATAIN_SECTORS /= 0
+							   and DATAIN_CNT(10 downto 0) = "11111111111" then
+								-- 2048th byte of a sector, and the length is known.
+								if DATAIN_SECT + 1 = DATAIN_SECTORS then
+									-- genuinely the last byte of the last sector
+									CD_DATA_END <= '1';
+									SP <= SP_FREE;
+								else
+									-- more sectors still owed to the CPU: pause the burst and
+									-- WAIT, whether or not the FIFO is momentarily empty. The
+									-- producer refills and SP_FREE restarts on BURST_RDY.
+									SP <= SP_FREE;
+								end if;
+								DATAIN_SECT <= DATAIN_SECT + 1;
+							elsif EMPTY = '0'
 							   and not (COMM(0) = x"08"
 							            and DATAIN_CNT(10 downto 0) = "11111111111") then
 								DBO <= FIFO_Q;
@@ -497,7 +538,19 @@ begin
 								   and DATAIN_CNT(10 downto 0) /= "11111111111" then
 									UNDERRUNS <= UNDERRUNS + 1;
 								end if;
-								CD_DATA_END <= '1';
+								-- For a READ(6) whose length is known, NEVER signal
+								-- end-of-command from here. This branch means the FIFO ran
+								-- dry MID-SECTOR, which is an underrun to be waited out --
+								-- the producer refills and BURST_RDY restarts the burst --
+								-- not the end of the transfer. Pulsing CD_DATA_END here is
+								-- the same premature-completion bug the sector count was
+								-- added to fix: cd_bridge may already be sitting in
+								-- SCSI_READ_WAIT_END (it enters as soon as the last sector
+								-- is WRITTEN) and would take it as "command complete",
+								-- dropping BSY while the CPU is still reading.
+								if not (COMM(0) = x"08" and DATAIN_SECTORS /= 0) then
+									CD_DATA_END <= '1';
+								end if;
 								SP <= SP_FREE;
 							end if;
 							DATAIN_CNT <= DATAIN_CNT + 1;

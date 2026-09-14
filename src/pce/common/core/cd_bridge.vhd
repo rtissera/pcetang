@@ -93,6 +93,10 @@ entity cd_bridge is
 		CD_DATA       : out std_logic_vector(7 downto 0);
 		CD_DATA_WR    : out std_logic;
 		CD_DATA_END   : in  std_logic;
+		-- Sector count of the READ(6) in flight, 0 when no READ(6) is active. SCSI.vhd
+		-- uses it to end a DATA-IN transfer on the CPU having ACKed every sector, instead
+		-- of on the FIFO momentarily running dry -- see DATAIN_SECTORS there.
+		DATAIN_SECTORS : out unsigned(8 downto 0) := (others => '0');
 
 		-- Real mount state, driven by the MCU-side mount/TOC protocol (pcecd_send_mount()).
 		DISC_MOUNTED  : in  std_logic := '0';
@@ -272,6 +276,10 @@ architecture rtl of cd_bridge is
 	-- READ(6) real working state
 	signal read_lba     : unsigned(23 downto 0) := (others => '0');
 	signal read_count   : unsigned(8 downto 0)  := (others => '0');  -- 0..256, needs 9 bits
+	-- Unlike read_count (which counts DOWN as sectors are fetched from the MCU), this
+	-- holds the ORIGINAL CDB count for the whole transfer, because SCSI.vhd needs to know
+	-- how many sectors the CPU is owed, not how many are left to fetch.
+	signal datain_sect_n : unsigned(8 downto 0) := (others => '0');
 	signal read_byte_ct : unsigned(11 downto 0) := (others => '0');  -- 0..2047
 
 	-- Real TOC storage -- index 0..99 real tracks (1-based track numbers used directly as
@@ -399,6 +407,7 @@ begin
 
 	DBG_STATE <= state_code(scsi_state);
 	DBG_DEND  <= std_logic_vector(dend_ok) & std_logic_vector(dend_lost);
+	DATAIN_SECTORS <= datain_sect_n;
 
 	SECTOR_LBA <= std_logic_vector(read_lba);
 
@@ -587,6 +596,7 @@ begin
 									else
 										read_lba     <= sa;
 										read_count   <= sc;
+										datain_sect_n <= sc;   -- held for the whole transfer
 										read_byte_ct <= (others => '0');
 										scsi_state   <= SCSI_READ_REQ;
 									end if;
@@ -1001,6 +1011,7 @@ begin
 
 				when SCSI_READ_WAIT_END =>
 					if CD_DATA_END = '1' then
+						datain_sect_n <= (others => '0');
 						pending_key <= SENSEKEY_NO_SENSE;
 						pending_asc <= (others => '0');
 						CD_STAT     <= x"00";  -- GOOD

@@ -100,6 +100,7 @@ architecture sim of tb_cd_regwalk is
 
 	signal dbg_state : std_logic_vector(4 downto 0);
 	signal dbg_dend  : std_logic_vector(31 downto 0);
+	signal cd_datain_sectors : unsigned(8 downto 0);
 	signal sel_n_o, irq_n_o, ram_cs_n_o, bram_en_o, cd_reset_o : std_logic;
 	signal dbg_datain_cnt : unsigned(15 downto 0);
 	signal dbg_first8 : std_logic_vector(63 downto 0);
@@ -192,6 +193,7 @@ begin
 		CD_REGION => '0', CD_RESET => cd_reset_o,
 		CD_DATA => cd_data, CD_DATA_WR => cd_data_wr,
 		CD_AUDIO_WR => cd_audio_wr, CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end,
+		CD_DATAIN_SECTORS => cd_datain_sectors,
 		DBG_DATAIN_CNT => dbg_datain_cnt, DBG_FIRST8 => dbg_first8, DBG_SP => dbg_sp,
 		DBG_ADPCM => dbg_adpcm, DBG_COMM_POS => dbg_comm_pos,
 		DBG_COMM0 => dbg_comm0, DBG_COMM1 => dbg_comm1, DBG_SEL_CNT => dbg_sel_cnt,
@@ -213,7 +215,8 @@ begin
 		SECTOR_DATA => sector_data, SECTOR_DATA_VALID => sector_data_valid,
 		SECTOR_DATA_LAST => sector_data_last,
 		CD_AUDIO_WR => cd_audio_wr, CD_DM => cd_dm, SECTOR_IS_AUDIO => sector_is_audio,
-		DBG_STATE => dbg_state, DBG_DEND => dbg_dend
+		DBG_STATE => dbg_state, DBG_DEND => dbg_dend,
+		DATAIN_SECTORS => cd_datain_sectors
 	);
 
 	-- Request latch: counts SECTOR_REQ pulses so none can be missed, and holds the LBA

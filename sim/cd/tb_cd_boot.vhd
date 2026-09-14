@@ -232,6 +232,7 @@ architecture sim of tb_cd_boot is
 	signal cd_comm_s     : std_logic_vector(95 downto 0);
 	signal cd_comm_send_s: std_logic;
 	signal cd_data_s     : std_logic_vector(7 downto 0);
+	signal cd_datain_sectors_s : unsigned(8 downto 0);
 	signal cd_data_wr_s  : std_logic;
 	signal cd_audio_wr_s : std_logic;
 	signal cd_dm_s       : std_logic;
@@ -474,6 +475,7 @@ begin
 		CD_DOUT_REQ => '0', CD_DOUT => open, CD_DOUT_SEND => open,
 		CD_REGION => '0', CD_RESET => cd_reset_s,
 		CD_DATA => cd_data_s, CD_DATA_WR => cd_data_wr_s, CD_AUDIO_WR => cd_audio_wr_s,
+		CD_DATAIN_SECTORS => cd_datain_sectors_s,
 		CD_SUBCD_WR => '0', CD_DATA_END => cd_data_end_s, CD_DM => cd_dm_s,
 
 		CDDA_SL => cdda_sl, CDDA_SR => cdda_sr, ADPCM_S => adpcm_s,
@@ -532,6 +534,7 @@ begin
 			CD_STAT => cd_stat_s, CD_MSG => cd_msg_s, CD_STAT_GET => cd_stat_get_s,
 			CD_COMM => cd_comm_s, CD_COMM_SEND => cd_comm_send_s,
 			CD_DATA => cd_data_s, CD_DATA_WR => cd_data_wr_s,
+			DATAIN_SECTORS => cd_datain_sectors_s,
 			CD_DATA_END => cd_data_end_s,
 			DISC_MOUNTED => disc_mounted_s,
 			TOC_WR => toc_wr_s, TOC_TRACK => toc_track_s,

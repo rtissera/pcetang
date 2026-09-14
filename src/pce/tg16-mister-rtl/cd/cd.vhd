@@ -47,6 +47,8 @@ entity cd is
 		CD_AUDIO_WR	: in std_logic;
 		CD_SUBCD_WR	: in std_logic;
 		CD_DATA_END	: out std_logic;
+		-- Straight through to SCSI.vhd; driven by cd_bridge. See DATAIN_SECTORS there.
+		CD_DATAIN_SECTORS : in unsigned(8 downto 0) := (others => '0');
 
 		-- SCSI DATA-IN probes, straight through from the SCSI entity (see its own port
 		-- comment): what the CPU actually took off the bus, not what we fed in.
@@ -656,6 +658,7 @@ begin
 		CD_DATA		=> CD_DATA,
 		CD_WR			=> CD_DATA_WR,
 		CD_DATA_END	=> CD_DATA_END,
+		DATAIN_SECTORS => CD_DATAIN_SECTORS,
 
 		DBG_DATAIN_CNT => DBG_DATAIN_CNT,
 		DBG_FIRST8     => DBG_FIRST8,
