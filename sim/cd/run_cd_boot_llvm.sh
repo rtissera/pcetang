@@ -31,6 +31,7 @@
 # the resulting byte loss is an artifact of the testbench, not a bug in the RTL. That
 # mistake cost a night.
 set -euo pipefail
+CALLER_PWD="$PWD"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 WORK="${GHDL_WORK:-$HERE/bootwork_llvm}"
@@ -58,12 +59,19 @@ for f in \
 do "$G" -a "${F[@]}" "$f"; done
 "$G" -e "${F[@]}" -o "$WORK/tb_cd_boot" tb_cd_boot
 
+# ABSOLUTE PATHS. This script does `cd "$ROOT"` above, so a RELATIVE TOC_FILE or
+# SECTOR_FILE resolves against the repo root, not the directory the caller was in. When
+# the TOC file is not found the testbench silently falls back to its 2-track stand-in
+# (TOC_T2_LBA = 3590) and the boot reads the WRONG DISC's LBAs -- symptom is the system
+# card asking for LBA 3590 on a disc whose data track is elsewhere, and sector requests
+# that never match. Cost three hours of two ROM_LAT runs on 2026-09-14 before it showed up.
+abspath() { case "$1" in /*) printf '%s' "$1";; *) printf '%s' "$CALLER_PWD/$1";; esac; }
 TOC_ARG=()
-[ -n "${TOC_FILE:-}" ] && TOC_ARG=(-gTOC_FILE="$TOC_FILE")
+[ -n "${TOC_FILE:-}" ] && TOC_ARG=(-gTOC_FILE="$(abspath "$TOC_FILE")")
 
 ulimit -s unlimited
 "$WORK/tb_cd_boot" "${TOC_ARG[@]}" \
-    -gROM_FILE="$SYSCARD" -gSECTOR_FILE="$SECTORS" \
+    -gROM_FILE="$(abspath "$SYSCARD")" -gSECTOR_FILE="$(abspath "$SECTORS")" \
     -gSECTOR_CNT="${SECTOR_CNT:-160}" -gRUN_US="$RUN_US" \
     -gVERBOSE=0 -gAC_BUILD_G=0 -gNO_CD_G=0 \
     -gRUN_PRESS_US="${RUN_PRESS_US:-30000}" \

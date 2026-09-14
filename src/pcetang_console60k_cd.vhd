@@ -837,6 +837,29 @@ architecture rtl of pcetang_console60k_cd is
    -- only to re-check memory itself, never as a passenger on some other experiment.
    -- Read it ONE direction only: bad /= 0 is conclusive, bad = 0 is not -- with the core
    -- halted there is no ADPCM port-C traffic, no ROM contention, no refresh pressure.
+   -- Retires every CD-RAM probe generation in one switch: the 0xC0-0xC8 read/write
+   -- snoop, the 0xCA-0xCE write capture and extents, and the 0xCF page watch. They have
+   -- all answered and their answers are recorded -- CD-RAM is correct, and its contents
+   -- were separately verified byte-for-byte against the real CHD, so nothing here is
+   -- still a live question.
+   --
+   -- They are retired because they were no longer free. Worst setup slack fell
+   -- 0.597 -> 0.403 -> 0.303 -> 0.095 -> 0.076 -> 0.023 ns as these accumulated, and at
+   -- 23 ps a failure on real silicon can be a timing failure wearing a logic failure's
+   -- clothes -- which is the worst possible thing to hand a debugging session.
+   --
+   -- A constant-false `if` is eliminated at elaboration, so the registers and their
+   -- fanout genuinely disappear. (The "a tie-off does not prune" rule from 984d3ce is
+   -- about ports of an INSTANTIATED module, which is a different situation.)
+   -- LEFT TRUE DELIBERATELY. Setting it false to "recover timing margin" was tried on
+   -- 2026-09-14 and made timing WORSE, twice: place_option 2 went from +0.023 ns (passing)
+   -- to -0.085 ns / 21 negative endpoints, and place_option 0 to -0.134 ns / 3. The reason
+   -- is that these probes are NOT on the critical path at all -- the worst path is
+   -- hdmi_out/act_h_2_s1 through ~14 levels of hdmi_out nets, i.e. the HDMI output block.
+   -- Removing unrelated logic only reshuffles placement around an already-marginal path.
+   -- If margin is needed, fix hdmi_out (it was pipelined once before for exactly this
+   -- reason); do not go probe-hunting for it.
+   constant CDRAM_PROBES : boolean := true;
    constant CDRAM_SELFTEST : boolean := false;
    type cdt_state_t is (CDT_IDLE, CDT_W, CDT_W_WAIT, CDT_R, CDT_R_WAIT, CDT_DONE);
    signal cdt_state  : cdt_state_t := CDT_IDLE;
@@ -2394,7 +2417,7 @@ begin
             -- Access accepted: same edge the arbiter's own cd_new uses (see its
             -- `cd_new := (cdr_rd_mux and not cdram_rd_r) or ...`). cdt_active is false
             -- in this build, so cdr_*_mux is just cd_ram_*.
-            if cd_ram_rd = '1' and cdsn_rd_r = '0' then
+            if CDRAM_PROBES and cd_ram_rd = '1' and cdsn_rd_r = '0' then
                cdsn_a_lat18 <= cd_ram_a(17 downto 0);
                if cd_ram_a(21 downto 18) = "1000" then
                   cdsn_rd_pend <= '1';
@@ -2407,7 +2430,7 @@ begin
             end if;
 
             -- Write side: data is valid at request time, no completion to wait for.
-            if cd_ram_wr = '1' and cdsn_wr_r = '0'
+            if CDRAM_PROBES and cd_ram_wr = '1' and cdsn_wr_r = '0'
                and cd_ram_a(21 downto 18) = "1000" then
                if cdram_wr_total /= x"FFFF" then
                   cdram_wr_total <= cdram_wr_total + 1;
@@ -2469,7 +2492,7 @@ begin
             end if;
 
             -- Completion: pair the latched address with the data just published.
-            if cd_ram_rdy_i = '1' and cd_rdy_r = '0' then
+            if CDRAM_PROBES and cd_ram_rdy_i = '1' and cd_rdy_r = '0' then
                if cdsn_rd_pend = '1' and sum_cmd_cnt >= 8 and cdsnoop_cnt < 16 then
                   cdsnoop_buf <= cdsnoop_buf(479 downto 0)
                                  & "000000" & cdsn_a_lat18 & cd_ram_di_i;
@@ -2524,6 +2547,7 @@ begin
       SECTOR_DATA_VALID => cd_sector_data_valid_i,
       SECTOR_DATA_LAST  => cd_sector_data_last_i,
       DBG_STATE         => cd_dbg_state_i,
+      DBG_DEND          => scsi_dend_i,
       FIFO_SPACE        => scsi_fifo_space_i,
       BUS_RST           => cd_bus_rst_i
    );
@@ -2542,6 +2566,7 @@ begin
       cd_audio_wr_i        <= '0';
       cd_dm_i              <= '0';
       cd_sector_is_audio_i <= '0';
+      scsi_dend_i          <= (others => '0');
    end generate;
 
    sdram_inst: sdram
@@ -2714,7 +2739,6 @@ begin
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
-      CD_DBG_DEND       => scsi_dend_i,
       CD_DBG_RD_TOTAL   => scsi_rd_total_i,
       CD_DBG_UNDERRUNS  => scsi_underruns_i,
       CD_DM => cd_dm_i,
@@ -3344,7 +3368,7 @@ begin
             -- the very counters that explain WHY they are not full. Putting the
             -- explanation behind the same gate as the data meant an empty capture
             -- emitted nothing at all and the run was wasted.
-            elsif dbg_hb_cnt = 0 and cdsnoop_pass < 3
+            elsif CDRAM_PROBES and dbg_hb_cnt = 0 and cdsnoop_pass < 3
                   and (cdsnoop_idx >= 8 or cdsnoop_cnt = 16) then
                -- Walks 0..8 then 10..14, i.e. tags 0xC0-0xC8 and 0xCA-0xCE. Index 9 is
                -- SKIPPED: 0xC9 belongs to the self-test result emitted once at the head
