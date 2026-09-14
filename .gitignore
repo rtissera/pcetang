@@ -20,3 +20,5 @@ sim/*/bootwork_llvm/
 sim/*/work/
 sim/cd/rwwork/
 sim/cd/endwork/
+sim/cd/sweep_results.txt
+sim/cd/sweep_regwalk_results.txt
