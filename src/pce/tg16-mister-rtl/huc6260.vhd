@@ -44,7 +44,12 @@ entity huc6260 is
 		VS_N		: out std_logic;
 		HS_N		: out std_logic;
 		HBL		: out std_logic;
-		VBL		: out std_logic
+		VBL		: out std_logic;
+		-- VCE control register, so a board trace can see the DOTCLOCK the core believes
+		-- it is in. CR(1:0) selects 256/336/512-wide; a game changing video mode changes
+		-- it, and a display that tiles rather than resizes means something downstream did
+		-- not follow. Read-only tap, no new logic.
+		CR_DBG	: out std_logic_vector(7 downto 0)
 	);
 end huc6260;
 
@@ -56,6 +61,7 @@ signal PREV_A	: std_logic_vector(2 downto 0);
 type ctrl_t is ( CTRL_IDLE, CTRL_WAIT, CTRL_INCR );
 signal CTRL		: ctrl_t;
 signal CR		: std_logic_vector(7 downto 0);
+-- see CR_DBG
 
 -- VCE Registers
 signal DOTCLOCK	: std_logic_vector(1 downto 0);
@@ -383,5 +389,7 @@ end process;
 
 CLKEN <= CLKEN_FF;
 CLKEN_F <= CLKEN_FF_F;
+
+	CR_DBG <= CR;
 
 end rtl;

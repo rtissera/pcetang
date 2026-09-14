@@ -1315,6 +1315,13 @@ architecture rtl of pcetang_console60k_cd is
    signal cdcmd_data      : std_logic_vector(63 downto 0) := (others => '0');
    signal cd_data_i      : std_logic_vector(7 downto 0);
    signal cd_datain_sectors_i : unsigned(8 downto 0);
+   -- video geometry tap, see tag 0xB3
+   signal dbg_vdc_screen_i : std_logic_vector(2 downto 0);
+   signal dbg_vce_cr_i     : std_logic_vector(7 downto 0);
+   signal vdc_screen_seen  : std_logic_vector(7 downto 0) := (others => '0');
+   signal vce_cr_seen      : std_logic_vector(7 downto 0) := (others => '0');
+   signal vdc_screen_chg   : unsigned(15 downto 0) := (others => '0');
+   signal vce_cr_chg       : unsigned(15 downto 0) := (others => '0');
    signal cd_data_wr_i   : std_logic;
    signal cd_data_end_i  : std_logic;
 
@@ -2743,6 +2750,8 @@ begin
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
       CD_DATAIN_SECTORS => cd_datain_sectors_i,
+      DBG_VDC_SCREEN    => dbg_vdc_screen_i,
+      DBG_VCE_CR        => dbg_vce_cr_i,
       CD_DBG_RD_TOTAL   => scsi_rd_total_i,
       CD_DBG_UNDERRUNS  => scsi_underruns_i,
       CD_DM => cd_dm_i,
@@ -3074,6 +3083,18 @@ begin
             if dbg_hb_cnt = 0 then
                ph_tag <= ph_tag + 1;
             end if;
+            -- Video geometry: remember the OR of every BAT-size and VCE-CR value seen,
+            -- plus how many times each changed. A mode switch that the display does not
+            -- follow shows up as a change count > 0 with a geometry that never moved.
+            vdc_screen_seen <= vdc_screen_seen or ("00000" & dbg_vdc_screen_i);
+            vce_cr_seen     <= vce_cr_seen or dbg_vce_cr_i;
+            if dbg_vdc_screen_i /= vdc_screen_seen(2 downto 0)
+               and vdc_screen_chg /= x"FFFF" then
+               vdc_screen_chg <= vdc_screen_chg + 1;
+            end if;
+            if dbg_vce_cr_i /= vce_cr_seen and vce_cr_chg /= x"FFFF" then
+               vce_cr_chg <= vce_cr_chg + 1;
+            end if;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             -- 32, not 64: two checksum passes now emit 32 lines before the core is even
             -- released, and the heartbeat comes LAST -- so if the log were ever
@@ -3156,7 +3177,25 @@ begin
                -- here -- incrementing it inside a branch gated on its own value would
                -- stop it after one step.
                dbg_trace_req <= '1';
-               if ph_tag(3 downto 2) = "01" then
+               if ph_tag(3 downto 2) = "11" then
+                  -- 0xB3: VIDEO GEOMETRY.
+                  -- [63:56] every VDC0 SCREEN (BAT size) value seen, OR-ed
+                  --         bit2 = 64 rows (else 32), bits1:0 = 32/64/128 columns
+                  -- | [55:48] every VCE CR seen, OR-ed (CR(1:0) = DOTCLOCK 256/336/512)
+                  -- | [47:32] SCREEN change count | [31:16] CR change count
+                  -- | [15:8] SCREEN now | [7:0] CR now.
+                  --
+                  -- A picture tiled 2x2 is the BAT wrapping at half the display width AND
+                  -- half its height, i.e. a 32x32 BAT (SCREEN="000") on a display set up
+                  -- for 64x64. If CR changed but SCREEN never left "000", the game's MWR
+                  -- write is not reaching the VDC; if SCREEN did change, the tiling is
+                  -- downstream of it.
+                  dbg_trace_tag  <= x"B3";
+                  dbg_trace_data <= vdc_screen_seen & vce_cr_seen
+                                    & std_logic_vector(vdc_screen_chg)
+                                    & std_logic_vector(vce_cr_chg)
+                                    & "00000" & dbg_vdc_screen_i & dbg_vce_cr_i;
+               elsif ph_tag(3 downto 2) = "01" then
                   -- 0xB2: CD_DATA_END accounting from cd_bridge.
                   -- [63:48] pulses CONSUMED by a *_WAIT_END state
                   -- | [47:32] pulses LOST (fired while nothing was listening)

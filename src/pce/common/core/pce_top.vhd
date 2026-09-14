@@ -340,6 +340,13 @@ entity pce_top is
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
 		-- cd_bridge -> SCSI.vhd, expected sector count of the READ(6) in flight.
 		CD_DATAIN_SECTORS : in  unsigned(8 downto 0) := (others => '0');
+		-- VIDEO GEOMETRY TAP. [2:0] VDC0's live SCREEN (MWR bits 6:4 -- BAT size: bit2
+		-- selects 32/64 rows, bits1:0 select 32/64/128 columns), and the VCE's control
+		-- register (CR(1:0) = DOTCLOCK, 256/336/512-wide). A picture that TILES rather
+		-- than resizes when a game changes video mode means the BAT size in force does not
+		-- match the display geometry, so these two say which half is wrong.
+		DBG_VDC_SCREEN : out std_logic_vector(2 downto 0) := (others => '0');
+		DBG_VCE_CR     : out std_logic_vector(7 downto 0) := (others => '0');
 		CD_DBG_RD_TOTAL   : out unsigned(15 downto 0);
 		-- DATA IN bursts that ran dry mid-burst; see SCSI.vhd's BURST_RDY. 0 = the sector
 		-- gate is doing its job.
@@ -658,7 +665,8 @@ port map(
 	VS_N		=> VS_N,
 	HS_N		=> HS_N,
 	HBL		=> VIDEO_HBL,
-	VBL		=> VIDEO_VBL
+	VBL		=> VIDEO_VBL,
+	CR_DBG => DBG_VCE_CR
 );
 
 VDC0 : entity work.HUC6270
@@ -1397,5 +1405,7 @@ end process;
 
 PSG_SR <= signed(PCE_SR(23 downto 8));
 PSG_SL <= signed(PCE_SL(23 downto 8));
+
+	DBG_VDC_SCREEN <= VDC0_SCREEN_DBG;
 
 end rtl;
