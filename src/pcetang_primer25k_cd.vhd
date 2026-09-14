@@ -1070,7 +1070,6 @@ begin
       CD_COMM_SEND => cd_comm_send_i,
       CD_DATA      => cd_data_i,
       CD_DATA_WR   => cd_data_wr_i,
-      CD_DATAIN_SECTORS => cd_datain_sectors_i,
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,

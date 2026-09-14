@@ -2532,7 +2532,6 @@ begin
       CD_COMM_SEND => cd_comm_send_i,
       CD_DATA      => cd_data_i,
       CD_DATA_WR   => cd_data_wr_i,
-      CD_DATAIN_SECTORS => cd_datain_sectors_i,
       CD_DATA_END  => cd_data_end_i,
 
       DISC_MOUNTED      => cd_mounted_i,
@@ -2743,6 +2742,7 @@ begin
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
+      CD_DATAIN_SECTORS => cd_datain_sectors_i,
       CD_DBG_RD_TOTAL   => scsi_rd_total_i,
       CD_DBG_UNDERRUNS  => scsi_underruns_i,
       CD_DM => cd_dm_i,
