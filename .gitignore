@@ -18,3 +18,5 @@ sim/sdram/sdram_vlt.sv
 # GHDL work libraries
 sim/*/bootwork_llvm/
 sim/*/work/
+sim/cd/rwwork/
+sim/cd/endwork/
