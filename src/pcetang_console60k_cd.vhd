@@ -819,7 +819,13 @@ architecture rtl of pcetang_console60k_cd is
    -- save-data signature. With the sweep on, Dungeon Explorer II stopped booting and
    -- dropped into the syscard's CD PLAYER -- the BIOS not finding what it expected in
    -- backup RAM. Re-enable only for a deliberate diagnosis, and expect saves destroyed.
-   constant CDRAM_SELFTEST : boolean := false;
+   -- ENABLED 2026-09-14. This test was previously worthless: the arbiter's CD-RAM
+   -- branch took its address from cd_ram_a instead of cdr_a_mux, so all 262144 accesses
+   -- landed on ONE address (the halted core's idle bus) and its "256 KiB, 0 bad" result
+   -- cleared a CD-RAM that was in fact completely broken by the inverted RAM_C_RD_n.
+   -- Both bugs are fixed, so this now sweeps for real -- and its results are finally
+   -- reported (tag 0xC9), which they never were either.
+   constant CDRAM_SELFTEST : boolean := true;
    type cdt_state_t is (CDT_IDLE, CDT_W, CDT_W_WAIT, CDT_R, CDT_R_WAIT, CDT_DONE);
    signal cdt_state  : cdt_state_t := CDT_IDLE;
    -- FULL 256KB sweep, not a 1KB sample. The first version wrote 1024 bytes at offset 0
@@ -841,6 +847,8 @@ architecture rtl of pcetang_console60k_cd is
    signal cdv_ok     : unsigned(15 downto 0) := (others => '0');
    signal cdv_bad    : unsigned(15 downto 0) := (others => '0');
    signal cdv_first  : std_logic_vector(15 downto 0) := (others => '0');
+   -- One-shot latch so the 0xC9 result is emitted once, not re-emitted every heartbeat.
+   signal cdv_sent   : std_logic := '0';
 
    -- what the arbiter actually sees: the self-test while it runs, pce_top afterwards
    signal cdr_a_mux  : std_logic_vector(21 downto 0);
@@ -854,6 +862,83 @@ architecture rtl of pcetang_console60k_cd is
    signal cd_ram_rd    : std_logic;
    signal cd_ram_wr    : std_logic;
    signal cd_ram_rdy_i : std_logic := '1';
+
+   -- CD-RAM READ SNOOP (2026-09-13). The sim boots this disc to its title screen; the
+   -- board runs the same RTL, is handed byte-identical sector data (tag 0xA4's eight
+   -- bytes match the sim's CD-RAM image exactly), reports 0 drops and 0 underruns, and
+   -- still never issues command 9 -- it drops into the syscard's error loop instead
+   -- (tags 0xD7/0xD8/0xD9: $1800-$1807 cleared, $1802 toggled, palette rewritten all
+   -- black). Everything on the delivery path is therefore accounted for, and the one
+   -- subsystem that differs between sim and board is where those bytes are STORED:
+   -- simulation models CD-RAM as a plain VHDL array, the board puts it in SDRAM behind
+   -- the cdr_owner arbiter, shared with ADPCM.
+   --
+   -- This snoops the CPU's OWN CD-RAM reads instead of adding a second SDRAM reader:
+   -- no new port, no extra arbitration on a design with ~0 timing margin, and it
+   -- reports exactly the bytes the CPU executed rather than what some other agent read.
+   --
+   -- Window is CPU_A(17:0) = 0x0100xx. pce_top drives `CD_RAM_A <= "1000" & CPU_A(17
+   -- downto 0)` (pce_top.vhd:1344), so the tag is bits 21:18 and the low 18 bits are the
+   -- raw CPU address. The sim's own CD-RAM tracker shows every write of this boot landing
+   -- in 0x010000..0x01076B, and its CPU begins executing at 0x0100BB.
+   --
+   -- REFERENCE (sim, 16 bytes at 0x010000, from sim/cd/tb_cd_boot.vhd's [cdram] dump):
+   --   4C F6 42 4C A8 40 4C 0F 42 4C B6 49 4C BF 49 4C
+   -- Each captured entry is addr(7:0) & data(7:0), oldest first from the MSB.
+   -- v2 (2026-09-13, after the first run came back ALL ZEROS). Two corrections:
+   --
+   -- 1. The address is now latched when the access is ACCEPTED, not when its data
+   --    arrives. cd_ram_a is level-held only until rdy rises, and the CPU can start the
+   --    next access on that same edge -- v1 sampled the address one access late, which
+   --    is why it reported odd addresses stepping by two instead of an instruction
+   --    fetch pattern. The DATA was always right; only the label was skewed.
+   -- 2. WRITES are snooped too. "CD-RAM returns zero" has two readings -- the loader
+   --    stored the program and readback is broken, or the loader never stored it at all
+   --    -- and only the write side separates them. Writes are NOT gated on
+   --    sum_cmd_cnt >= 8: the program is stored DURING commands 6-8, so gating them the
+   --    way the reads are gated would capture nothing and look like "never written".
+   -- 32-bit entries carrying the FULL 18-bit CD-RAM address, captured anywhere in
+   -- CD-RAM rather than only the 0x0100xx page. Pinning the window meant that once
+   -- CD-RAM actually worked and the CPU stored the program somewhere else, the capture
+   -- stayed empty and said nothing at all -- which is what the first post-fix run did.
+   signal cdsnoop_buf    : std_logic_vector(511 downto 0) := (others => '0');
+   signal cdsnoop_cnt    : unsigned(4 downto 0) := (others => '0');
+   -- Nine frames per pass (0xC0-0xC8), three passes. Kept as an explicit index+pass
+   -- pair rather than one counter masked down: a 0..26 counter with a 3-bit mask makes
+   -- frame 9 re-emit as tag 0xC1, which is exactly the tag-collision class that has
+   -- already cost this project hardware rounds.
+   signal cdsnoop_idx    : unsigned(3 downto 0) := (others => '0');
+   signal cdsnoop_pass   : unsigned(1 downto 0) := (others => '0');
+   signal cd_rdy_r       : std_logic := '1';
+   signal cdsn_rd_r      : std_logic := '0';
+   signal cdsn_wr_r      : std_logic := '0';
+   signal cdsn_a_lat18   : std_logic_vector(17 downto 0) := (others => '0');
+   signal cdsn_rd_pend   : std_logic := '0';
+   signal cdsnoop_wbuf   : std_logic_vector(255 downto 0) := (others => '0');
+   signal cdsnoop_wcnt   : unsigned(4 downto 0) := (others => '0');
+   -- Lowest / highest CD-RAM address the loader ever wrote. lo starts at all-ones so the
+   -- first write sets it; if no write ever happens lo stays 0x3FFFF and hi stays 0.
+   signal cdram_wr_lo    : unsigned(17 downto 0) := (others => '1');
+   signal cdram_wr_hi    : unsigned(17 downto 0) := (others => '0');
+   -- Page watch on 0x137xx -- the page the CPU reads 0x00 from. See the capture site.
+   signal wr137_cnt      : unsigned(15 downto 0) := (others => '0');
+   signal wr137_last_a   : std_logic_vector(7 downto 0) := (others => '0');
+   signal wr137_last_d   : std_logic_vector(7 downto 0) := (others => '0');
+   signal wr137_first20  : std_logic_vector(7 downto 0) := (others => '0');
+   signal wr137_hit20    : std_logic := '0';
+   -- Totals over the WHOLE CD-RAM space, not just the window: if the CPU never touches
+   -- CD-RAM at all these stay 0, which is a different fault from a bad readback.
+   signal cdram_rd_total : unsigned(15 downto 0) := (others => '0');
+   signal cdram_wr_total : unsigned(15 downto 0) := (others => '0');
+   -- Core-reset census. "The boot restarts" has two very different causes -- the user
+   -- pressing RUN, or the core resetting itself -- and the trace could not tell them
+   -- apart, so the probe-block repeat count got misread as automatic resets once.
+   -- Counts core_resetn falling edges since the FPGA was loaded; trap/bank_bad are
+   -- sticky so a fault that happened in an EARLIER attempt is still visible.
+   signal core_rst_cnt   : unsigned(5 downto 0) := (others => '0');
+   signal core_rst_r     : std_logic := '0';
+   signal trap_sticky    : std_logic := '0';
+   signal bank_sticky    : std_logic := '0';
 
    signal cdr_addr : std_logic_vector(24 downto 0);
    signal cdr_req  : std_logic := '0';
@@ -900,6 +985,8 @@ architecture rtl of pcetang_console60k_cd is
    -- back-to-back burst would drop most of them; these are emitted at heartbeat cadence.
    signal toc_wr_r        : std_logic := '0';
    signal toc_wr_count    : unsigned(7 downto 0) := (others => '0');
+   -- TOC_WR pulses that arrived while the core was still held in reset (saturating).
+   signal toc_wr_inrst    : unsigned(7 downto 0) := (others => '0');
    signal toc_t1_lba      : std_logic_vector(23 downto 0) := (others => '0');
    signal toc_t2_lba      : std_logic_vector(23 downto 0) := (others => '0');
    signal toc_lo_lba      : std_logic_vector(23 downto 0) := (others => '0');
@@ -2122,10 +2209,40 @@ begin
                      cdr_addr <= std_logic_vector(AC_SDRAM_BASE +
                                  resize(unsigned(cdr_a_mux(20 downto 0)), 25));
                   else
+                     -- cdr_a_mux, NOT cd_ram_a: the AC branch above already uses the
+                     -- mux, and taking the raw core signal here meant the CD-RAM
+                     -- self-test (cdt_active='1', driving cdt_a through the mux) sent
+                     -- every one of its 262144 accesses to ONE constant address -- the
+                     -- halted core's idle cd_ram_a. That is why its "256 KiB, 0 bad"
+                     -- result cleared a CD-RAM that was in fact completely broken.
+                     -- Identical when cdt_active='0', so the shipped path is unchanged.
                      cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
-                                 resize(unsigned(cd_ram_a(17 downto 0)), 25));
+                                 resize(unsigned(cdr_a_mux(17 downto 0)), 25));
                   end if;
-                  cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write
+                  -- POLARITY FIX (2026-09-13). This read WRONG for the whole life of
+                  -- the CD path and is why no CD game ever booted.
+                  --
+                  -- sdram.sv uses this signal DIRECTLY as the write enable --
+                  -- `we <= RAM_C_RD_n;` (sdram.sv:572, and :510 for port A) -- and
+                  -- `last_valid[2] <= ~RAM_C_RD_n;` invalidates the line cache on a
+                  -- write. So RAM_C_RD_n = '1' means WRITE, '0' means READ, exactly as
+                  -- the old comment here said. The `not` then inverted every access:
+                  --   CPU write -> rd_n='0' -> we=0 -> an SDRAM READ, data never stored
+                  --   CPU read  -> rd_n='1' -> we=1 -> an SDRAM WRITE of cd_ram_do,
+                  --                and sdram.sv:650-652 returns `RAM_C_DO <= data[7:0]`
+                  --                on a write, i.e. the byte just written -- which for a
+                  --                read is the CPU's idle write-data bus, 0.
+                  -- Measured on hardware (trace tags 0xC4-0xC7 vs 0xC0-0xC3): the CPU's
+                  -- writes carry the correct program bytes, every readback is 0x00, and
+                  -- the arbiter reports 0 timeouts. 0x00 is BRK, so the CPU vectored
+                  -- straight into the syscard's error handler -- the black screen.
+                  --
+                  -- The correct idiom is vram0_cache.vhd:808's `ram_a_rd_n <=
+                  -- seq_is_write;` -- assign the write flag, do not invert it.
+                  --
+                  -- Nano 20K is unaffected: it routes CD-RAM through port B's explicit
+                  -- RAM_B_WE instead of this arbiter.
+                  cdr_rd_n <= cdr_wr_mux;   -- '0' read, '1' write (mux, see cdr_addr)
                   cdr_di   <= cdr_do_mux;
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_CDRAM;
@@ -2137,7 +2254,8 @@ begin
                elsif adpcm_pend = '1' or adpcm_new = '1' then
                   cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
                               resize(unsigned(adpcm_ram_a_i), 25));
-                  cdr_rd_n <= not adpcm_ram_we_i;
+                  -- Same inversion as the CD-RAM branch above -- see that comment.
+                  cdr_rd_n <= adpcm_ram_we_i;
                   cdr_di   <= "0000" & adpcm_ram_do_i;  -- one nibble packed per SDRAM byte
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_ADPCM;
@@ -2205,6 +2323,125 @@ begin
                   cdr_state <= CDR_IDLE;
                end if;
          end case;
+      end if;
+   end process;
+
+   -- CD-RAM read snoop capture (see cdsnoop_buf's declaration comment). Gated on
+   -- sum_cmd_cnt >= 8 so it samples the program the boot actually loaded, not the
+   -- syscard's own earlier scratch traffic. cd_ram_rdy_i's rising edge is when the
+   -- arbiter has published cd_ram_di_i for the access that just completed; cd_ram_a is
+   -- level-held by pce_top for the whole access, so sampling it here is the same address.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         cd_rdy_r  <= cd_ram_rdy_i;
+         cdsn_rd_r <= cd_ram_rd;
+         cdsn_wr_r <= cd_ram_wr;
+
+         core_rst_r <= core_resetn;
+         if core_resetn = '0' and core_rst_r = '1' and core_rst_cnt /= "111111" then
+            core_rst_cnt <= core_rst_cnt + 1;
+         end if;
+         if trap_fired = '1' then trap_sticky <= '1'; end if;
+         if bank_bad   = '1' then bank_sticky <= '1'; end if;
+
+         -- NOT cleared on core_resetn. The syscard boot is retried (manually or by its
+         -- own error path) and each retry pulses the core reset, so clearing here wiped
+         -- the capture before it could ever be emitted -- which is exactly what the
+         -- 2026-09-13 post-fix run showed: every 0xC frame zero, proving nothing.
+         -- These are first-capture-wins and hold their value until the FPGA is reloaded.
+         if core_resetn = '0' and cdsnoop_cnt = 0 and cdsnoop_wcnt = 0 then
+            cdsn_rd_pend   <= '0';
+            cdram_rd_total <= (others => '0');
+            cdram_wr_total <= (others => '0');
+         else
+            -- Access accepted: same edge the arbiter's own cd_new uses (see its
+            -- `cd_new := (cdr_rd_mux and not cdram_rd_r) or ...`). cdt_active is false
+            -- in this build, so cdr_*_mux is just cd_ram_*.
+            if cd_ram_rd = '1' and cdsn_rd_r = '0' then
+               cdsn_a_lat18 <= cd_ram_a(17 downto 0);
+               if cd_ram_a(21 downto 18) = "1000" then
+                  cdsn_rd_pend <= '1';
+               else
+                  cdsn_rd_pend <= '0';
+               end if;
+               if cd_ram_a(21 downto 18) = "1000" and cdram_rd_total /= x"FFFF" then
+                  cdram_rd_total <= cdram_rd_total + 1;
+               end if;
+            end if;
+
+            -- Write side: data is valid at request time, no completion to wait for.
+            if cd_ram_wr = '1' and cdsn_wr_r = '0'
+               and cd_ram_a(21 downto 18) = "1000" then
+               if cdram_wr_total /= x"FFFF" then
+                  cdram_wr_total <= cdram_wr_total + 1;
+               end if;
+               -- FREE-RUNNING, and the FULL address (2026-09-14). This used to keep the
+               -- first 16 writes with only cd_ram_a(7 downto 0) -- eight bits, so the
+               -- write could not be located at all -- and it was never emitted on any
+               -- tag, so 16 captured writes were discarded every single run.
+               --
+               -- Same 32-bit entry format as the read buffer ("000000" & addr & data) so
+               -- the two can be diffed directly. Free-running keeps the LAST 8 writes,
+               -- which is what matters: the reads that come back as 0x00 happen at the
+               -- END of the load, and a first-16 window only ever showed the beginning.
+               cdsnoop_wbuf <= cdsnoop_wbuf(223 downto 0)
+                               & "000000" & cd_ram_a(17 downto 0) & cd_ram_do;
+               if cdsnoop_wcnt < 16 then
+                  cdsnoop_wcnt <= cdsnoop_wcnt + 1;
+               end if;
+               -- Extent of everything the loader wrote. THE discriminator: the CPU reads
+               -- 0x00 at 0x1372x after 61441 writes landed. If that address is inside
+               -- [wr_lo, wr_hi] the data was written and CD-RAM lost it under real load
+               -- (which the core-halted sweep structurally cannot detect); if it is
+               -- outside, nothing ever wrote there and the fault is the CPU executing
+               -- somewhere it was never loaded -- a completely different bug.
+               -- PAGE WATCH on 0x137xx. [wr_lo,wr_hi] turned out NOT to settle the
+               -- question it was built for: the span is 0x12000-0x33FFF (139264 bytes)
+               -- but only 61441 writes happened, so it is less than half covered and
+               -- "inside the span" does not mean "was written". This counts writes to
+               -- the ONE page the CPU actually reads 0x00 from -- 0x13720..0x13734,
+               -- identical on two consecutive runs -- which does settle it:
+               --   count = 0            -> nothing ever wrote there; the CPU is
+               --                           executing from a region never loaded, and
+               --                           memory is innocent (mapping / bad jump).
+               --   count > 0, data /= 0 -> it WAS written and reads back 0x00; the
+               --                           fault is between the CPU and the chip, i.e.
+               --                           the cdr_owner arbiter (sdram.sv itself is
+               --                           already cleared by sim/sdram).
+               --   count > 0, data  = 0 -> it was written with zeros; the load put
+               --                           nothing there and the bug is upstream.
+               if cd_ram_a(17 downto 8) = "0100110111" then     -- 0x137xx
+                  if wr137_cnt /= x"FFFF" then
+                     wr137_cnt <= wr137_cnt + 1;
+                  end if;
+                  wr137_last_a <= cd_ram_a(7 downto 0);
+                  wr137_last_d <= cd_ram_do;
+                  if cd_ram_a(7 downto 0) = x"20" then           -- exactly 0x13720
+                     wr137_hit20 <= '1';
+                     if wr137_hit20 = '0' then
+                        wr137_first20 <= cd_ram_do;
+                     end if;
+                  end if;
+               end if;
+               if unsigned(cd_ram_a(17 downto 0)) < cdram_wr_lo then
+                  cdram_wr_lo <= unsigned(cd_ram_a(17 downto 0));
+               end if;
+               if unsigned(cd_ram_a(17 downto 0)) > cdram_wr_hi then
+                  cdram_wr_hi <= unsigned(cd_ram_a(17 downto 0));
+               end if;
+            end if;
+
+            -- Completion: pair the latched address with the data just published.
+            if cd_ram_rdy_i = '1' and cd_rdy_r = '0' then
+               if cdsn_rd_pend = '1' and sum_cmd_cnt >= 8 and cdsnoop_cnt < 16 then
+                  cdsnoop_buf <= cdsnoop_buf(479 downto 0)
+                                 & "000000" & cdsn_a_lat18 & cd_ram_di_i;
+                  cdsnoop_cnt <= cdsnoop_cnt + 1;
+               end if;
+               cdsn_rd_pend <= '0';
+            end if;
+         end if;
       end if;
    end process;
 
@@ -2588,6 +2825,15 @@ begin
          toc_wr_r <= toc_wr_i;
          if toc_wr_i = '1' and toc_wr_r = '0' then
             toc_wr_count <= toc_wr_count + 1;
+            -- Sticky evidence for the TOC-vs-core-reset race, reported on 0xC9's
+            -- [15:8]. A TOC_WR that lands while core_resetn is low used to be
+            -- dropped entirely (cd_bridge's TOC_CAPTURE had an async RST_N; it no
+            -- longer does). This counter says whether the window is ever actually
+            -- hit on a normal build, so "the race exists" stops being an inference:
+            -- 0 here means the upload always won and the race is not a live cause.
+            if core_resetn = '0' and toc_wr_inrst /= x"FF" then
+               toc_wr_inrst <= toc_wr_inrst + 1;
+            end if;
             if unsigned(toc_track_i) > unsigned(toc_maxtrack)
                and unsigned(toc_track_i) /= 100 then
                toc_maxtrack <= toc_track_i;
@@ -2752,6 +2998,12 @@ begin
             end if;
 
             dbg_hb_cnt <= dbg_hb_cnt + 1;
+            -- Re-arm the 0xC9 one-shot on every ROM load. The self-test sweep itself
+            -- runs once per power-on, but toc_wr_inrst is per-load evidence, and a
+            -- single emit at power-on would only ever describe the first disc.
+            if rom_loading(0) = '1' and rom_loading_r = '0' then
+               cdv_sent <= '0';
+            end if;
             -- ~4.2M clk_pce cycles at 42.86MHz = ~100ms between snapshots
             -- 32, not 64: two checksum passes now emit 32 lines before the core is even
             -- released, and the heartbeat comes LAST -- so if the log were ever
@@ -2789,6 +3041,36 @@ begin
                                  & x"0000";
                cdtq_rd <= cdtq_rd + 1;
                cdt_seq <= cdt_seq + 1;
+            elsif cdv_sent = '0'
+                  and (not CDRAM_SELFTEST or cdt_state = CDT_DONE) then
+               -- 0xC9: CD-RAM SELF-TEST RESULT + TOC/reset race evidence. Emitted FIRST,
+               -- once per ROM load, before the core is released -- NOT from the rotating
+               -- summary ladder below. Emitted even when CDRAM_SELFTEST is off, because
+               -- [15:8] is the measurement that has to survive turning the sweep off;
+               -- the cdv_* fields simply read zero in that case.
+               --
+               -- The previous build put it there, behind twelve full A-rotations, and the
+               -- run produced zero 0xC tags: the log simply ended before its turn came
+               -- (the last rotation in that log is missing its final tag, which is the
+               -- async log_task's queue being lost at power-off). The result is known
+               -- before any game runs, so there is no reason to queue it behind anything.
+               --
+               -- [63:48] KiB verified OK | [47:32] BAD bytes | [31:16] first mismatch as
+               -- wrote|read | [15:8] TOC_WR pulses that landed during core reset
+               -- | [7:0] port-C watchdog fires.
+               --
+               -- READ IT ONE WAY ONLY. bad /= 0 is conclusive: the sweep runs with the
+               -- core halted, so nothing but the memory path itself can have corrupted it.
+               -- bad = 0 is NOT "CD-RAM is correct" -- there is no ADPCM traffic on port C,
+               -- no ROM port contention and no refresh pressure with the core halted, and
+               -- the pattern (idx(7:0) xor idx(15:8) xor idx(17:16)) gives the same byte
+               -- for addresses (lo,hi) and (hi,lo), so a swapped-address-bit fault passes.
+               cdv_sent       <= '1';
+               dbg_trace_req  <= '1';
+               dbg_trace_tag  <= x"C9";
+               dbg_trace_data <= std_logic_vector(cdv_ok) & std_logic_vector(cdv_bad)
+                                 & cdv_first & std_logic_vector(toc_wr_inrst)
+                                 & std_logic_vector(dbg_cdr_timeout_cnt);
             elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
                rdcmd_cnt     <= rdcmd_cnt + 1;
@@ -2968,6 +3250,111 @@ begin
                   when "1010" => dbg_trace_data <= trap_bview(1) & x"00000000";
                   -- 0xEB: MPR_SEL | ADDR_BUS(15:13) | MC.ADDR_BUS | A_OUT(20:13)
                   when others => dbg_trace_data <= "0000000000" & trap_sel & x"00000000";
+               end case;
+            -- 0xC8 (cdsnoop_idx = 8) is NOT gated on the buffers being full: it carries
+            -- the very counters that explain WHY they are not full. Putting the
+            -- explanation behind the same gate as the data meant an empty capture
+            -- emitted nothing at all and the run was wasted.
+            elsif dbg_hb_cnt = 0 and cdsnoop_pass < 3
+                  and (cdsnoop_idx >= 8 or cdsnoop_cnt = 16) then
+               -- Walks 0..8 then 10..14, i.e. tags 0xC0-0xC8 and 0xCA-0xCE. Index 9 is
+               -- SKIPPED: 0xC9 belongs to the self-test result emitted once at the head
+               -- of the chain, and a second payload on that tag would be a collision of
+               -- exactly the kind already paid for twice on this project.
+               if cdsnoop_idx = 15 then
+                  cdsnoop_idx  <= (others => '0');
+                  cdsnoop_pass <= cdsnoop_pass + 1;
+               elsif cdsnoop_idx = 8 then
+                  cdsnoop_idx <= x"A";
+               else
+                  cdsnoop_idx <= cdsnoop_idx + 1;
+               end if;
+               dbg_trace_req <= '1';
+               -- CD-RAM snoop, tags 0xC0-0xC8 (0xC is free in this build -- the vfy
+               -- ROM dump that owns it only runs before the core is released).
+               --   0xC0-0xC3 : first 16 CD-RAM READS in the 0x0100xx window after the
+               --               boot's 8th command, as addr(7:0)&data(7:0), oldest first.
+               --   0xC4-0xC7 : first 16 CD-RAM WRITES in the same window, same format,
+               --               captured from the load itself (NOT gated on command 8).
+               --   0xC8      : port-C health and whole-space totals.
+               --
+               -- Run 1 (v1, reads only) came back every byte 0x00 against a sim
+               -- reference of 4C F6 42 4C A8 40 4C 0F. 0x00 is BRK, which vectors the
+               -- CPU straight into the syscard's error handler -- the black-palette
+               -- loop seen on tags 0xD6/0xD7. The write side decides which bug that is:
+               --   writes show the real program, reads show zero -> storage/readback
+               --   writes absent entirely                       -> the CPU never stored
+               --   both show the program                        -> fault is above memory
+               -- 0xC8's cdram_wr_total/cdram_rd_total cover the WHOLE CD-RAM space, so
+               -- "the CPU uses a different region" is distinguishable from "no traffic".
+               -- Emitted 3 full passes so a dropped frame costs no hardware round trip.
+               -- 0xC0-0xC7: the 16 captured CD-RAM READS, two 32-bit entries per frame,
+               -- oldest first. Each entry is "000000" & addr(17:0) & data(7:0), so the
+               -- full CD-RAM address is readable and the bytes can be diffed against the
+               -- sim's [cdram] dump wherever the program actually landed.
+               dbg_trace_tag <= x"C" & std_logic_vector(cdsnoop_idx);
+               case cdsnoop_idx is
+                  when x"0" => dbg_trace_data <= cdsnoop_buf(511 downto 448);
+                  when x"1" => dbg_trace_data <= cdsnoop_buf(447 downto 384);
+                  when x"2" => dbg_trace_data <= cdsnoop_buf(383 downto 320);
+                  when x"3" => dbg_trace_data <= cdsnoop_buf(319 downto 256);
+                  when x"4" => dbg_trace_data <= cdsnoop_buf(255 downto 192);
+                  when x"5" => dbg_trace_data <= cdsnoop_buf(191 downto 128);
+                  when x"6" => dbg_trace_data <= cdsnoop_buf(127 downto 64);
+                  when x"7" => dbg_trace_data <= cdsnoop_buf(63 downto 0);
+                  -- 0xCA-0xCD: the LAST 8 CD-RAM WRITES, same 32-bit entry format as the
+                  -- reads above ("000000" & addr(17:0) & data(7:0)), oldest first. These
+                  -- were captured and thrown away on every previous run.
+                  when x"A" => dbg_trace_data <= cdsnoop_wbuf(255 downto 192);
+                  when x"B" => dbg_trace_data <= cdsnoop_wbuf(191 downto 128);
+                  when x"C" => dbg_trace_data <= cdsnoop_wbuf(127 downto 64);
+                  when x"D" => dbg_trace_data <= cdsnoop_wbuf(63 downto 0);
+                  when x"E" =>
+                     -- 0xCE: THE DISCRIMINATOR.
+                     -- [63:46] lowest CD-RAM address written | [45:28] highest written
+                     -- | [27:10] 0 | [9:0] 0.
+                     -- Read it against the read addresses on 0xC0-0xC7. If a read that
+                     -- returned 0x00 falls INSIDE [lo,hi], the byte was written and the
+                     -- memory lost it under real load -- which the core-halted 256 KiB
+                     -- sweep (0 bad) cannot detect, because it runs with no ADPCM port-C
+                     -- traffic, no ROM contention and no refresh pressure. If it falls
+                     -- OUTSIDE, nothing ever wrote there and the CPU is executing from a
+                     -- region that was never loaded: a mapping or bad-jump bug, not RAM.
+                     -- lo = 0x3FFFF with hi = 0 means no CD-RAM write happened at all.
+                     dbg_trace_data <= std_logic_vector(cdram_wr_lo)
+                                       & std_logic_vector(cdram_wr_hi)
+                                       & "0000000000" & "0000000000" & "00000000";
+                  when x"F" =>
+                     -- 0xCF: THE PAGE WATCH, and the real discriminator (0xCE's span was
+                     -- too weak -- see the capture site).
+                     -- [63:48] writes to page 0x137xx | [47:40] low byte of the last
+                     -- address written there | [39:32] data of that last write
+                     -- | [31:24] data of the FIRST write to 0x13720 exactly
+                     -- | [23:16] 1 if 0x13720 was ever written at all | [15:0] 0.
+                     dbg_trace_data <= std_logic_vector(wr137_cnt)
+                                       & wr137_last_a & wr137_last_d & wr137_first20
+                                       & "0000000" & wr137_hit20 & x"0000";
+                  -- NOTE: no `when x"9"` here any more. The self-test result used to be
+                  -- emitted from this ladder as 0xC9 and never reached the log once,
+                  -- because this branch sits behind twelve full summary rotations. It is
+                  -- now emitted once, up front, from its own branch at the head of the
+                  -- emit chain; two sources for one tag would be a collision of exactly
+                  -- the kind already paid for twice on this project.
+                  when others =>
+                     -- 0xC8: [63:56] port-C watchdog fires (cdr_timeouts -- the arbiter
+                     -- releasing WHATEVER DATA IS PRESENT rather than hanging; this was
+                     -- incremented and read nowhere before) | [55:48] reads captured
+                     -- | [47:40] writes captured | [39:24] CD-RAM writes seen anywhere
+                     -- | [23:8] CD-RAM reads seen anywhere | [7:0] 0.
+                     dbg_trace_data <= std_logic_vector(dbg_cdr_timeout_cnt)
+                                       & "000" & std_logic_vector(cdsnoop_cnt)
+                                       & "000" & std_logic_vector(cdsnoop_wcnt)
+                                       & std_logic_vector(cdram_wr_total)
+                                       & std_logic_vector(cdram_rd_total)
+                                       -- [7:2] core resets since FPGA load | [1] trap
+                                       -- fired ever | [0] bank_bad ever.
+                                       & std_logic_vector(core_rst_cnt)
+                                       & trap_sticky & bank_sticky;
                end case;
             elsif dbg_hb_cnt = 0 and cdv_tag_cnt < 24 then
                cdv_tag_cnt <= cdv_tag_cnt + 1;

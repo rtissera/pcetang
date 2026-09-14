@@ -974,7 +974,30 @@ begin
                      cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
                                  resize(unsigned(cd_ram_a(17 downto 0)), 25));
                   end if;
-                  cdr_rd_n <= not cd_ram_wr;   -- '0' read, '1' write -- matches RAM_x_RD_n
+                  -- POLARITY FIX (2026-09-13). This read WRONG for the whole life of
+                  -- the CD path and is why no CD game ever booted.
+                  --
+                  -- sdram.sv uses this signal DIRECTLY as the write enable --
+                  -- `we <= RAM_C_RD_n;` (sdram.sv:572, and :510 for port A) -- and
+                  -- `last_valid[2] <= ~RAM_C_RD_n;` invalidates the line cache on a
+                  -- write. So RAM_C_RD_n = '1' means WRITE, '0' means READ, exactly as
+                  -- the old comment here said. The `not` then inverted every access:
+                  --   CPU write -> rd_n='0' -> we=0 -> an SDRAM READ, data never stored
+                  --   CPU read  -> rd_n='1' -> we=1 -> an SDRAM WRITE of cd_ram_do,
+                  --                and sdram.sv:650-652 returns `RAM_C_DO <= data[7:0]`
+                  --                on a write, i.e. the byte just written -- which for a
+                  --                read is the CPU's idle write-data bus, 0.
+                  -- Measured on hardware (trace tags 0xC4-0xC7 vs 0xC0-0xC3): the CPU's
+                  -- writes carry the correct program bytes, every readback is 0x00, and
+                  -- the arbiter reports 0 timeouts. 0x00 is BRK, so the CPU vectored
+                  -- straight into the syscard's error handler -- the black screen.
+                  --
+                  -- The correct idiom is vram0_cache.vhd:808's `ram_a_rd_n <=
+                  -- seq_is_write;` -- assign the write flag, do not invert it.
+                  --
+                  -- Nano 20K is unaffected: it routes CD-RAM through port B's explicit
+                  -- RAM_B_WE instead of this arbiter.
+                  cdr_rd_n <= cd_ram_wr;   -- '0' read, '1' write
                   cdr_di   <= cd_ram_do;       -- pce_top's CD_RAM_DO: the byte it's writing
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_CDRAM;
@@ -984,7 +1007,8 @@ begin
                elsif adpcm_pend = '1' or adpcm_new = '1' then
                   cdr_addr <= std_logic_vector(ADPCM_SDRAM_BASE +
                               resize(unsigned(adpcm_ram_a_i), 25));
-                  cdr_rd_n <= not adpcm_ram_we_i;
+                  -- Same inversion as the CD-RAM branch above -- see that comment.
+                  cdr_rd_n <= adpcm_ram_we_i;
                   cdr_di   <= "0000" & adpcm_ram_do_i;  -- one nibble packed per SDRAM byte
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_ADPCM;
