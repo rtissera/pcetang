@@ -10,6 +10,12 @@ SGX, on all three boards, with real measured resource numbers). pcetang wires th
 into `nand2mario/tangcore`'s BL616-based loader/OSD/joypad framework instead of
 NECTang's own fixed-test-pattern bring-ups.
 
+> **Before touching any bridge between the core and an off-chip memory, read
+> [`MEMORY_BRIDGE_CONTRACT.md`](MEMORY_BRIDGE_CONTRACT.md).** It states the one rule those
+> bridges must obey, why the donor is immune to it by construction, and an audit of every
+> ported memory client. Violating it produced both the HuCard black screen and the failure
+> of every PC Engine CD game to boot.
+
 ## What TangCore actually provides (verified against real source, not the README)
 
 Read directly from `rtissera/nestang` (private fork of `nand2mario/nestang`, TangCore's
