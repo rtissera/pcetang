@@ -153,13 +153,19 @@ bridge's design.
 
 `tb_cd_boot` on Dracula X sectors, `CDRAM_WAIT=40`, everything else identical:
 
-| `CDRAM_STALE_BUG` | SCSI commands completed |
-|---|---|
-| 1 (old, edge-only bridge) | stalls at **7** |
-| 0 (fixed bridge) | reaches **8** and continues |
+| | `CDRAM_STALE_BUG=1` (old bridge) | `CDRAM_STALE_BUG=0` (fixed) |
+|---|---|---|
+| SCSI commands | stalls at **7** | **8**, still running when stopped |
+| `cpu_a` | `1FE009` — bank **$FF**, out of ROM entirely | `000A9D` — bank 0, syscard ROM |
+| bytes served | 12 289, `lvl=0`, drained, nothing moving | 34 051, `lvl=2285`, `cdbst=5`, streaming |
 
-The board stalls at exactly the same place: it completes 7, SELECTs for command 8 — the
-first bulk read, `08 00 0e 0c 20`, LBA 3596 count 32 — and never sends the CDB.
+The broken bridge does not merely run slower: the CPU leaves ROM and executes in a bank it
+has no business being in, the same class of derailment the hardware trap caught at bank
+`$97`.
+
+Command 8 in the fixed run decodes to `08 00 0E 0C 20` — READ(6), LBA 3596, count 32 —
+which is exactly the golden reference's command 8, the first bulk read. The board stalls at
+precisely that boundary: it completes 7, SELECTs for 8, and never sends the CDB.
 
 ## Testbench rule
 
