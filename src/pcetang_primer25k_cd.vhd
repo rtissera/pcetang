@@ -474,6 +474,16 @@ architecture rtl of pcetang_primer25k_cd is
    signal cdr_state      : cdr_state_t := CDR_IDLE;
    signal cdr_settle_cnt : unsigned(2 downto 0) := (others => '0');
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
+   -- PCE PORT (2026-09-15): CD-RAM stale-byte fix. Full rationale, including why the
+   -- donor does not have this bug, is in pcetang_console60k_cd.vhd next to its own
+   -- cdr_a_last -- copied here, not re-derived. Short form: CD_RAM_RD is a LEVEL held
+   -- across consecutive CPU memory cycles, cd_new was a rising edge only, so the second
+   -- of two back-to-back CD-RAM fetches launched nothing and the CPU took byte N-1
+   -- un-stalled. Multi-byte code cannot execute from CD-RAM without this.
+   signal cdr_a_last      : std_logic_vector(21 downto 0) := (others => '0');
+   signal cd_new_comb     : std_logic;
+   signal cd_done         : std_logic := '0';
+   signal cd_ram_rdy_comb : std_logic;
 
    -- ADPCM RAM bridge: shares this same port-C hardware/FSM with CD-RAM above (Opus-
    -- agent-recommended design -- see docs/ARCHITECTURE.md -- arbitrating here in the
@@ -821,6 +831,14 @@ begin
                if romb_wait = '0' then
                   wr_state <= RB_IDLE;
                end if;
+
+            -- The write FSM shares romb_state_t with the read FSM but has no CDC
+            -- address-settle step of its own (rom_do_valid already latches address and
+            -- data a cycle before wr_req toggles). Explicit arm so the case is complete:
+            -- `ghdl -a --std=08` rejects the file outright without it ("no choice for
+            -- RB_ADDR"), which is what stopped this board from being analysable at all.
+            when RB_ADDR =>
+               wr_state <= RB_IDLE;
          end case;
       end if;
    end process;
@@ -935,15 +953,27 @@ begin
    -- caller for the full wait, not just from the moment it happens to reach the front.
    -- RAM_C is level-held/assert-and-hold (port A's convention), not port B's
    -- toggle-per-request one -- see sdram.sv's header.
+   -- New-request detect and the combinational ready: see pcetang_console60k_cd.vhd's
+   -- identical pair for the rationale. The `cd_ram_rdy_i and not (...)` form (rather than
+   -- the ROM bridge's `cdr_state /= CDR_IDLE`) is required because this arbiter is SHARED
+   -- with ADPCM -- the state test would stall the CPU on every ADPCM slot.
+   cd_new_comb <= '1' when (cd_ram_rd = '1' or cd_ram_wr = '1')
+                           and ((cd_ram_rd = '1' and cdram_rd_r = '0')
+                                or (cd_ram_wr = '1' and cdram_wr_r = '0')
+                                or cd_ram_a /= cdr_a_last)
+                  else '0';
+   cd_ram_rdy_comb <= cd_ram_rdy_i and not (cd_new_comb and not cd_done);
+
    process (clk_pce)
       variable cd_new, adpcm_new : std_logic;
    begin
       if rising_edge(clk_pce) then
+         cd_done <= '0';
          cdram_rd_r      <= cd_ram_rd;
          cdram_wr_r      <= cd_ram_wr;
          adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
 
-         cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         cd_new := cd_new_comb;
          if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
             adpcm_new := adpcm_ram_req_i;
          else
@@ -1003,6 +1033,7 @@ begin
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_CDRAM;
                   cd_pend  <= '0';
+                  cdr_a_last <= cd_ram_a;
                   cdr_settle_cnt <= (others => '0');
                   cdr_state <= CDR_SETTLE;
                elsif adpcm_pend = '1' or adpcm_new = '1' then
@@ -1027,6 +1058,7 @@ begin
                      if cdr_owner = OWNER_CDRAM then
                         cd_ram_di_i  <= cdr_do;
                         cd_ram_rdy_i <= '1';
+                        cd_done      <= '1';
                      else
                         adpcm_ram_di_i    <= cdr_do(3 downto 0);
                         adpcm_ram_ready_i <= '1';
@@ -1045,6 +1077,7 @@ begin
                   if cdr_owner = OWNER_CDRAM then
                      cd_ram_di_i  <= cdr_do;
                      cd_ram_rdy_i <= '1';
+                     cd_done      <= '1';
                   else
                      adpcm_ram_di_i    <= cdr_do(3 downto 0);
                      adpcm_ram_ready_i <= '1';
@@ -1151,7 +1184,7 @@ begin
 
       CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
-      CD_RAM_RDY => cd_ram_rdy_i,
+      CD_RAM_RDY => cd_ram_rdy_comb,   -- comb, not registered: see console60k's note
 
       ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
       ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,

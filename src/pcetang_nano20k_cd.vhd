@@ -392,6 +392,22 @@ architecture rtl of pcetang_nano20k_cd is
    signal adpcm_ram_ready_i : std_logic := '1';
    signal adpcm_slot_cnt_r  : std_logic_vector(1 downto 0) := (others => '0');
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
+   -- PCE PORT (2026-09-15): CD-RAM (and here also ROM) stale-byte fix. Full rationale,
+   -- including why the donor does not have this bug, is in pcetang_console60k_cd.vhd
+   -- next to its own cdr_a_last -- copied here, not re-derived. Short form: pce_top's
+   -- CD_RAM_RD and ROM_RD are LEVELS held across consecutive CPU memory cycles, the
+   -- edge-only detects below launched nothing on the second of two back-to-back
+   -- accesses, and the CPU took byte N-1 un-stalled. 777ba38 fixed exactly this on the
+   -- Console 60K ROM bridge; this board's ROM bridge is a different implementation and
+   -- never received it, so BOTH detects are corrected here.
+   signal cdr_a_last      : std_logic_vector(21 downto 0) := (others => '0');
+   signal cd_new_comb     : std_logic;
+   signal cd_done         : std_logic := '0';
+   signal cd_ram_rdy_comb : std_logic;
+   signal rom_a_last      : std_logic_vector(21 downto 0) := (others => '0');
+   signal rom_rd_new_comb : std_logic;
+   signal rom_done        : std_logic := '0';
+   signal rom_rdy_comb    : std_logic;
 
    type b_owner_t is (OWNER_NONE, OWNER_CDRAM, OWNER_ADPCM, OWNER_ROM);
    signal b_owner : b_owner_t := OWNER_NONE;
@@ -651,16 +667,37 @@ begin
    -- Arcade Card via cd_ram_a's own bit 21 decode, same as every GW5A CD board) winning
    -- ties over ADPCM -- same priority reasoning as the GW5A boards: CD-RAM directly stalls
    -- the CPU via CD_RAM_RDY/WAIT_N, ADPCM's own DRAM_CLKEN wait-gate tolerates real slack.
+   -- New-request detects and the combinational readys. A rising edge catches a genuinely
+   -- new bus cycle; a change of address catches back-to-back accesses where the CPU never
+   -- lets the line drop. Requiring either (not both) cannot miss a real request.
+   -- The ready form is `<reg> and not (<new> and not <done>)` rather than a state test
+   -- because this single arbiter serves CD-RAM, ADPCM and ROM: a `b_state /= B_IDLE` test
+   -- would stall each client on the others' traffic. The registered readys already encode
+   -- ownership through their pend flags; the combinational term only closes the one-clk
+   -- hole in which the CPU could still sample the previous byte.
+   cd_new_comb <= '1' when (cd_ram_rd = '1' or cd_ram_wr = '1')
+                           and ((cd_ram_rd = '1' and cdram_rd_r = '0')
+                                or (cd_ram_wr = '1' and cdram_wr_r = '0')
+                                or cd_ram_a /= cdr_a_last)
+                  else '0';
+   cd_ram_rdy_comb <= cd_ram_rdy_i and not (cd_new_comb and not cd_done);
+
+   rom_rd_new_comb <= '1' when rom_rd_i = '1' and (rom_rd_r = '0' or rom_a /= rom_a_last)
+                      else '0';
+   rom_rdy_comb    <= rom_rdy_i and not (rom_rd_new_comb and not rom_done);
+
    process (clk_pce)
       variable cd_new, adpcm_new, rom_rd_new : std_logic;
    begin
       if rising_edge(clk_pce) then
+         cd_done  <= '0';
+         rom_done <= '0';
          cdram_rd_r       <= cd_ram_rd;
          cdram_wr_r       <= cd_ram_wr;
          adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
          rom_rd_r         <= rom_rd_i;
 
-         cd_new := (cd_ram_rd and not cdram_rd_r) or (cd_ram_wr and not cdram_wr_r);
+         cd_new := cd_new_comb;
          if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
             adpcm_new := adpcm_ram_req_i;
          else
@@ -670,7 +707,7 @@ begin
          -- other board's ROM bridge relies on) -- edge-detect it here rather than
          -- reusing it directly, so a still-asserted request from an in-flight
          -- transaction never re-triggers a second launch.
-         rom_rd_new := rom_rd_i and not rom_rd_r;
+         rom_rd_new := rom_rd_new_comb;
 
          if cd_new = '1' then
             cd_pend      <= '1';
@@ -694,6 +731,7 @@ begin
             rom_pend_addr <= std_logic_vector(ROM_SDRAM_BASE +
                               resize(unsigned(rom_a(ROM_SDRAM_ABITS-1 downto 0)), 23));
             rom_rdy_i     <= '0';
+            rom_a_last    <= rom_a;
          end if;
          if rom_do_valid = '1' then
             rom_pend      <= '1';
@@ -717,6 +755,7 @@ begin
                   ram_b_req <= not ram_b_req;
                   b_owner   <= OWNER_CDRAM;
                   cd_pend   <= '0';
+                  cdr_a_last <= cd_ram_a;
                   b_settle_cnt <= (others => '0');
                   b_state   <= B_SETTLE;
                elsif rom_pend = '1' then
@@ -752,6 +791,7 @@ begin
                      if b_owner = OWNER_CDRAM then
                         cd_ram_di_i  <= ram_b_do;
                         cd_ram_rdy_i <= '1';
+                        cd_done      <= '1';
                      elsif b_owner = OWNER_ADPCM then
                         adpcm_ram_di_i    <= ram_b_do(3 downto 0);
                         adpcm_ram_ready_i <= '1';
@@ -761,6 +801,7 @@ begin
                         if ram_b_we = '0' then
                            rom_do_i  <= ram_b_do;
                            rom_rdy_i <= '1';
+                           rom_done  <= '1';
                         end if;
                      end if;
                      b_owner <= OWNER_NONE;
@@ -775,6 +816,7 @@ begin
                   if b_owner = OWNER_CDRAM then
                      cd_ram_di_i  <= ram_b_do;
                      cd_ram_rdy_i <= '1';
+                     cd_done      <= '1';
                   elsif b_owner = OWNER_ADPCM then
                      adpcm_ram_di_i    <= ram_b_do(3 downto 0);
                      adpcm_ram_ready_i <= '1';
@@ -782,6 +824,7 @@ begin
                      if ram_b_we = '0' then
                         rom_do_i  <= ram_b_do;
                         rom_rdy_i <= '1';
+                        rom_done  <= '1';
                      end if;
                   end if;
                   b_owner <= OWNER_NONE;
@@ -878,7 +921,7 @@ begin
       RAMTEST_EN => '0', RAMTEST_Q => open, DBG_MPR => open, DBG_TAM => open, DBG_TLOAD => open, DBG_TLOAD_STB => open, DBG_SEL => open, DBG_WAIT_EVER => open,
 
       ROM_RD    => rom_rd_i,
-      ROM_RDY   => rom_rdy_i,
+      ROM_RDY   => rom_rdy_comb,       -- comb, not registered: see console60k's note
       ROM_A     => rom_a,
       ROM_DO    => rom_do_i,
       ROM_SZ    => rom_sz_r,
@@ -895,7 +938,7 @@ begin
 
       CD_EN => '1', CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
-      CD_RAM_RDY => cd_ram_rdy_i,
+      CD_RAM_RDY => cd_ram_rdy_comb,   -- comb, not registered: see console60k's note
 
       ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
       ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,

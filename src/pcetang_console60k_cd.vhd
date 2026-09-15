@@ -996,6 +996,53 @@ architecture rtl of pcetang_console60k_cd is
    -- in VHDL 1076-2019").
    signal cdr_busy_bit   : std_logic;
    signal cdram_rd_r, cdram_wr_r : std_logic := '0';
+   -- PCE PORT (2026-09-15). ROOT CAUSE of "CD games load, then dark screen".
+   --
+   -- cdr_a_last / cd_new_comb / cd_done / cd_ram_rdy_comb are the CD-RAM half of the fix
+   -- 777ba38 applied to the ROM bridge and never applied here. The defect, measured on
+   -- DD2: the CPU executed a TAM at $D7C8 out of CD-RAM and took $53 -- the TAM OPCODE --
+   -- as its operand mask. $53 = bits 0,1,4,6, and the trapped MPR file reads
+   -- 00 97 83 97 81 80 97 97: MPR0/1/4/6 = $97 and MPR2/3/5/7 untouched, a bit-exact
+   -- fingerprint. $97 is not a bank, so I/O and work RAM (the STACK) unmapped, and the
+   -- next RTI jumped into nowhere. Identical signature to the ROM bridge's, recorded in
+   -- RB_IDLE's own comment below.
+   --
+   -- Mechanism: CD_RAM_RD is a LEVEL, not a pulse --
+   --   pce_top.vhd    CD_RAM_RD <= CPU_PRE_RD and not (CD_RAM_CS_N and AC_RAM_CS_N)
+   --   HUC6280.vhd    PRE_RD    <= CPU_WE_N and CPU_MCYCLE
+   --   HUC6280_CPU    MCYCLE    <= MC.MEM_CYCLE      (combinational, per microcode row)
+   -- TAM's rows are STATE0 '[PC]->IR, PC++' and STATE1 '[PC]->T, PC++', both MEM_CYCLE=1
+   -- and both in CD-RAM, so the read line never falls between them. cd_new was a rising
+   -- edge ONLY, so the second fetch launched no access at all: cd_ram_rdy_i stayed '1'
+   -- (the CPU was never stalled) and cd_ram_di_i still held the first byte. Generally:
+   -- ANY run of consecutive CD-RAM fetches returns the FIRST byte of the run, which means
+   -- multi-byte code cannot execute from CD-RAM. That is why the DATA path always
+   -- measured clean -- the syscard's CD-RAM traffic is interleaved with I/O/RAM/ROM
+   -- cycles, so the line toggles and every access gets its edge (hence the 16/16
+   -- byte-identical CD-RAM readback) -- while every disc died the instant the syscard
+   -- JUMPED into CD-RAM.
+   --
+   -- Why the donor does not have this bug: it never edge-detects. TurboGrafx16.sv:768 is
+   --   .rd(use_sdr & (rom_rd | cd_ram_rd) & ce_rom)
+   -- where ce_rom is pce_top's ROM_CLKEN, i.e. CPU_CLKEN, the CPU's own bus-cycle clock
+   -- enable exported for exactly this purpose -- one launch per memory cycle, so a
+   -- level-held read line is harmless. The donor also gives ROM and CD-RAM ONE SDRAM
+   -- port, ONE data bus and ONE ready (its pce_top has no CD_RAM_RDY port at all), so
+   -- CD-RAM inherits ROM's stall path for free. This port split them onto SDRAM ports B
+   -- and C with two independent arbiters and wired `ROM_CLKEN => open`, discarding the
+   -- per-cycle strobe; each arbiter then had to rediscover that a level-held line needs a
+   -- per-cycle trigger. The ROM bridge did (777ba38). This one did not -- and CDR_SETTLE's
+   -- comment shows it had already been skipped once, by 696313d.
+   --
+   -- The ROM idiom is ported rather than ROM_CLKEN revived, deliberately: the address
+   -- compare is proven on THIS board (1943 Kai boots on it), the cdt_active self-test
+   -- drives cdr_rd_mux from its own toggling source so the edge term has to stay in any
+   -- case, and one idiom across both bridges is worth more than fidelity to a mechanism
+   -- neither bridge currently uses. Reviving ROM_CLKEN for both at once is the cleanup.
+   signal cdr_a_last     : std_logic_vector(21 downto 0) := (others => '0');
+   signal cd_new_comb    : std_logic;
+   signal cd_done        : std_logic := '0';
+   signal cd_ram_rdy_comb : std_logic;
 
    -- Real SCSI target -- cd_bridge.vhd (shared across all 3 boards, 2026-08-31), see that
    -- file's own header for the full command decode/protocol trace.
@@ -2146,6 +2193,32 @@ begin
       end if;
    end process;
 
+   -- PCE PORT (2026-09-15): the new-request detect, mirroring the ROM bridge's
+   -- rd_new_req. Two conditions OR'd for the same reason stated there: a rising edge
+   -- catches a genuinely new bus cycle, and a change of address catches back-to-back
+   -- accesses where the CPU never lets the line drop -- which is the case this bridge was
+   -- losing. Requiring both would miss whichever case the CPU does not exhibit.
+   -- The address term covers writes too: consecutive same-level writes (a remapped stack)
+   -- hit the identical hole, and block transfers alternate R/W so it costs nothing there.
+   cd_new_comb <= '1' when (cdr_rd_mux = '1' or cdr_wr_mux = '1')
+                           and ((cdr_rd_mux = '1' and cdram_rd_r = '0')
+                                or (cdr_wr_mux = '1' and cdram_wr_r = '0')
+                                or cdr_a_mux /= cdr_a_last)
+                  else '0';
+
+   -- Low the instant a new CD-RAM access is pending, so the CPU cannot sample the
+   -- previous byte in the cycle before the REGISTERED cd_ram_rdy_i catches up -- the same
+   -- one-cycle hole rom_rdy_comb closes, and cd_done is the same load-bearing term (on the
+   -- completion cycle the FSM is back in CDR_IDLE with the new byte published, so ready
+   -- must be '1' there even though cdr_rd_mux is still asserted for that bus cycle).
+   --
+   -- NOT the ROM bridge's `'0' when rd_state /= RB_IDLE` form: this arbiter is SHARED with
+   -- ADPCM, and cdr_state is non-idle for every ADPCM RAM slot (~420ns, continuously
+   -- during playback). That form would stall the CPU on accesses it is not making.
+   -- cd_ram_rdy_i already encodes CD-RAM ownership correctly through cd_pend; the
+   -- combinational term only closes the hole ahead of it.
+   cd_ram_rdy_comb <= cd_ram_rdy_i and not (cd_new_comb and not cd_done);
+
    cdr_a_mux  <= cdt_a  when cdt_active = '1' else cd_ram_a;
    cdr_do_mux <= cdt_do when cdt_active = '1' else cd_ram_do;
    cdr_rd_mux <= cdt_rd when cdt_active = '1' else cd_ram_rd;
@@ -2238,11 +2311,16 @@ begin
       variable cd_new, adpcm_new : std_logic;
    begin
       if rising_edge(clk_pce) then
+         cd_done <= '0';
          cdram_rd_r      <= cdr_rd_mux;
          cdram_wr_r      <= cdr_wr_mux;
          adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
 
-         cd_new := (cdr_rd_mux and not cdram_rd_r) or (cdr_wr_mux and not cdram_wr_r);
+         -- PCE PORT (2026-09-15): the address-change term lives in cd_new_comb now; see
+         -- its declaration. Was `(cdr_rd_mux and not cdram_rd_r) or (cdr_wr_mux and not
+         -- cdram_wr_r)` -- a rising edge only, which silently dropped every back-to-back
+         -- CD-RAM access and handed the CPU byte N-1.
+         cd_new := cd_new_comb;
          if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
             adpcm_new := adpcm_ram_req_i;
          else
@@ -2314,6 +2392,9 @@ begin
                   cdr_req  <= '1';
                   cdr_owner <= OWNER_CDRAM;
                   cd_pend  <= '0';
+                  -- Consume the address this access is being launched for, so the
+                  -- address-change term in cd_new_comb falls until the CPU moves on.
+                  cdr_a_last <= cdr_a_mux;
                   cdr_settle_cnt <= (others => '0');
                   cdr_seen_wait  <= '0';
                   cdr_wdog       <= (others => '0');
@@ -2355,6 +2436,7 @@ begin
                   if cdr_owner = OWNER_CDRAM then
                      cd_ram_di_i  <= cdr_do;
                      cd_ram_rdy_i <= '1';
+                     cd_done      <= '1';
                   else
                      adpcm_ram_di_i    <= cdr_do(3 downto 0);
                      adpcm_ram_ready_i <= '1';
@@ -2381,6 +2463,7 @@ begin
                   if cdr_owner = OWNER_CDRAM then
                      cd_ram_di_i  <= cdr_do;
                      cd_ram_rdy_i <= '1';
+                     cd_done      <= '1';
                   else
                      adpcm_ram_di_i    <= cdr_do(3 downto 0);
                      adpcm_ram_ready_i <= '1';
@@ -2705,7 +2788,12 @@ begin
       -- report the truth instead of always claiming a CD unit is attached.
       CD_EN => cd_mounted_i, CD_RAM_A => cd_ram_a, CD_RAM_DO => cd_ram_do,
       CD_RAM_DI => cd_ram_di_i, CD_RAM_RD => cd_ram_rd, CD_RAM_WR => cd_ram_wr,
-      CD_RAM_RDY => cd_ram_rdy_i,
+      -- PCE PORT (2026-09-15): the COMBINATIONAL ready, not the registered cd_ram_rdy_i.
+      -- Same reason the ROM bridge feeds rom_rdy_comb and not rom_rdy_i: the registered
+      -- form is one clk_pce late, and in that window the CPU can sample the previous
+      -- byte. Every other consumer of cd_ram_rdy_i (the read snoop, the self-test) still
+      -- wants the registered edge and is unchanged.
+      CD_RAM_RDY => cd_ram_rdy_comb,
 
       ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
       ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,
