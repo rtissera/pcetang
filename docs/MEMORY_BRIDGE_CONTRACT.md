@@ -122,7 +122,7 @@ continuous during playback) and would stall the CPU on accesses it is not making
 |---|---|---|
 | ROM, Console 60K | edge OR address change | correct since 777ba38 |
 | ROM, Primer 25K | edge OR address change | correct |
-| ROM, Nano 20K | **edge only** | **defective by inspection**, fixed 2026-09-15 — never observed on hardware (that board has no BL616, so a HuCard has never run on it) |
+| ROM, Nano 20K | **edge only** | **defective by inspection**, fixed 2026-09-15 — not yet observed on hardware, because that board's BL616 has not been flashed yet (it has one; see below) |
 | CD-RAM / Arcade Card, all three boards | **edge only** | **broken, observed on hardware**, fixed 2026-09-15 |
 | ADPCM RAM, all three boards | `ADPCM_RAM_SLOT_CNT` counter change | correct by construction |
 | VRAM0 / VRAM1 (`vram0_cache`) | `dck_ce` clock enable | correct trigger — see caveat below |
@@ -133,6 +133,11 @@ continuous during playback) and would stall the CPU on accesses it is not making
 Nano 20K's ROM bridge is a different implementation from Console 60K's `RB_*` FSM, which is
 why 777ba38 never reached it. Two implementations of the same contract is how this class
 survives a fix; prefer one idiom across all bridges.
+
+Nano 20K's defect is by inspection only so far, but it is testable: that board does have a
+BL616 companion, it simply has not been flashed yet. Once it is, a HuCard boot there is a
+direct second observation of this bug class on real silicon, on a bridge that was written
+independently of the two that were already caught.
 
 ### The VRAM caveat — the same class, in its other form
 
