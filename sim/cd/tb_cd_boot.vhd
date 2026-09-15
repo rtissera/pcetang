@@ -110,6 +110,14 @@ entity tb_cd_boot is
 		-- handshake and stores into CD-RAM, so on hardware every store in that burst
 		-- stalls the CPU and in simulation none of them do.
 		CDRAM_WAIT       : integer := 0;
+		-- Jitter around CDRAM_WAIT, and an extra stall every 64th access, to approximate an
+		-- SDRAM arbiter instead of an ideal fixed-latency array. 0 = the old behaviour.
+		CDRAM_JITTER     : integer := 0;
+		CDRAM_REFRESH    : integer := 0;
+		-- 1 = model the PRE-2026-09-15 broken CD-RAM bridge (edge-only launch, so
+		-- back-to-back accesses re-present the previous byte). Default 0 = the fixed
+		-- bridge. Exists so the defect that stopped every CD game stays reproducible.
+		CDRAM_STALE_BUG  : integer := 0;
 		CDRAM_DUMP_AFTER : integer := 0;
 		CDRAM_DUMP_BYTES : integer := 512;
 		-- Write one PPM per output frame, starting at this frame number. 0 = off.
@@ -160,6 +168,40 @@ architecture sim of tb_cd_boot is
 	signal dbg_cpu_di_s   : std_logic_vector(7 downto 0);
 	signal dbg_cpu_ce_s   : std_logic;
 	signal dbg_irq2_n_s   : std_logic;
+	-- VCE write tap (2026-09-14). Hardware tag 0xB3 showed the VCE control register
+	-- ending at 0xFF after exactly one write from game code -- DOTCLOCK=512, BW=1. No
+	-- real game writes 0xFF to $0400, so this prints every VCE write with the value and
+	-- the physical address, to see whether the same write happens here.
+	signal dbg_vce_wr_s   : std_logic;
+	signal dbg_vce_do_s   : std_logic_vector(7 downto 0);
+	-- VDC0's live BAT-size field (MWR bits 6:4). The reference emulator has the system
+	-- card set MWR = 0x0070 (128 cols x 64 rows) within the first frames; hardware tag
+	-- 0xB3 reported this stuck at "000" with ZERO changes for a whole run.
+	signal dbg_vdc_screen_s : std_logic_vector(2 downto 0);
+	-- SCSI target internals, already exported by pce_top but never wired here. The
+	-- stall is a mutual wait between SCSI.vhd's SP_FREE (needs FIFO_LEVEL >= 2048) and
+	-- cd_bridge's SCSI_READ_WAIT_END (needs CD_DATA_END), so the numbers that name it
+	-- are the SCSI phase state, the DATA-IN byte counter and the FIFO occupancy.
+	signal dbg_sp_s         : std_logic_vector(3 downto 0);
+	signal dbg_datain_cnt_s : unsigned(15 downto 0);
+	signal dbg_comm0_s      : std_logic_vector(7 downto 0);
+	-- Byte accounting across the two hand-offs on the producer side, because the stall
+	-- shows 8192 bytes handed to cd_bridge, 6144 delivered to the CPU and only 234 left
+	-- in the FIFO -- 1814 unaccounted, with drops=0 and underrun=0. dv counts bytes the
+	-- testbench hands cd_bridge; wr counts bytes cd_bridge pushes into SCSI.vhd's FIFO.
+	-- If wr < dv the loss is inside cd_bridge; if they agree it is inside the FIFO.
+	-- SCSI.vhd's own count of FIFO_RD_REQ pulses, i.e. bytes actually POPPED from the
+	-- DATA IN FIFO. With fifowr (bytes pushed in) and DATAIN_CNT (bytes handed to the
+	-- CPU) this closes the accounting: writes - pops must equal the level, and pops must
+	-- equal deliveries. 1814 bytes go missing and only these three numbers say where.
+	signal dbg_rd_total_s   : unsigned(15 downto 0);
+	signal cdb_state_s      : std_logic_vector(4 downto 0);
+	signal cdb_wr_cnt_s     : integer := 0;
+	signal cdb_dv_cnt_s     : integer := 0;
+	signal cdram_chk_s    : integer := 0;
+	signal cdram_mis_s    : integer := 0;
+	signal rom_chk_s      : integer := 0;
+	signal rom_mis_s      : integer := 0;
 	signal dbg_irq1_n_s   : std_logic;
 	signal irq1_cnt_s     : integer := 0;
 	signal irq2_cnt_s     : integer := 0;
@@ -257,6 +299,9 @@ architecture sim of tb_cd_boot is
 	signal cd_ram_a_s    : std_logic_vector(21 downto 0);
 	signal cd_ram_do_s   : std_logic_vector(7 downto 0);
 	signal cd_ram_di_s   : std_logic_vector(7 downto 0) := x"00";
+	-- One-cycle strobe from cdram_wait_model: an access was accepted this cycle. Gates
+	-- the array read above so the model republishes data only on a real launch.
+	signal cdram_launch_s : std_logic := '0';
 	signal cd_ram_rdy_s  : std_logic := '1';
 
 	-- Sector slice, read once at elaboration.
@@ -439,6 +484,11 @@ begin
 		DBG_CPU_WR_N => dbg_cpu_wr_n_s, DBG_CPU_RD_N => dbg_cpu_rd_n_s,
 		DBG_CPU_DO   => dbg_cpu_do_s,   DBG_CPU_DI   => dbg_cpu_di_s,
 		DBG_CPU_CE   => dbg_cpu_ce_s,   DBG_IRQ2_N => dbg_irq2_n_s,
+		DBG_VCE_WR   => dbg_vce_wr_s,    DBG_VCE_DO => dbg_vce_do_s,
+		DBG_VDC_SCREEN => dbg_vdc_screen_s,
+		CD_DBG_SP => dbg_sp_s, CD_DBG_DATAIN_CNT => dbg_datain_cnt_s,
+		CD_DBG_RD_TOTAL => dbg_rd_total_s,
+		CD_DBG_COMM0 => dbg_comm0_s,
 		DBG_IRQ1_N => dbg_irq1_n_s,
 		CD_DBG_FIFO_DROPS => fifo_drops_s, CD_DBG_UNDERRUNS => underruns_s,
 		CD_DBG_FIFO_SPACE => fifo_space_s,
@@ -535,6 +585,16 @@ begin
 			CD_COMM => cd_comm_s, CD_COMM_SEND => cd_comm_send_s,
 			CD_DATA => cd_data_s, CD_DATA_WR => cd_data_wr_s,
 			DATAIN_SECTORS => cd_datain_sectors_s,
+			-- MUST be wired, exactly as the board does it (pcetang_console60k_cd.vhd wires
+			-- FIFO_SPACE => scsi_fifo_space_i from CD_DBG_FIFO_SPACE). The port defaults to
+			-- (others => '1') = 8191 = "plenty of room", which DISABLES cd_bridge's
+			-- back-pressure entirely: it then streams every sector of a multi-sector READ(6)
+			-- without pausing, the 4096-byte FIFO overflows, and SCSI.vhd's
+			-- `if FULL = '0' then FIFO_WR_REQ <= '1'` silently discards the excess -- which
+			-- cd_fifos' drops counter CANNOT see, because it only counts a wrreq it was
+			-- actually offered. Leaving this open reproduced a convincing FAKE stall:
+			-- 1814 bytes lost on command 7, $1800 stuck at 0x88, identical to hardware.
+			FIFO_SPACE => fifo_space_s,
 			CD_DATA_END => cd_data_end_s,
 			DISC_MOUNTED => disc_mounted_s,
 			TOC_WR => toc_wr_s, TOC_TRACK => toc_track_s,
@@ -544,7 +604,7 @@ begin
 			SECTOR_IS_AUDIO => sector_audio_s,
 			SECTOR_DATA => sector_data_s, SECTOR_DATA_VALID => sector_dv_s,
 			SECTOR_DATA_LAST => sector_last_s,
-			DBG_STATE => open
+			DBG_STATE => cdb_state_s
 		);
 
 	-- CD-RAM behavioural model, one cycle, matching the board's CD_RAM_RDY => '1' path.
@@ -616,7 +676,20 @@ begin
 						hi := to_integer(unsigned(cd_ram_a_s(17 downto 0)));
 					end if;
 				end if;
-				cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
+				-- PCE PORT (2026-09-15). THIS LINE USED TO BE UNCONDITIONAL, and that is
+				-- the second false conclusion this testbench has manufactured (the first
+				-- was the unwired FIFO_SPACE). Driving the data from the CURRENT address
+				-- every clock means the model ALWAYS presents the correct byte, no matter
+				-- what the request handshake does -- so a bridge that launches no access
+				-- and leaves the previous byte on the bus is INVISIBLE here. That is
+				-- exactly the defect that stopped every CD game on hardware, and it is why
+				-- Dracula X reached its title screen in this testbench while the board
+				-- stalled. Republish only when an access is actually launched, the way the
+				-- board publishes cd_ram_di_i at completion, so the model can be wrong in
+				-- the same way the hardware can.
+				if CDRAM_WAIT = 0 or cdram_launch_s = '1' then
+					cd_ram_di_s <= cdram(to_integer(unsigned(cd_ram_a_s(17 downto 0))));
+				end if;
 			end if;
 		end if;
 	end process;
@@ -626,22 +699,65 @@ begin
 	-- access is accepted and comes back CDRAM_WAIT cycles later. cd_ram_di_s is already
 	-- driven combinationally from the array by the process above, so the data is valid
 	-- when ready returns, exactly as the board publishes cd_ram_di_i at completion.
+	-- CD-RAM wait-state model. CDRAM_WAIT is the MEAN; when CDRAM_JITTER /= 0 the actual
+	-- latency varies pseudo-randomly in [CDRAM_WAIT-CDRAM_JITTER, CDRAM_WAIT+CDRAM_JITTER]
+	-- and every 64th access takes an extra CDRAM_REFRESH cycles.
+	--
+	-- WHY: a fixed-latency ideal array cannot express what the board actually has, which
+	-- is SDRAM behind an arbiter -- variable ordering, contention with the ROM path, and
+	-- refresh stalls. A sweep of FIXED latencies 20/40/80 changed nothing (all reached
+	-- command 8 with the byte identity exact), so mean latency is NOT the differentiator.
+	-- Jitter and ordering are what remain untested.
 	cdram_wait_model : process(clk)
 		variable cnt      : integer := 0;
 		variable busy     : boolean := false;
 		variable rd_prev  : std_logic := '0';
 		variable wr_prev  : std_logic := '0';
+		variable acc      : integer := 0;
+		variable lfsr     : unsigned(15 downto 0) := x"ACE1";
+		variable extra    : integer := 0;
+		variable a_prev   : std_logic_vector(21 downto 0) := (others => '0');
 	begin
 		if rising_edge(clk) then
+			cdram_launch_s <= '0';
 			if CDRAM_WAIT = 0 then
 				cd_ram_rdy_s <= '1';
 			else
 				if not busy then
+					cd_ram_rdy_s <= '1';
+					-- PCE PORT (2026-09-15): the address-change term, matching the boards'
+					-- fixed arbiters (cd_new_comb). CD_RAM_RD is a LEVEL held across
+					-- consecutive CPU memory cycles, so an edge-only launch silently drops
+					-- every back-to-back access -- which, together with the now-gated
+					-- republish of cd_ram_di_s, is precisely the hardware defect. Set the
+					-- CDRAM_STALE_BUG generic to 1 to model the OLD, broken bridge and
+					-- watch the boot die the way the board did.
 					if (cd_ram_rd_s = '1' and rd_prev = '0')
-					   or (cd_ram_wr_s = '1' and wr_prev = '0') then
+					   or (cd_ram_wr_s = '1' and wr_prev = '0')
+					   or (CDRAM_STALE_BUG = 0
+					       and (cd_ram_rd_s = '1' or cd_ram_wr_s = '1')
+					       and not is_x(cd_ram_a_s) and cd_ram_a_s /= a_prev) then
+						a_prev := cd_ram_a_s;
 						busy := true;
-						cnt  := CDRAM_WAIT;
+						-- galois LFSR, cheap and repeatable
+						if lfsr(0) = '1' then
+							lfsr := ('0' & lfsr(15 downto 1)) xor x"B400";
+						else
+							lfsr := '0' & lfsr(15 downto 1);
+						end if;
+						extra := 0;
+						if CDRAM_JITTER /= 0 then
+							extra := (to_integer(lfsr(7 downto 0)) mod (2*CDRAM_JITTER+1))
+							         - CDRAM_JITTER;
+						end if;
+						acc := acc + 1;
+						if CDRAM_REFRESH /= 0 and (acc mod 64) = 0 then
+							extra := extra + CDRAM_REFRESH;
+						end if;
+						cnt := CDRAM_WAIT + extra;
+						if cnt < 1 then cnt := 1; end if;
 						cd_ram_rdy_s <= '0';
+						cdram_launch_s <= '1';
 					end if;
 				else
 					if cnt > 0 then
@@ -654,6 +770,187 @@ begin
 			end if;
 			rd_prev := cd_ram_rd_s;
 			wr_prev := cd_ram_wr_s;
+		end if;
+	end process;
+
+	-- ---------------------------------------------------------------------------
+	-- CD-RAM SHADOW CHECKER (2026-09-14).
+	--
+	-- Every CD game gets as far as loading code into CD-RAM and then diverges the moment
+	-- the CPU EXECUTES from it: DD2 writes 0xFF to the VCE and parks, Rondo hangs
+	-- mid-READ, the rest hit the reset vector. Bomberman '93 (HuCard, no CD-RAM) is fine.
+	-- The 16/16 byte-identical CD-RAM readback done on hardware proved the ARRAY holds
+	-- the right bytes; it was taken by the MCU at rest and says nothing about what the
+	-- CPU receives on a WAIT-STATED fetch. That is the untested seam, and the HuCard ROM
+	-- bridge bug was exactly this class -- the CPU was handed byte N-1 for every fetch.
+	--
+	-- HUC6280.vhd only raises CPU_CE when WAIT_N = '1' (see its clock-divider process),
+	-- and pce_top ties WAIT_N to `ROM_RDY and CD_RAM_RDY`, so a CE pulse CANNOT occur
+	-- while a CD-RAM access is still outstanding. That makes the check exact: latch the
+	-- address of any in-flight CD-RAM read together with what this model holds there,
+	-- and on the next CPU_CE compare it against DBG_CPU_DI -- the byte the CPU core
+	-- actually takes off the bus. A mismatch is the bug, with no theory in between.
+	cdram_shadow : process
+		variable pend  : boolean := false;
+		variable paddr : integer := 0;
+		variable pexp  : std_logic_vector(7 downto 0) := (others => '0');
+		variable nchk  : integer := 0;
+		variable nmis  : integer := 0;
+		variable lastrep : integer := -1;
+		variable l     : line;
+	begin
+		wait until rising_edge(clk);
+			if cd_ram_rd_s = '1' and not is_x(cd_ram_a_s(21 downto 0))
+			   and cd_ram_a_s(21 downto 18) = "1000" then
+				pend  := true;
+				paddr := to_integer(unsigned(cd_ram_a_s(17 downto 0)));
+				pexp  := cdram(paddr);
+			end if;
+			if dbg_cpu_ce_s = '1' then
+				if pend and not is_x(dbg_cpu_di_s) then
+					nchk := nchk + 1;
+					if dbg_cpu_di_s /= pexp then
+						nmis := nmis + 1;
+						if nmis <= 20 then
+							write(l, string'("[cdshadow] MISMATCH #")); write(l, nmis);
+							write(l, string'(" t=")); write(l, now);
+							write(l, string'(" a=0x"));
+							write(l, to_hstring(to_unsigned(paddr, 24)));
+							write(l, string'(" expected=0x")); write(l, to_hstring(pexp));
+							write(l, string'(" cpu_got=0x")); write(l, to_hstring(dbg_cpu_di_s));
+							write(l, string'("  cpu_a=0x"));
+							write(l, to_hstring(dbg_cpu_a_s));
+							write(l, string'(" sectors_served=")); write(l, sector_served_cnt);
+							writeline(output, l);
+						end if;
+					end if;
+				end if;
+				pend := false;
+			if nchk > 0 and nchk mod 20000 = 0 and nchk /= lastrep then
+				lastrep := nchk;
+				write(l, string'("[cdshadow] alive: ")); write(l, nchk);
+				write(l, string'(" checks, ")); write(l, nmis);
+				write(l, string'(" mismatches")); writeline(output, l);
+			end if;
+			end if;
+			cdram_chk_s <= nchk;
+			cdram_mis_s <= nmis;
+	end process;
+
+	-- Every CPU write that selects the VCE, with the value. Hardware saw the control
+	-- register (A = "000") end at 0xFF: DOTCLOCK = "11" (512-wide), CR(2) artifact bit,
+	-- CR(7) = BW. The syscard leaves it at 0x04. Printing these says whether the real
+	-- reference does the same thing or whether the board invented that write.
+	-- Every change of VDC0's BAT-size field, with a timestamp. The reference writes
+	-- MWR = 0x0070 during system-card init; if this never leaves "000" here too, the
+	-- register write path for VDC reg $09 is broken in RTL and is reproducible offline.
+	vdc_screen_log : process (clk)
+		variable prev : std_logic_vector(2 downto 0) := "XXX";
+		variable n    : integer := 0;
+		variable l    : line;
+	begin
+		if rising_edge(clk) then
+			if not is_x(dbg_vdc_screen_s) and dbg_vdc_screen_s /= prev and n < 60 then
+				n := n + 1;
+				prev := dbg_vdc_screen_s;
+				write(l, string'("[screen] t=")); write(l, now);
+				write(l, string'(" SCREEN=")); write(l, to_integer(unsigned(dbg_vdc_screen_s)));
+				writeline(output, l);
+			end if;
+		end if;
+	end process;
+
+	-- ROM SHADOW CHECKER (2026-09-14). Same construction as cdram_shadow above, on the
+	-- other memory the CPU fetches from. Every sim here runs ROM_LAT=16, the code that
+	-- diverges is the system card, and the system card executes from ROM -- yet only
+	-- CD-RAM was being checked. The HuCard black-screen bug (777ba38) was precisely a ROM
+	-- bridge handing the CPU byte N-1, so this seam has a track record. CPU_CE cannot
+	-- fire while ROM_RDY is low, so a compare at CE is exact.
+	rom_shadow : process
+		variable pend  : boolean := false;
+		variable paddr : integer := 0;
+		variable pexp  : std_logic_vector(7 downto 0) := (others => '0');
+		variable nchk  : integer := 0;
+		variable nmis  : integer := 0;
+		variable lastrep : integer := -1;
+		variable l     : line;
+	begin
+		wait until rising_edge(clk);
+			if rom_rd = '1' and not is_x(rom_a) then
+				pend  := true;
+				paddr := to_integer(unsigned(rom_a));
+				if paddr < ROM_WORDS then pexp := rom_img(paddr); end if;
+			end if;
+			if dbg_cpu_ce_s = '1' then
+				if pend and not is_x(dbg_cpu_di_s) and paddr < ROM_WORDS then
+					nchk := nchk + 1;
+					if dbg_cpu_di_s /= pexp then
+						nmis := nmis + 1;
+						if nmis <= 20 then
+							write(l, string'("[romshadow] MISMATCH #")); write(l, nmis);
+							write(l, string'(" t=")); write(l, now);
+							write(l, string'(" rom_a=0x"));
+							write(l, to_hstring(to_unsigned(paddr, 24)));
+							write(l, string'(" expected=0x")); write(l, to_hstring(pexp));
+							write(l, string'(" cpu_got=0x")); write(l, to_hstring(dbg_cpu_di_s));
+							write(l, string'("  cpu_a=0x")); write(l, to_hstring(dbg_cpu_a_s));
+							writeline(output, l);
+						end if;
+					end if;
+				end if;
+				pend := false;
+			if nchk > 0 and nchk mod 20000 = 0 and nchk /= lastrep then
+				lastrep := nchk;
+				write(l, string'("[romshadow] alive: ")); write(l, nchk);
+				write(l, string'(" checks, ")); write(l, nmis);
+				write(l, string'(" mismatches")); writeline(output, l);
+			end if;
+			end if;
+			rom_chk_s <= nchk;
+			rom_mis_s <= nmis;
+	end process;
+
+	-- VDC REGISTER WRITE DECODER. pce_top exports DBG_VDC_WR plus the CPU bus, which is
+	-- enough to reconstruct what the CPU programs: A="00" loads the address register,
+	-- A="10"/"11" write the low/high byte of whatever register that selected. Register 2
+	-- is the VRAM data port and would flood the log, so it is skipped. The reference
+	-- emulator's fingerprint for this disc is MWR (reg $09) going 0x10 -> 0x00 at frame 1
+	-- and 0x70 only at frame 5234, i.e. once the GAME takes over.
+	vdc_wr_log : process (clk)
+		variable ar : integer := 0;
+		variable n  : integer := 0;
+		variable l  : line;
+	begin
+		if rising_edge(clk) then
+			if dbg_vdc_wr_s = '1' and not is_x(dbg_cpu_a_s) and not is_x(dbg_cpu_do_s) then
+				if dbg_cpu_a_s(1) = '0' then
+					ar := to_integer(unsigned(dbg_cpu_do_s(4 downto 0)));
+				elsif ar /= 2 and n < 300 then
+					n := n + 1;
+					write(l, string'("[vdcreg] t=")); write(l, now);
+					write(l, string'(" AR=")); write(l, ar);
+					write(l, string'(" half=")); write(l, to_integer(unsigned(dbg_cpu_a_s(0 downto 0))));
+					write(l, string'(" <= 0x")); write(l, to_hstring(dbg_cpu_do_s));
+					writeline(output, l);
+				end if;
+			end if;
+		end if;
+	end process;
+
+	vce_wr_log : process (clk)
+		variable n : integer := 0;
+		variable l : line;
+	begin
+		if rising_edge(clk) then
+			if dbg_vce_wr_s = '1' and not is_x(dbg_vce_do_s) and n < 200 then
+				n := n + 1;
+				write(l, string'("[vce] t=")); write(l, now);
+				write(l, string'(" a=0x")); write(l, to_hstring(dbg_cpu_a_s));
+				write(l, string'(" reg=")); write(l, to_integer(unsigned(dbg_cpu_a_s(2 downto 0))));
+				write(l, string'(" <= 0x")); write(l, to_hstring(dbg_vce_do_s));
+				write(l, string'(" sectors_served=")); write(l, sector_served_cnt);
+				writeline(output, l);
+			end if;
 		end if;
 	end process;
 
@@ -817,6 +1114,10 @@ begin
 			-- level reads one short because the FIFO output is registered.
 			write(l, string'("  lvl=")); write(l, integer'image(4096 - to_integer(fifo_space_s)));
 			write(l, string'("  served=")); write(l, served_sig);
+			write(l, string'("  dv=")); write(l, cdb_dv_cnt_s);
+			write(l, string'("  fifowr=")); write(l, cdb_wr_cnt_s);
+			write(l, string'("  cdbst=")); write(l, to_integer(unsigned(cdb_state_s)));
+			write(l, string'("  pops=")); write(l, to_integer(dbg_rd_total_s));
 			writeline(output, l);
 		end loop;
 	end process;
@@ -853,6 +1154,109 @@ begin
 	-- polls the pad at $1000; if it never issues a SCSI command, the reason is visible
 	-- in what it reads back from those. Bounded print count -- an unbounded per-cycle
 	-- print in this testbench once wrote a 19.4 GB log.
+	-- SCSI PHASE POLL TAP (2026-09-14). cdregmon deliberately drops `RD $1800` because
+	-- the system card polls it hundreds of thousands of times per boot. But the place
+	-- both Rondo and Double Dragon 2 park is the system card's DATA-IN transfer loop,
+	-- which is nothing BUT that poll:
+	--
+	--    EA79  LDA $1800 / AND #$F8 / STA $227A
+	--    EA81  CMP #$C8   BEQ  -> take a byte  (BSY|REQ|IO      = DATA IN)
+	--    EA85  CMP #$D8   BEQ  -> command done (BSY|REQ|CD|IO   = STATUS)
+	--    EA89  BRA EA79                          <- spins here
+	--
+	-- So the one number that names the bug is what $1800 returns while it spins. Logging
+	-- only CHANGES keeps it to a handful of lines instead of flooding the link the way
+	-- CDREG_STREAM did on hardware.
+	-- SCSI PHASE POLL + TARGET STATE TAP (2026-09-14, rewritten).
+	--
+	-- cdregmon deliberately drops `RD $1800` (the system card polls it hundreds of
+	-- thousands of times a boot). But the place both Rondo and Double Dragon 2 park is
+	-- the system card's DATA-IN loop, which is nothing but that poll:
+	--
+	--    EA79  LDA $1800 / AND #$F8 / STA $227A
+	--    EA81  CMP #$C8   BEQ -> read a 2048-byte block BLIND (8 x 256, no handshake)
+	--    EA85  CMP #$D8   BEQ -> command done
+	--    EA89  BRA EA79                             <- spins here
+	--
+	-- MUST be a `wait until rising_edge(clk)` process, exactly like cdregmon. The first
+	-- version of this tap was `process (clk)` and fired ZERO times in 173 ms of a run
+	-- whose binary provably contained it, while cdregmon logged the same register all
+	-- along -- the two styles do not sample CPU_CE/RD_N/A in the same delta.
+	--
+	-- Logs only CHANGES, with a repeat count, and carries the SCSI target's own state
+	-- alongside: SP, DATAIN_CNT, COMM(0) and FIFO occupancy. That is the set that
+	-- distinguishes "burst never started" from "burst started and ran dry".
+	phasepoll : process
+		variable prev : std_logic_vector(7 downto 0) := (others => 'X');
+		variable n    : integer := 0;
+		variable rep  : integer := 0;
+		variable l    : line;
+	begin
+		wait until rising_edge(clk);
+		if dbg_cpu_ce_s = '1' and not is_x(dbg_cpu_a_s)
+		   and dbg_cpu_a_s(20 downto 10) = "11111111110"
+		   and dbg_cpu_a_s(9 downto 0) = "0000000000"
+		   and dbg_cpu_rd_n_s = '0' and not is_x(dbg_cpu_di_s) then
+			if dbg_cpu_di_s /= prev then
+				if rep > 0 and n < 300 then
+					write(l, string'("[phase]   (x")); write(l, rep);
+					write(l, string'(" repeats)")); writeline(output, l);
+				end if;
+				prev := dbg_cpu_di_s;
+				rep  := 0;
+				if n < 300 then
+					n := n + 1;
+					write(l, string'("[phase] t=")); write(l, now);
+					write(l, string'(" $1800 => 0x")); write(l, to_hstring(dbg_cpu_di_s));
+					write(l, string'("  SP=")); write(l, to_integer(unsigned(dbg_sp_s)));
+					write(l, string'(" datain_cnt=")); write(l, to_integer(dbg_datain_cnt_s));
+					write(l, string'(" comm0=0x")); write(l, to_hstring(dbg_comm0_s));
+					write(l, string'(" fifo_level="));
+					write(l, 4096 - to_integer(fifo_space_s));
+					writeline(output, l);
+				end if;
+			else
+				rep := rep + 1;
+			end if;
+		end if;
+	end process;
+
+	-- Every change of the SCSI target's phase state, with the FIFO occupancy at that
+	-- moment. SP_FREE is 0. A burst that STARTS needs FIFO_LEVEL >= 2048 (BURST_RDY);
+	-- printing the level at every entry to SP_FREE says directly whether a burst was
+	-- ever dispatched with less than a full sector buffered.
+	-- See cdb_wr_cnt_s' declaration. Counts both producer hand-offs, so the missing
+	-- bytes can be attributed to one side of cd_bridge or the other.
+	cdb_bytes : process
+		variable wr, dv : integer := 0;
+	begin
+		wait until rising_edge(clk);
+		if cd_data_wr_s = '1' then wr := wr + 1; end if;
+		if sector_dv_s  = '1' then dv := dv + 1; end if;
+		cdb_wr_cnt_s <= wr;
+		cdb_dv_cnt_s <= dv;
+	end process;
+
+	spmon : process
+		variable prev : std_logic_vector(3 downto 0) := (others => 'X');
+		variable n    : integer := 0;
+		variable l    : line;
+	begin
+		wait until rising_edge(clk);
+		-- burst STARTS only (SP_FREE -> SP_DATAIN_START). Logging every SP change
+		-- burned the cap in two lines per byte and lost the commands that matter.
+		if not is_x(dbg_sp_s) and prev = x"0" and dbg_sp_s = x"A" and n < 400 then
+			n := n + 1;
+			write(l, string'("[sp] t=")); write(l, now);
+			write(l, string'(" SP=")); write(l, to_integer(unsigned(dbg_sp_s)));
+			write(l, string'(" datain_cnt=")); write(l, to_integer(dbg_datain_cnt_s));
+			write(l, string'(" fifo_level="));
+			write(l, 4096 - to_integer(fifo_space_s));
+			writeline(output, l);
+		end if;
+		if not is_x(dbg_sp_s) then prev := dbg_sp_s; end if;
+	end process;
+
 	cdregmon : process
 		-- Plain aliases onto pce_top's debug ports. NOT external names -- see the signal
 		-- declarations above for why that matters.
@@ -1223,6 +1627,10 @@ begin
 		write(l, string'("  CD_RAM_WR pulses    : ")); write(l, n_cdram_wr);  writeline(output, l);
 		write(l, string'("  ADPCM_RAM_REQ pulses: ")); write(l, n_adpcm_req); writeline(output, l);
 		write(l, string'("  CD_RAM held cycles  : ")); write(l, cyc_cdram);   writeline(output, l);
+		write(l, string'("  CD-RAM shadow checks: ")); write(l, cdram_chk_s); writeline(output, l);
+		write(l, string'("  CD-RAM MISMATCHES   : ")); write(l, cdram_mis_s); writeline(output, l);
+		write(l, string'("  ROM shadow checks   : ")); write(l, rom_chk_s); writeline(output, l);
+		write(l, string'("  ROM MISMATCHES      : ")); write(l, rom_mis_s); writeline(output, l);
 		write(l, string'("  ADPCM held cycles   : ")); write(l, cyc_adpcm);   writeline(output, l);
 		write(l, string'("  distinct ROM banks  : ")); write(l, nbanks);     writeline(output, l);
 		write(l, string'("  ROM banks touched   : "));
@@ -1306,11 +1714,18 @@ begin
 		end loop;
 	end process;
 
+	-- `running <= false` only stops the CLOCK. Every process that paces itself with a
+	-- plain `wait for` -- the heartbeat, the RUN-button presser -- keeps going, and with
+	-- no clock edges left GHDL fast-forwards straight to TIME'HIGH firing them. A
+	-- RUN_US=150000 run did exactly that on 2026-09-14: an 813 MB log, 9.27 million
+	-- heartbeat lines at impossible timestamps (9223 s = TIME'HIGH with fs resolution),
+	-- and a nearly full disk. std.env.finish ends the simulation outright instead.
 	stopper : process
 	begin
 		wait for RUN_US * 1 us;
 		running <= false;
 		wait for CLK_PERIOD * 4;
+		std.env.finish;
 		wait;
 	end process;
 

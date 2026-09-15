@@ -66,6 +66,14 @@ do "$G" -a "${F[@]}" "$f"; done
 # card asking for LBA 3590 on a disc whose data track is elsewhere, and sector requests
 # that never match. Cost three hours of two ROM_LAT runs on 2026-09-14 before it showed up.
 abspath() { case "$1" in /*) printf '%s' "$1";; *) printf '%s' "$CALLER_PWD/$1";; esac; }
+# Frame dumping is OFF unless FRAME_DIR is set. Passing -gFRAME_DIR= with an empty
+# value makes the simulation exit 1 immediately and print NOTHING -- no error, no log,
+# which looks exactly like the run being killed by something else. Cost two relaunches
+# on 2026-09-14. Only pass the frame generics when there is a real directory.
+FRAME_ARG=()
+if [ -n "${FRAME_DIR:-}" ]; then
+  FRAME_ARG=(-gFRAME_DUMP_FROM="${FRAME_DUMP_FROM:-0}" -gFRAME_DUMP_N="${FRAME_DUMP_N:-0}" -gFRAME_DIR="$FRAME_DIR")
+fi
 TOC_ARG=()
 [ -n "${TOC_FILE:-}" ] && TOC_ARG=(-gTOC_FILE="$(abspath "$TOC_FILE")")
 
@@ -78,5 +86,7 @@ ulimit -s unlimited
     -gSECTOR_BYTE_CYCLES="${SECTOR_BYTE_CYCLES:-214}" \
     -gPROBE_EN="${PROBE_EN:-0}" \
     -gROM_LAT="${ROM_LAT:-0}" -gCDRAM_WAIT="${CDRAM_WAIT:-0}" \
+    -gCDRAM_STALE_BUG="${CDRAM_STALE_BUG:-0}" \
+    "${FRAME_ARG[@]}" \
     --max-stack-alloc=0 --ieee-asserts=disable 2>&1 \
   | stdbuf -oL grep --line-buffered -avE "metavalue|NUMERIC_STD|numeric_std|std_logic_arith|assertion warning"
