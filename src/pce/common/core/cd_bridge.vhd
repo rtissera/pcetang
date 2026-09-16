@@ -1078,7 +1078,23 @@ begin
 							--     so require room for all of them plus this one. CDDA_FIFO
 							--     drops writes when full, silently.
 							--   cdda_status: playback may have been paused or stopped.
-							if v_out < AUDIO_MAX_OUT
+							-- `v_out > 0` is load-bearing: issue only while a transfer is
+							-- actually in progress. Without it the retire that takes the
+							-- count to zero is immediately followed by a fresh issue in the
+							-- same cycle (0 < AUDIO_MAX_OUT is true), the count is back to
+							-- one before the `v_out = 0` test below, and SCSI_IDLE is never
+							-- reached -- so a host command can never be accepted and the bus
+							-- parks in COMMAND phase forever. That happened at depth 6 AND
+							-- at depth 1, which is why dropping the depth did not help and
+							-- did not isolate anything: keeping the pipe permanently full is
+							-- simply incompatible with an FSM whose only command window is
+							-- SCSI_IDLE.
+							--
+							-- With this guard, depth 1 is bit-identical to the pre-prefetch
+							-- behaviour (one request, retire, idle), and depth N issues up to
+							-- N-1 extras DURING a transfer while still draining to zero and
+							-- visiting SCSI_IDLE between runs -- bounded, not absent.
+							if v_out > 0 and v_out < AUDIO_MAX_OUT
 							   and cdda_status = CDDA_PLAYING
 							   and comm_pending = '0' and CD_COMM_SEND = '0'
 							   and CDDA_SPACE >= resize((v_out + 1) * CDDA_SECTOR_FRAMES, 13) then
