@@ -59,7 +59,22 @@ built with 1-sector hunks, so every sector costs a full hunk decode (509 decodes
 requests — correct for that geometry, not a cache bug) and the rate falls to 41.8 %.
 Rondo and R-Type are `hunkbytes=19584 unitbytes=2448 sectors_per_hunk=8`.
 
-## OUTCOME, 2026-09-16 evening
+## RESOLVED, 2026-09-17
+
+**CD-DA now runs at 74.8 sectors/s -- 99.8% of realtime -- on Rondo and Bonk III**, paced by
+the audio clock rather than by the MCU. `dma=1846/1846 dmams=11/12 dmato=0 lkto=0`.
+
+The DMA hang recorded below was never the DMA transfers: `bflb_uart_link_txdma(uart1, true)`
+at boot left UART1 in DMA-TX mode for the whole session while ordinary frames were still
+written with blocking putchar, which stalled the link on its own (a build with `dma=0/0`
+stalled at the identical request). DMA-TX mode is now held only for the lifetime of one
+transfer, inside a UART1 ownership token that the DMA completion ISR releases. With the
+FPGA prefetching one sector ahead (AUDIO_MAX_OUT=2) the MCU decodes the next hunk while DMA
+sends the current sector -- the overlap this whole document argued for.
+
+Firmware: `private/master` of firmware-bl616 (69f6214 and ancestors). Bitstream: e1dd536.
+
+## OUTCOME, 2026-09-16 evening (superseded by the section above)
 
 Both fixes below were built and neither is in service. Recorded here so the next attempt
 does not repeat the path.

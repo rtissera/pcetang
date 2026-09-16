@@ -1,6 +1,6 @@
 # Where this core actually stands
 
-Last updated 2026-09-16. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-17. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
@@ -17,9 +17,14 @@ fetches launched nothing while the ready stayed high. Multi-byte code could not 
 from CD-RAM at all. See `MEMORY_BRIDGE_CONTRACT.md` for the contract this violated, why
 the donor is immune by construction, and the audit of every other ported memory client.
 
-**Known open issue: audio is garbled on CD titles.** Suspected ADPCM or CDDA sample
-handling (byte order is the leading hypothesis). Not yet investigated. HuCard PSG audio is
-unaffected.
+**CD audio (CD-DA) plays at full rate.** Measured 2026-09-17 on Rondo and Bonk III:
+74.8 audio sectors/s against the 75/s CD-DA needs (99.8 % of realtime), up from 66 %. Two
+fixes: CD-DA samples are byte-swapped (CHD stores them big-endian), and the MCU now sends
+sectors by DMA while decoding the next libchdr hunk, with the FPGA prefetching one sector
+ahead. See `CD_AUDIO_TIMING.md`.
+
+**Known open issue: ADPCM voices appear to be missing** (e.g. Rondo's speech). Not yet
+investigated. CD-DA music and HuCard PSG audio are fine.
 
 **HuCard works on Tang Console 60K.** `1943 Kai (Japan).pce` and `Raiden` boot and play,
 with sound and both controllers, at 720p60 over HDMI with a correct 4:3 aspect. That is
@@ -46,7 +51,8 @@ deliberate trade, not an oversight — see below.
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
 | **CD game runs on real hardware** | **YES** (Rondo, R-Type Complete CD) | not tested | not tested |
-| CD audio on real hardware | **garbled — open issue** | not tested | not tested |
+| CD-DA music on real hardware | **YES, full rate** | not tested | not tested |
+| ADPCM voices on real hardware | **missing — open issue** | not tested | not tested |
 | CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
 | Arcade Card | **compiled out** (`AC_BUILD => 0`) | **compiled out** | **compiled out** |
 | SuperGrafx | off (`LITE => 1`) | off (`LITE => 1`) | off (`LITE => 1`) |
