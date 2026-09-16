@@ -1,24 +1,35 @@
 # Where this core actually stands
 
-Last updated 2026-09-11. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-16. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
 ## Headline
 
+**PC Engine CD games boot and run on Tang Console 60K.** Confirmed on real hardware
+2026-09-16 with *Akumajou Dracula X - Chi no Rondo* and *R-Type Complete CD*. This is the
+first time any CD game has run on this core.
+
+The single defect that had blocked every CD game was the CD-RAM bridge handing the CPU
+byte N-1: `CD_RAM_RD` is a level held across consecutive memory cycles, the arbiter
+detected a new access on a rising edge alone, and so the second of two back-to-back
+fetches launched nothing while the ready stayed high. Multi-byte code could not execute
+from CD-RAM at all. See `MEMORY_BRIDGE_CONTRACT.md` for the contract this violated, why
+the donor is immune by construction, and the audit of every other ported memory client.
+
+**Known open issue: audio is garbled on CD titles.** Suspected ADPCM or CDDA sample
+handling (byte order is the leading hypothesis). Not yet investigated. HuCard PSG audio is
+unaffected.
+
 **HuCard works on Tang Console 60K.** `1943 Kai (Japan).pce` and `Raiden` boot and play,
 with sound and both controllers, at 720p60 over HDMI with a correct 4:3 aspect. That is
 the only board any real game has ever run on.
 
-**CD-ROM² loads real discs and boots the system card, but no CD game is playable.**
-As of 2026-09-11 the CD *data path* is verified byte-for-byte against an instrumented
-beetle-pce-fast: on four discs every sector the board serves matches the reference in
-both LBA and data, and the boot command sequence matches command-for-command. Games then
-load, take control, and fail with a dark screen. See "CD-ROM²" below.
-
-**The CD fault is CD-specific, not a shared core weakness.** Every HuCard game boots
-(with speed fluctuation and flaky collision detection); no CD game reaches a boot screen.
-Do not conflate the two — it sent one investigation down the wrong path already.
+**CD-ROM² is playable.** The data path was verified byte-for-byte against an
+instrumented beetle-pce-fast back on 2026-09-11 — on four discs every sector the board
+serves matches the reference in both LBA and data, and the boot command sequence matches
+command-for-command — but games still died with a dark screen until the CD-RAM bridge fix
+landed on 2026-09-16. They now boot and play.
 
 **To get there the targets were deliberately degraded to plain HuCard.** CD-ROM²,
 the Arcade Card and SuperGrafx are all compiled out or untested. This was a
@@ -34,7 +45,9 @@ deliberate trade, not an oversight — see below.
 | Video on real hardware | **locked, stable, 4:3** | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
-| CD-ROM² | **compiled out** (`NO_CD => 1`) | compiled in, **never tested** | compiled in, **never tested** |
+| **CD game runs on real hardware** | **YES** (Rondo, R-Type Complete CD) | not tested | not tested |
+| CD audio on real hardware | **garbled — open issue** | not tested | not tested |
+| CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
 | Arcade Card | **compiled out** (`AC_BUILD => 0`) | **compiled out** | **compiled out** |
 | SuperGrafx | off (`LITE => 1`) | off (`LITE => 1`) | off (`LITE => 1`) |
 
