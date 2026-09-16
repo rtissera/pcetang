@@ -59,6 +59,32 @@ built with 1-sector hunks, so every sector costs a full hunk decode (509 decodes
 requests — correct for that geometry, not a cache bug) and the rate falls to 41.8 %.
 Rondo and R-Type are `hunkbytes=19584 unitbytes=2448 sectors_per_hunk=8`.
 
+## OUTCOME, 2026-09-16 evening
+
+Both fixes below were built and neither is in service. Recorded here so the next attempt
+does not repeat the path.
+
+**Prefetch alone did not help** -- 49.7 -> 50.4 sectors/s. Its premise was wrong: the
+~8.3 ms per sector attributed below to MCU request turnaround is amortised libchdr hunk
+decode (~62 ms per 8-sector hunk, solved from the hunk_reads counter across two segments).
+62 ms over 8 sectors is 7.75 ms each -- the figure misattributed.
+
+**DMA sector transmit hangs the CD path and is switched OFF** (PCECD_TX_DMA_ENABLE 0).
+With it on, every disc stalled at a byte-identical point -- Bonk III 163 requests, Rondo
+202 -- at the first transfer it ever attempts. Exonerated by measurement along the way:
+the FPGA prefetch FSM (three builds, 6-deep, 1-deep and a known-good control, all
+identical stalls), RX starvation, and DMA buffer cache placement. Retry only with a
+DMA-completion counter in the cdprog line -- inferring "did the ISR fire" from symptoms
+cost four rounds.
+
+**Interrupt-driven UART1 RX was added and KEPT** -- it is a real win independent of audio.
+The 32-byte hardware FIFO was polled by a task and sat at 24/32 even before this work; an
+ISR now drains it into a 4 KB ring. High-water fell from 23-31 to 9-12 with zero drops,
+and Bonk III went 31.4 -> 47.4 sectors/s (41.8% -> 63.1% of realtime).
+
+Current state: games boot and play, audio scratchy at ~63% of realtime. Overlapping the
+decode with transmission remains the unsolved problem.
+
 ## The two fixes, in the order they should be tried
 
 ### 1. Prefetch — the actual fix
