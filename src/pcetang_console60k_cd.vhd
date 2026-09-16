@@ -2742,7 +2742,18 @@ begin
    -- which is what hides libchdr's ~62 ms hunk decode. Measured cost of the restore was
    -- +8 blocks. Primer 25K and Nano 20K keep the 11 default -- Nano 20K sits at 39/46
    -- and has no room. See docs/CD_AUDIO_TIMING.md.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 1,
+   -- DBG_PROBES => 0 (2026-09-16). These are the CPU-internal probes (MPR_DBG/TAM_DBG/
+   -- TLOAD_DBG/SEL_DBG) built for the T-corruption hunt, which is CLOSED -- the fault was
+   -- the CD-RAM bridge handing the CPU byte N-1, not the microcode. HUC6280_CPU.vhd's own
+   -- header warns they "hang heavy fanout off the microcode outputs" and cost real timing,
+   -- and they just did: a build that differed only by one constant came back with 140
+   -- setup violations on clk_pce, TNS -184.125 ns, worst -2.301 ns, on a path running
+   -- MCODE/MI.ALUCtrl -> dbg_sel_8_* -> ADDR_BUS -> brm_a -> PSG -> VCE -> CD. That path
+   -- has been marginal all along and the earlier 0/0 results were partly placement luck.
+   -- Turning them off buys back real margin. The trace tags 0xE0-0xE8 that read them now
+   -- report zeros; the CD tags this project actually uses (cdprog, 0xA5/0xA6/0xB0) come
+   -- from the CD path and are unaffected.
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 0,
                 CDDA_DEPTH_LOG2 => 12)
    port map (
       RESET      => not core_resetn,

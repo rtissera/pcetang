@@ -353,11 +353,32 @@ architecture rtl of cd_bridge is
 	-- the remaining ~2.7ms of wire time plus the FIFO's own slack.
 	-- One raw CD-DA sector is 588 stereo frames.
 	constant CDDA_SECTOR_FRAMES : unsigned(12 downto 0) := to_unsigned(588, 13);
-	-- Cap on requests in flight. 6 x 11.76 ms = 71 ms covers the measured ~62 ms decode.
-	-- Needs 6 x 588 = 3528 frames of FIFO, so it only pays with CDDA_DEPTH_LOG2 = 12
-	-- (4096); at 2048 the space test below simply stops granting them, which is the
-	-- correct behaviour rather than a configuration error.
-	constant AUDIO_MAX_OUT : unsigned(2 downto 0) := to_unsigned(6, 3);
+	-- Cap on requests in flight.
+	--
+	-- SET TO 1 (2026-09-16) AS A DIAGNOSTIC, deliberately giving up the speed-up.
+	-- At 6 the board hung: the MCU stayed alive and idle (its 1s queue timeout kept
+	-- printing) while the FPGA stopped asking -- 201 -> 202 requests in three seconds --
+	-- with the bus parked in COMMAND phase, which is what happens when this FSM never
+	-- returns to SCSI_IDLE to accept a command.
+	--
+	-- The flaw is structural, not a tuning problem: every retire and issue below sits
+	-- inside `if SECTOR_DATA_VALID = '1'`, so the counter only moves when a byte
+	-- arrives. Above 1, steady state deliberately never drains to zero, and if a single
+	-- SECTOR_DATA_LAST is ever missed the counter sticks above zero, no further logic
+	-- runs, and REQ_WATCHDOG is false so nothing recovers. A state machine whose only
+	-- escape depends on events it may never see.
+	--
+	-- At 1 the counter returns to zero after every sector, so SCSI_IDLE is reached every
+	-- time and the FSM cannot wedge regardless of what the wire is doing -- the same
+	-- behaviour as before prefetch existed. That isolates the MCU-side DMA transmit,
+	-- which is the other thing that changed: if the board now plays, the fault is this
+	-- FSM; if it still hangs, the fault is the DMA or the frame stream.
+	--
+	-- Expected ~74% of realtime (one sector in flight covers only 11.76 ms of the ~62 ms
+	-- hunk decode), so audio stays imperfect. This value is a measurement, not a target.
+	-- Raising it again requires moving the retire logic out from under SECTOR_DATA_VALID
+	-- and adding a real timeout first. See docs/CD_AUDIO_TIMING.md.
+	constant AUDIO_MAX_OUT : unsigned(2 downto 0) := to_unsigned(1, 3);
 
 	-- Real shared LBA->AMSF converter (repeated-subtract, multi-cycle, off the hot path).
 	-- conv_total starts at LBA+150; conv_m_bcd/conv_s_bcd count directly in packed BCD
