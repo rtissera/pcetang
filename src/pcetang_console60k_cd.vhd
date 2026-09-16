@@ -1193,7 +1193,7 @@ architecture rtl of pcetang_console60k_cd is
    -- flow control (2026-09-16). cd_bridge lives here rather than inside pce_top, so
    -- this has to be routed through the top level exactly like scsi_fifo_space_i is.
    -- See docs/CD_AUDIO_TIMING.md.
-   signal cdda_space_i      : unsigned(11 downto 0);
+   signal cdda_space_i      : unsigned(12 downto 0);
    -- SCSI bus reset from cd.vhd (CPU writes $1802 bit 1). Was `CD_RESET => open`, which
    -- left cd_bridge parked mid-transfer across a host bus reset -- see BUS_RST's own
    -- comment in cd_bridge.vhd.
@@ -2736,7 +2736,14 @@ begin
    -- core/CPU/CORE/MPR_SEL -- the MPR bank-register read mux, the exact signal the
    -- black-screen fault is localised to -- into core/AC/port[N].base_*, at 0.224 ns
    -- slack on a 23.33 ns period. See pce_top.vhd's AC_BUILD comment.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 1)
+   -- CDDA_DEPTH_LOG2 => 12 (4096 entries, 93 ms) restores the donor's CD-DA FIFO depth,
+   -- halved in 2026-08 when this board's BSRAM was the binding constraint. It no longer
+   -- is (74/118), and the depth is what lets cd_bridge keep ~6 audio sectors in flight,
+   -- which is what hides libchdr's ~62 ms hunk decode. Measured cost of the restore was
+   -- +8 blocks. Primer 25K and Nano 20K keep the 11 default -- Nano 20K sits at 39/46
+   -- and has no room. See docs/CD_AUDIO_TIMING.md.
+   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 1,
+                CDDA_DEPTH_LOG2 => 12)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,

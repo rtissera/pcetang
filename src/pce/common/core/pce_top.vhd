@@ -36,6 +36,11 @@ use IEEE.STD_LOGIC_TEXTIO.all;
 entity pce_top is
 	generic (
 		LITE : integer := 0;
+		-- CD-DA FIFO depth exponent, forwarded to cd.vhd -> CDDA_FIFO. 11 = 2048 entries
+		-- (46 ms), 12 = 4096 (93 ms). Depth decides how far cd_bridge may prefetch audio
+		-- sectors, and hiding libchdr's ~62 ms hunk decode needs ~5.3 sectors in flight.
+		-- Default stays at the current value so no board changes behaviour implicitly.
+		CDDA_DEPTH_LOG2 : integer := 11;
 		EXT_VRAM0 : integer := 0;
 		-- Nano 20K only (default 0 = donor behaviour, CD present, unchanged everywhere
 		-- else). CD's ADPCM_DRAM alone measures 32 of GW2AR-18C's 46 BSRAM blocks --
@@ -340,7 +345,7 @@ entity pce_top is
 		-- the BOARD file, not here, so audio prefetch flow control has to travel
 		-- cd.vhd -> pce_top -> board -> cd_bridge, exactly like CD_DBG_FIFO_SPACE
 		-- already does for the SCSI data FIFO. See docs/CD_AUDIO_TIMING.md.
-		CD_DBG_CDDA_SPACE : out unsigned(11 downto 0);
+		CD_DBG_CDDA_SPACE : out unsigned(12 downto 0);
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
 		-- cd_bridge -> SCSI.vhd, expected sector count of the READ(6) in flight.
@@ -1249,6 +1254,7 @@ BRM_WE <= CPU_CE and not CPU_BRM_SEL_N and not CPU_WR_N;
 gen_cd: if NO_CD = 0 generate
 begin
 	CD : entity work.cd
+	generic map( CDDA_DEPTH_LOG2 => CDDA_DEPTH_LOG2 )
 	port map(
 		CLK 			=> CLK,
 		RST_N			=> RESET_N,

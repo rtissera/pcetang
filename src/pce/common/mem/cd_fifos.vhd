@@ -179,19 +179,17 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Depth exponent shared between CDDA_FIFO's entity (its `space` port width needs it)
--- and its architecture. See the architecture's own comment for why this is 11, not the
--- donor's 12.
-package cdda_fifo_pkg is
-	constant ADDR_W_CDDA : integer := 11;
-end package;
-
-library ieee;
-use ieee.std_logic_1164.all;
-use ieee.numeric_std.all;
-use work.cdda_fifo_pkg.all;
-
 entity CDDA_FIFO is
+	generic (
+		-- Depth exponent. 11 = 2048 entries = 46 ms of audio at 44.1 kHz stereo, the
+		-- donor's 4096 halved in 2026-08 when Console 60K BSRAM was the binding
+		-- constraint. It no longer is (74/118 as of 2026-09-16), and depth now decides
+		-- how far cd_bridge may prefetch: hiding libchdr's ~62 ms hunk decode needs
+		-- ~5.3 sectors of 588 frames in flight, which does not fit in 2048.
+		-- A generic and not a constant because Nano 20K has no room for 4096 (+8
+		-- blocks measured, and it sits at 39/46).
+		DEPTH_LOG2 : integer := 11
+	);
 	port (
 		clock : in  std_logic;
 		data  : in  std_logic_vector(31 downto 0);
@@ -209,7 +207,7 @@ entity CDDA_FIFO is
 		-- dropouts for dropped samples. So the producer has to be able to see the room
 		-- it has left, exactly as SCSI.vhd's DBG_FIFO_SPACE already does for the data
 		-- path. Pure pointer arithmetic on registers that already exist: no storage.
-		space : out unsigned(ADDR_W_CDDA downto 0)
+		space : out unsigned(DEPTH_LOG2 downto 0)
 	);
 end entity;
 
@@ -224,7 +222,7 @@ architecture rtl of CDDA_FIFO is
 	-- 8N1 = 200kB/s vs CD-DA's 176.4kB/s raw need, only 13.4% margin BEFORE any
 	-- concurrent traffic). Not yet a committed design decision -- do not revert without
 	-- being asked, but do not treat this depth as final either.
-	constant ADDR_W : integer := ADDR_W_CDDA;   -- 2048 entries, was 12/4096
+	constant ADDR_W : integer := DEPTH_LOG2;
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	-- see the show-ahead note in this file's header
 	signal wr_ptr_q : unsigned(ADDR_W downto 0) := (others => '0');

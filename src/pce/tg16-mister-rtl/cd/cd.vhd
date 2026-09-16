@@ -10,6 +10,10 @@ use IEEE.STD_LOGIC_TEXTIO.all;
 use IEEE.NUMERIC_STD.ALL;
 
 entity cd is
+	generic (
+		-- CD-DA FIFO depth exponent, see CDDA_FIFO's own generic.
+		CDDA_DEPTH_LOG2 : integer := 11
+	);
 	port(
 		RST_N			: in  std_logic;
 		CLK 			: in  std_logic;
@@ -66,7 +70,7 @@ entity cd is
 		DBG_RD_TOTAL   : out unsigned(15 downto 0);
 		-- PCE PORT (2026-09-16): free entries in the CD-DA FIFO, so cd_bridge can
 		-- prefetch audio sectors without overrunning it. See CDDA_FIFO's `space` port.
-		DBG_CDDA_SPACE : out unsigned(11 downto 0);
+		DBG_CDDA_SPACE : out unsigned(12 downto 0);
 		DBG_UNDERRUNS  : out unsigned(15 downto 0);
 
 		DM				: in std_logic;
@@ -214,7 +218,7 @@ architecture rtl of cd is
 	signal CD_BYTE_CNT		: unsigned(1 downto 0);
 	signal FIFO_FULL 			: std_logic;
 	-- CDDA_FIFO's free-entry count, republished on DBG_CDDA_SPACE (2026-09-16).
-	signal CDDA_SPACE_I		: unsigned(11 downto 0);
+	signal CDDA_SPACE_I		: unsigned(CDDA_DEPTH_LOG2 downto 0);
 	signal FIFO_EMPTY 		: std_logic;
 	signal FIFO_RD_REQ		: std_logic;
 	signal FIFO_WR_REQ		: std_logic;
@@ -841,6 +845,7 @@ begin
 	end process;
 	
 	FIFO : entity work.CDDA_FIFO 
+	generic map( DEPTH_LOG2 => CDDA_DEPTH_LOG2 )
 	port map(
 		clock		=> CLK,
 		data		=> FIFO_D,
@@ -852,7 +857,7 @@ begin
 		q			=> FIFO_Q,
 		space		=> CDDA_SPACE_I
 	);
-	DBG_CDDA_SPACE <= CDDA_SPACE_I;
+	DBG_CDDA_SPACE <= resize(CDDA_SPACE_I, 13);
 	
 	CDDA_CLK_GEN : entity work.CEGen
 	port map(
