@@ -378,7 +378,15 @@ architecture rtl of cd_bridge is
 	-- hunk decode), so audio stays imperfect. This value is a measurement, not a target.
 	-- Raising it again requires moving the retire logic out from under SECTOR_DATA_VALID
 	-- and adding a real timeout first. See docs/CD_AUDIO_TIMING.md.
-	constant AUDIO_MAX_OUT : unsigned(2 downto 0) := to_unsigned(1, 3);
+	--
+	-- UPDATE 2026-09-17: set to 2. The hangs above turned out NOT to be this FSM. The MCU
+	-- firmware left UART1 in DMA-TX mode for the whole session, which stalled the link on
+	-- its own -- a build whose DMA counter read 0/0 stalled at the identical request count.
+	-- With that fixed (firmware 69f6214) DMA transfers complete (dma=93/93, 12 ms each),
+	-- but at depth 1 the FPGA only asks for sector N+1 after N's last byte, so the MCU
+	-- never has the next sector to decode while DMA sends the current one. Depth 2 lets
+	-- it. Raised one step at a time on purpose; 6 is not re-tried until 2 is measured.
+	constant AUDIO_MAX_OUT : unsigned(2 downto 0) := to_unsigned(2, 3);
 
 	-- Real shared LBA->AMSF converter (repeated-subtract, multi-cycle, off the hot path).
 	-- conv_total starts at LBA+150; conv_m_bcd/conv_s_bcd count directly in packed BCD
