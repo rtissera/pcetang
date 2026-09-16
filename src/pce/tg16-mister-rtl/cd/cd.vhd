@@ -64,6 +64,9 @@ entity cd is
 		DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		DBG_GDI        : out std_logic_vector(127 downto 0);
 		DBG_RD_TOTAL   : out unsigned(15 downto 0);
+		-- PCE PORT (2026-09-16): free entries in the CD-DA FIFO, so cd_bridge can
+		-- prefetch audio sectors without overrunning it. See CDDA_FIFO's `space` port.
+		DBG_CDDA_SPACE : out unsigned(11 downto 0);
 		DBG_UNDERRUNS  : out unsigned(15 downto 0);
 
 		DM				: in std_logic;
@@ -210,6 +213,8 @@ architecture rtl of cd is
 	signal CD_WR_OLD 			: std_logic;
 	signal CD_BYTE_CNT		: unsigned(1 downto 0);
 	signal FIFO_FULL 			: std_logic;
+	-- CDDA_FIFO's free-entry count, republished on DBG_CDDA_SPACE (2026-09-16).
+	signal CDDA_SPACE_I		: unsigned(11 downto 0);
 	signal FIFO_EMPTY 		: std_logic;
 	signal FIFO_RD_REQ		: std_logic;
 	signal FIFO_WR_REQ		: std_logic;
@@ -844,8 +849,10 @@ begin
 		sclr		=> FIFO_SCLR,
 		rdreq		=> FIFO_RD_REQ,
 		empty		=> FIFO_EMPTY,
-		q			=> FIFO_Q
+		q			=> FIFO_Q,
+		space		=> CDDA_SPACE_I
 	);
+	DBG_CDDA_SPACE <= CDDA_SPACE_I;
 	
 	CDDA_CLK_GEN : entity work.CEGen
 	port map(

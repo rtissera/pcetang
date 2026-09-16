@@ -131,6 +131,13 @@ entity cd_bridge is
 		CD_AUDIO_WR     : out std_logic;
 		CD_DM           : out std_logic;
 		SECTOR_IS_AUDIO : out std_logic;
+		-- PCE PORT (2026-09-16): free entries in cd.vhd's CD-DA FIFO, for audio
+		-- prefetch flow control. Default 0 = "no room" = prefetch never fires, so a
+		-- board that does not wire this keeps the old serialized behaviour instead of
+		-- silently overrunning the FIFO. That fail-safe direction is deliberate: the
+		-- opposite default on FIFO_SPACE is what manufactured a fake stall in
+		-- simulation once (docs/MEMORY_BRIDGE_CONTRACT.md).
+		CDDA_SPACE      : in  unsigned(11 downto 0) := (others => '0');
 
 		-- Live FSM state, so a board-level trace can tell "parked waiting for something"
 		-- apart from "back in SCSI_IDLE, host sent nothing". Leave unconnected if unused.
@@ -322,6 +329,29 @@ architecture rtl of cd_bridge is
 	-- pcetang_status_matrix.md). Set at whichever SCSI_IDLE dispatch starts the fetch,
 	-- held for its entire duration (never re-defaulted mid-fetch).
 	signal is_audio_read : std_logic := '0';
+	-- CD-DA PREFETCH (2026-09-16). Measured: the board served 49.7 audio sectors/s
+	-- against the 75/s CD-DA needs -- 66% of realtime, so the FIFO ran dry constantly
+	-- and the music was scratchy. Of the 20.1ms spent per sector only 11.76ms is wire
+	-- time (2352 bytes at 2Mbaud); the other ~8.3ms was MCU turnaround paid on EVERY
+	-- sector, because this FSM did not ask for sector N+1 until the last byte of N had
+	-- arrived. Asking early overlaps that turnaround with the tail of the current
+	-- transfer and takes the rate to ~113% of realtime. Full numbers, and why a bigger
+	-- FIFO cannot fix it, in docs/CD_AUDIO_TIMING.md.
+	--
+	-- No firmware change is needed: uart1_rx_task (priority 3) is the sole RX FIFO
+	-- consumer and always drains, and requests land in a 16-deep cd_req_queue that
+	-- cd_serve_task (priority 2) pops -- so a request arriving mid-transmission is
+	-- already received and queued today.
+	signal audio_pf_pend : std_logic := '0';   -- a request for the NEXT sector is out
+	signal audio_pf_arm  : std_logic := '0';   -- issue it on the following cycle
+	signal audio_byte_ct : unsigned(11 downto 0) := (others => '0');
+	-- Issue the next request this many bytes into the current 2352-byte sector. Late
+	-- enough that a host command still has most of the sector to arrive and cancel it
+	-- (see the comm_pending guard), early enough that ~8.3ms of MCU turnaround fits in
+	-- the remaining ~2.7ms of wire time plus the FIFO's own slack.
+	constant AUDIO_PREFETCH_AT : unsigned(11 downto 0) := to_unsigned(1800, 12);
+	-- One raw CD-DA sector is 588 stereo frames; only prefetch with room for a whole one.
+	constant CDDA_SECTOR_FRAMES : unsigned(11 downto 0) := to_unsigned(588, 12);
 
 	-- Real shared LBA->AMSF converter (repeated-subtract, multi-cycle, off the hot path).
 	-- conv_total starts at LBA+150; conv_m_bcd/conv_s_bcd count directly in packed BCD
@@ -506,6 +536,9 @@ begin
 			CD_DM            <= '0';
 			SECTOR_IS_AUDIO  <= '0';
 			is_audio_read    <= '0';
+			audio_pf_pend    <= '0';
+			audio_pf_arm     <= '0';
+			audio_byte_ct    <= (others => '0');
 			comm_pending     <= '0';
 		elsif rising_edge(CLK) then
 			CD_STAT_GET     <= '0';
@@ -948,9 +981,22 @@ begin
 					SECTOR_REQ      <= '1';
 					SECTOR_IS_AUDIO <= is_audio_read;
 					req_wdog        <= (others => '0');
+					audio_byte_ct   <= (others => '0');
 					scsi_state      <= SCSI_READ_WAIT_BYTE;
 
 				when SCSI_READ_WAIT_BYTE =>
+					-- CD-DA prefetch, issue step. Armed one cycle earlier by the audio
+					-- branch below so that SECTOR_LBA -- a continuous assignment from
+					-- read_lba -- has already settled on the incremented value by the
+					-- time SECTOR_REQ goes high. SECTOR_REQ/SECTOR_IS_AUDIO are
+					-- default-low every cycle (above), so this is a clean one-cycle pulse.
+					if audio_pf_arm = '1' then
+						SECTOR_REQ      <= '1';
+						SECTOR_IS_AUDIO <= '1';
+						audio_pf_arm    <= '0';
+						audio_pf_pend   <= '1';
+					end if;
+
 					-- lost-request watchdog (see req_wdog's declaration comment)
 					if SECTOR_DATA_VALID = '1' then
 						req_wdog <= (others => '0');
@@ -967,17 +1013,65 @@ begin
 							-- below) -- successive SECTOR_DATA_VALID pulses are already
 							-- naturally spaced by real UART byte time (~5us at 2Mbaud, many
 							-- clk_pce cycles), so CD_AUDIO_WR's own edge-detect in cd.vhd
-							-- (CD_WR_OLD) never sees back-to-back highs.
+							-- (CD_WR_OLD) never sees back-to-back highs. Still true with
+							-- prefetch: the spacing is per-byte UART time, and prefetch only
+							-- removes the GAP BETWEEN sectors, never compresses a byte.
 							CD_DATA     <= SECTOR_DATA;
 							CD_AUDIO_WR <= '1';
 							if SECTOR_DATA_LAST = '1' then
-								-- real fetch loop: advance to the next raw audio sector and
-								-- yield to SCSI_IDLE so a real host command can interrupt
-								-- between sectors (see SCSI_IDLE's own audio-continue branch)
-								read_lba   <= read_lba + 1;
-								scsi_state <= SCSI_IDLE;
+								audio_byte_ct <= (others => '0');
+								if audio_pf_pend = '1' then
+									-- The next sector was already asked for and its bytes are
+									-- already on the way, so stay here to receive them. Do NOT
+									-- touch read_lba: the prefetch advanced it when it issued.
+									--
+									-- This is also why no stray sector can ever be left in
+									-- flight: the ONLY path back to SCSI_IDLE is the else
+									-- below, which runs exactly when nothing is outstanding.
+									audio_pf_pend <= '0';
+									-- Give the prefetched sector's FIRST byte a full timeout
+									-- window. Without this the watchdog keeps counting across
+									-- the sector boundary and, on expiry, would re-enter
+									-- SCSI_READ_REQ and request read_lba a SECOND time -- but
+									-- read_lba was already advanced when the prefetch issued,
+									-- so that would duplicate a sector rather than recover
+									-- one. Dead code while REQ_WATCHDOG is false, wrong the
+									-- moment anyone turns it on.
+									req_wdog      <= (others => '0');
+								else
+									-- real fetch loop: advance to the next raw audio sector and
+									-- yield to SCSI_IDLE so a real host command can interrupt
+									-- between sectors (see SCSI_IDLE's own audio-continue branch)
+									read_lba   <= read_lba + 1;
+									scsi_state <= SCSI_IDLE;
+								end if;
+							else
+								audio_byte_ct <= audio_byte_ct + 1;
+								-- Ask for sector N+1 partway through N, so the MCU's map/decode
+								-- turnaround overlaps the tail of this transfer instead of
+								-- following it. Guards, in order of why they matter:
+								--   comm_pending/CD_COMM_SEND: a host command is waiting, so
+								--     skip the prefetch and let SECTOR_DATA_LAST fall through
+								--     to SCSI_IDLE. This is what KEEPS the interrupt window at
+								--     exactly one sector, unchanged from before prefetch --
+								--     without it, continuous playback would never return to
+								--     SCSI_IDLE and commands would never be serviced.
+								--   CDDA_SPACE: never deliver into a FIFO that cannot hold a
+								--     whole sector; CDDA_FIFO drops writes when full, silently.
+								--   cdda_status: playback may have been paused or stopped.
+								if audio_byte_ct = AUDIO_PREFETCH_AT
+								   and audio_pf_pend = '0' and audio_pf_arm = '0'
+								   and cdda_status = CDDA_PLAYING
+								   and comm_pending = '0' and CD_COMM_SEND = '0'
+								   and CDDA_SPACE >= CDDA_SECTOR_FRAMES then
+									-- Advance read_lba NOW and issue on the NEXT cycle:
+									-- SECTOR_LBA is a continuous assignment from read_lba, so
+									-- raising SECTOR_REQ in this same cycle would present the
+									-- OLD lba alongside the new request.
+									read_lba     <= read_lba + 1;
+									audio_pf_arm <= '1';
+								end if;
 							end if;
-							-- else: stay in SCSI_READ_WAIT_BYTE for the next audio byte
 						else
 							CD_DATA    <= SECTOR_DATA;
 							CD_DATA_WR <= '1';

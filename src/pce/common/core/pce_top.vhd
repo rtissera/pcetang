@@ -336,6 +336,11 @@ entity pce_top is
 		CD_DBG_COMM1      : out std_logic_vector(7 downto 0);
 		CD_DBG_SEL_CNT    : out unsigned(15 downto 0);
 		CD_DBG_FIFO_SPACE : out unsigned(12 downto 0);
+		-- PCE PORT (2026-09-16): free entries in cd.vhd's CD-DA FIFO. cd_bridge lives in
+		-- the BOARD file, not here, so audio prefetch flow control has to travel
+		-- cd.vhd -> pce_top -> board -> cd_bridge, exactly like CD_DBG_FIFO_SPACE
+		-- already does for the SCSI data FIFO. See docs/CD_AUDIO_TIMING.md.
+		CD_DBG_CDDA_SPACE : out unsigned(11 downto 0);
 		CD_DBG_FIFO_DROPS : out unsigned(15 downto 0);
 		CD_DBG_GDI        : out std_logic_vector(127 downto 0);
 		-- cd_bridge -> SCSI.vhd, expected sector count of the READ(6) in flight.
@@ -1286,6 +1291,7 @@ begin
 		DBG_COMM1      => CD_DBG_COMM1,
 		DBG_SEL_CNT    => CD_DBG_SEL_CNT,
 		DBG_FIFO_SPACE => CD_DBG_FIFO_SPACE,
+		DBG_CDDA_SPACE => CD_DBG_CDDA_SPACE,
 		DBG_FIFO_DROPS => CD_DBG_FIFO_DROPS,
 		DBG_GDI        => CD_DBG_GDI,
 		CD_DATAIN_SECTORS => CD_DATAIN_SECTORS,
@@ -1337,6 +1343,11 @@ begin
 	CD_DBG_COMM1      <= (others => '0');
 	CD_DBG_SEL_CNT    <= (others => '0');
 	CD_DBG_FIFO_SPACE <= (others => '0');
+	-- 0 = "no room", which DISABLES prefetch. Deliberately the fail-safe direction:
+	-- a board that never wires this loses the speed-up, it does not overrun the FIFO.
+	-- (The opposite default is what made an unwired FIFO_SPACE manufacture a fake stall
+	-- in simulation -- see docs/MEMORY_BRIDGE_CONTRACT.md.)
+	CD_DBG_CDDA_SPACE <= (others => '0');
 	CD_DBG_FIFO_DROPS <= (others => '0');
 	CD_DBG_GDI        <= (others => '0');
 	CD_DBG_RD_TOTAL   <= (others => '0');

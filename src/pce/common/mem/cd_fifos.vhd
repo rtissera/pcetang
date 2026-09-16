@@ -179,6 +179,18 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- Depth exponent shared between CDDA_FIFO's entity (its `space` port width needs it)
+-- and its architecture. See the architecture's own comment for why this is 11, not the
+-- donor's 12.
+package cdda_fifo_pkg is
+	constant ADDR_W_CDDA : integer := 11;
+end package;
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.cdda_fifo_pkg.all;
+
 entity CDDA_FIFO is
 	port (
 		clock : in  std_logic;
@@ -188,7 +200,16 @@ entity CDDA_FIFO is
 		wrreq : in  std_logic;
 		empty : out std_logic;
 		full  : out std_logic;
-		q     : out std_logic_vector(31 downto 0)
+		q     : out std_logic_vector(31 downto 0);
+		-- PCE PORT (2026-09-16): FREE entries, for CD-DA prefetch flow control.
+		-- The donor never needed this: its host streamed audio at exactly 75 sectors/s,
+		-- so this FIFO only ever absorbed jitter. Once cd_bridge prefetches it can
+		-- DELIVER faster than 44.1 kHz drains, and this FIFO drops writes when full
+		-- (`wren_a_i <= wrreq and not full_i` below) SILENTLY -- which would trade
+		-- dropouts for dropped samples. So the producer has to be able to see the room
+		-- it has left, exactly as SCSI.vhd's DBG_FIFO_SPACE already does for the data
+		-- path. Pure pointer arithmetic on registers that already exist: no storage.
+		space : out unsigned(ADDR_W_CDDA downto 0)
 	);
 end entity;
 
@@ -203,7 +224,7 @@ architecture rtl of CDDA_FIFO is
 	-- 8N1 = 200kB/s vs CD-DA's 176.4kB/s raw need, only 13.4% margin BEFORE any
 	-- concurrent traffic). Not yet a committed design decision -- do not revert without
 	-- being asked, but do not treat this depth as final either.
-	constant ADDR_W : integer := 11;   -- 2048 entries, was 12/4096
+	constant ADDR_W : integer := ADDR_W_CDDA;   -- 2048 entries, was 12/4096
 	signal wr_ptr, rd_ptr : unsigned(ADDR_W downto 0) := (others => '0');
 	-- see the show-ahead note in this file's header
 	signal wr_ptr_q : unsigned(ADDR_W downto 0) := (others => '0');
@@ -229,6 +250,9 @@ begin
 	                and wr_ptr(ADDR_W) /= rd_ptr(ADDR_W) else '0';
 	empty <= empty_i;
 	full  <= full_i;
+	-- Free entries = depth - occupancy. wr_ptr/rd_ptr carry one bit more than the
+	-- address, so their difference is the true occupancy including the full case.
+	space <= to_unsigned(2**ADDR_W, ADDR_W+1) - resize(wr_ptr - rd_ptr, ADDR_W+1);
 
 	process (clock)
 	begin

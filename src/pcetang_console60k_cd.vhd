@@ -1189,6 +1189,11 @@ architecture rtl of pcetang_console60k_cd is
    signal scsi_comm1_i      : std_logic_vector(7 downto 0);
    signal scsi_sel_cnt_i    : unsigned(15 downto 0);
    signal scsi_fifo_space_i : unsigned(12 downto 0);
+   -- Free entries in cd.vhd's CD-DA FIFO, pce_top -> cd_bridge, for audio prefetch
+   -- flow control (2026-09-16). cd_bridge lives here rather than inside pce_top, so
+   -- this has to be routed through the top level exactly like scsi_fifo_space_i is.
+   -- See docs/CD_AUDIO_TIMING.md.
+   signal cdda_space_i      : unsigned(11 downto 0);
    -- SCSI bus reset from cd.vhd (CPU writes $1802 bit 1). Was `CD_RESET => open`, which
    -- left cd_bridge parked mid-transfer across a host bus reset -- see BUS_RST's own
    -- comment in cd_bridge.vhd.
@@ -2641,6 +2646,7 @@ begin
       DATAIN_SECTORS    => cd_datain_sectors_i,
       DBG_DEND          => scsi_dend_i,
       FIFO_SPACE        => scsi_fifo_space_i,
+      CDDA_SPACE        => cdda_space_i,
       BUS_RST           => cd_bus_rst_i
    );
    end generate;
@@ -2835,6 +2841,7 @@ begin
       CD_DBG_COMM1      => scsi_comm1_i,
       CD_DBG_SEL_CNT    => scsi_sel_cnt_i,
       CD_DBG_FIFO_SPACE => scsi_fifo_space_i,
+      CD_DBG_CDDA_SPACE => cdda_space_i,
       CD_DBG_FIFO_DROPS => scsi_fifo_drops_i,
       CD_DBG_GDI        => scsi_gdi_i,
       CD_DATAIN_SECTORS => cd_datain_sectors_i,
