@@ -17,6 +17,6 @@ for f in src/pce/common/mem/init/voltab_pkg.vhd src/pce/common/mem/init/huc6260_
 done
 "$G" -e "${F[@]}" -o "$WORK/tb_adpcm_dma" tb_adpcm_dma
 ulimit -s unlimited
-"$WORK/tb_adpcm_dma" -gSECTORS="${SECTORS:-4}" --max-stack-alloc=0 --ieee-asserts=disable \
+"$WORK/tb_adpcm_dma" -gSECTORS="${SECTORS:-4}" -gDMA_REG="${DMA_REG:-2}" --max-stack-alloc=0 --ieee-asserts=disable \
     --stop-time=${STOP_MS:-400}ms > "$WORK/result.txt" 2>&1 || true
 grep -aE 'RESULT|PASS|FAIL|TIMEOUT|error|STATUS not|^HB' "$WORK/result.txt"

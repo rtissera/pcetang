@@ -31,6 +31,9 @@ entity tb_adpcm_dma is
 	generic (
 		DIR           : string  := "sim/cd/golden/adpcm_rondo_dma1";
 		SECTORS       : integer := 4;
+		-- $180B value: 2 = Rondo; 1 = Sapphire (both keep DMA on for the whole DATA IN phase
+		-- in beetle and MAME -- both clear it only when the drive enters STATUS)
+		DMA_REG       : integer := 2;
 		SECTOR_LAT_US : integer := 10000;   -- MCU decode latency before a sector's first byte
 		FEED_CYCLES   : integer := 214      -- real 2 Mbaud byte pace in clk_pce cycles
 	);
@@ -339,7 +342,7 @@ begin
 
 		cpu_step <= 1;   -- CDB sent
 		-- DMA on: cd.vhd consumes DATA IN itself; the CPU only watches for STATUS
-		wr_reg(16#B#, x"02");
+		wr_reg(16#B#, std_logic_vector(to_unsigned(DMA_REG, 8)));
 		cpu_step <= 2;   -- DMA enabled
 		wait_phase(x"d8", "STATUS after DMA load");
 		wr_reg(16#B#, x"00");
