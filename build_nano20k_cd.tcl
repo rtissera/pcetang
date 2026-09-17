@@ -84,7 +84,13 @@ set_option -bit_compress 1
 
 # Alternate PnR algorithm (2026-08-30): same lever that recovered real margin on every
 # other board this session -- see pcetang_status_matrix.md lever 13.
-set_option -place_option 2
+# 2026-09-17: place_option 2 -> 0 (route_option stays 1). With the CD-DA end-position work this
+# board sits at 90% logic, and the placer choice is worth ~0.7 MHz here. Measured, same tree,
+# 4-way sweep at the old 43.2 MHz constraint: place1/route0 421 violations (41.772 MHz),
+# place1/route1 183 (42.367), place2/route0 421 (41.772), place0/route1 51 (42.431) -- best.
+# With the clock then moved to 42.4286 MHz (see nano20k_pll.vhd), place0/route1 closes at 0/0,
+# Fmax 42.466. place_option 2 at the new clock is NOT close: 1025 setup violations, 40.637 MHz.
+set_option -place_option 0
 set_option -route_option 1
 
 # TRIED, REAL NO-OP (2026-08-31): `-maxfan 16` (Gowin's SYN04 "Fanout Guide") was tested
