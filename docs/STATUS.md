@@ -59,13 +59,26 @@ deliberate trade, not an oversight — see below.
 
 Exact generic maps, so this cannot drift from the source:
 
-    Console 60K  LITE => 1, EXT_VRAM0 => 0, NO_CD => 1, AC_BUILD => 0, DBG_PROBES => 1
-    Primer 25K   LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0
-    Nano 20K     LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0
+    Console 60K  LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 0,
+                 CDDA_DEPTH_LOG2 => 12, SGX => '1' (see note below)
+    Primer 25K   LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0, SGX => '0'
+    Nano 20K     LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0, VT_PATH_A => 0, SGX => '0'
 
-Note the asymmetry, because "we degraded everything to HuCard" is only literally true
-of Console 60K: the other two boards still COMPILE the CD subsystem, they have simply
-never had it exercised. Only the Arcade Card is out on all three.
+All three boards compile the CD subsystem (Console 60K turned it back on for the CD
+bring-up and runs games; the other two have never had it exercised). The Arcade Card and
+SuperGrafx are out on all three. SF2' mapper and backup RAM are in on all three.
+
+`SGX => '1'` on Console 60K is an inconsistency, not a feature. `LITE` decides what is
+BUILT: with `LITE => 1` the second VDC, the HuC6202 priority mixer and the cheat engine do
+not exist, and the VDC/VPC chip-select decode that `SGX` controls sits inside
+`generate_SGX`, so it is gone too. `SGX` is a runtime input; its one use left with
+`LITE => 1` is `pce_top.vhd`'s work-RAM address (`RAM_A(14 downto 13)`). The CPU selects
+work RAM for pages $F8-$FB and the RAM block is always 32KB, so with `SGX='1'` pages
+$F9-$FB are separate RAM (SuperGrafx) and with `SGX='0'` they mirror $F8 (PC Engine).
+Risk today is low: only software that reads $F8 data through a $F9-$FB mirror, or that
+detects a SuperGrafx by testing that RAM, would behave differently. Fix is to derive
+`SGX` from `LITE`; it changes the bitstream, so it waits for the current build's hardware
+confirmation.
 
 ## Why each thing was dropped
 
@@ -76,10 +89,8 @@ which is the MPR critical path `8dc83df` first identified. With it in, Primer 25
 `core/gen_ac.AC/port[N].base_22`). With `AC_BUILD => 0` both go to **0**. Direct user
 decision, 2026-09-09: not a priority until HuCard is right everywhere.
 
-**CD-ROM² — Console 60K.** `HUCARD_ONLY` at `pcetang_console60k_cd.vhd:710`. Dropped
-while hunting the black screen, to take the whole CD subsystem out of the timing and
-BSRAM picture. The SCSI/TOC/CDDA work is all still in the tree and gw_sh-clean; it has
-just never been run against a real disc image on hardware.
+**CD-ROM² — Console 60K. RESTORED.** Was dropped while hunting the black screen
+(`HUCARD_ONLY`, now `false`; `NO_CD => 0`). CD games run on hardware since 2026-09-16.
 
 **SuperGrafx.** `LITE => 1` everywhere. Fits, but razor-thin (96% BSRAM, ~0.2% clock
 margin) — scratch work only, never shipped.

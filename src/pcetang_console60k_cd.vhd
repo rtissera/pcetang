@@ -1,11 +1,16 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Copyright (c) 2026 Romain Tisserand
 
--- pcetang Phase 2: Tang Console 60K, the combined target -- PCE + PCE-CD + SGX all
--- elaborated together (NO_CD=>0, LITE=>0, SGX=>'1'), not a separate SGX variant file.
+-- pcetang Phase 2: Tang Console 60K, PCE + PCE-CD.
+-- CURRENT CONFIG (2026-09-17): NO_CD=>0, LITE=>1 (SuperGrafx NOT elaborated),
+-- AC_BUILD=>0, DBG_PROBES=>0, CDDA_DEPTH_LOG2=>12 -- see the comments on pce_top's
+-- generic map below for why each is set. The SGX input is still tied '1'; with LITE=>1
+-- its only live effect is pce_top's work-RAM address (pages $F9-$FB get their own 24KB
+-- instead of mirroring $F8 like a real PC Engine). Should follow LITE -- a bitstream
+-- change, deferred until the current build is confirmed on hardware.
 -- Sibling to pcetang_console60k.vhd's Phase 1 (HuCard-only, no CD, no SGX) build.
 --
--- SGX (2026-08-29): LITE flipped 1->0 and SGX flipped '0'->'1' for real, permanently --
+-- HISTORY -- SGX (2026-08-29, SUPERSEDED 2026-09-07 by LITE => 1): LITE flipped 1->0 and SGX flipped '0'->'1' for real, permanently --
 -- this board's target config is PCE+PCE-CD+SGX combined, per direct instruction, not a
 -- separate SGX variant. Needed a real Gowin BSRAM cross-instance-merge bug fixed first
 -- (huc6270.vhd's BG_COLOR/SPR_COLOR, commit 2f7ccdc, gated on a new SGX_BUILD generic

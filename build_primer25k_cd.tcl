@@ -90,7 +90,12 @@ set_option -bit_compress 1
 # (c1cba4f, measured in a worktree) to +0.016% while logic utilisation went DOWN, 93% ->
 # 92% -- so it was placement variance, not area pressure, and the placer just needed a
 # different objective. Option 1 now beats the pre-session baseline as well.
-set_option -place_option 1
+# 2026-09-17: back to place_option 0. The ADPCM bridge fix (f2b54f6) left place_option 1
+# with 16 unrouted nets (PR0004), deterministic over 2 runs, although it uses FEWER LUTs
+# than the pre-fix tag (21459 vs 21544) -- placement variance again, not capacity. The
+# pre-fix tag still routes with 1 but at +0.002% clk_pce. place_option 0 on HEAD: 0/0,
+# clk_pce 43.090/42.857 MHz (+0.54%), clk_sdram 120.78/120, Logic 94%, BSRAM 36/56.
+set_option -place_option 0
 set_option -route_option 0
 # 2026-09-06 real fix, CONFIRMED by a 3-way sweep: place_option 1 (below) stopped routing
 # this board once the sdram.sv port-B deadlock fix landed -- ERROR (PR0004), 15 unrouted
