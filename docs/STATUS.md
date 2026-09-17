@@ -53,8 +53,9 @@ deliberate trade, not an oversight — see below.
 
 | | Console 60K | Primer 25K | Nano 20K |
 |---|---|---|---|
-| Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
-| BSRAM | 67/118 | 35/56 | 39/46 |
+| Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes (at a reduced clock, see below) |
+| Core clock | 42.857 MHz | 42.857 MHz | **42.4286 MHz** (was 43.2; games run 1.22% slow) |
+| BSRAM | 78/118 | 36/56 | 40/46 |
 | **HuCard runs on real hardware** | **YES** | not tested | not tested |
 | Video on real hardware | **locked, stable, 4:3** | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
@@ -88,6 +89,19 @@ Risk today is low: only software that reads $F8 data through a $F9-$FB mirror, o
 detects a SuperGrafx by testing that RAM, would behave differently. Fix is to derive
 `SGX` from `LITE`; it changes the bitstream, so it waits for the current build's hardware
 confirmation.
+
+## Known debt: Nano 20K core clock (2026-09-17)
+
+The CD-DA end-position work added ~307 LUTs, and Nano 20K was already at 90% logic. It went to 183
+setup violations; a four-way place/route sweep only reached 42.431 MHz against a 43.2 MHz
+constraint. The exact PC Engine rate (42.9545 MHz) is unreachable from that board's 27 MHz crystal
+— it needs a phase detector at 1.23 MHz, below the PLL's floor — so the clock was moved to
+`27 x 11/7` = 42.4286 MHz, which closes at 0/0 with +0.09% margin.
+
+The cost is real: **games and audio run 1.22% slow on Nano 20K**, and the margin is thin enough
+that any future logic addition can break it again. The fix is to pipeline the HuC6280 microcode
+decode (`HUC6280_MC.vhd`'s `MI` register) — every failing path on every board starts there, and it
+is also what stands between all three boards and the Arcade Card.
 
 ## Why each thing was dropped
 

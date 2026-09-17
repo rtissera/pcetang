@@ -2,6 +2,16 @@
 -- Copyright (c) 2026 Romain Tisserand
 
 -- pcetang Phase 1: Tang Nano 20K, TangCore-integrated (iosys_bl616: ROM load, joypad,
+--
+-- KNOWN DEBT (2026-09-17): this board's core clock is 42.4286 MHz, NOT the 43.2 MHz it used to
+-- run and NOT the exact PCE rate of 42.9545 MHz -- so games and audio run 1.22% slow here. The
+-- CD-DA end-position work put this board (90% logic) past its own constraint: 183 setup
+-- violations, and a 4-way place/route sweep only reached 42.431 MHz. The exact rate is
+-- unreachable from the 27 MHz crystal (27*35/22 needs PFD 1.23 MHz, below the rPLL's ~3 MHz
+-- floor), so 27*11/7 was taken instead. Margin is now +0.09%, i.e. THIN -- re-check this board
+-- after any logic addition. To buy the clock back, pipeline the HUC6280 microcode decode
+-- (HUC6280_MC.vhd's MI register): every failing path starts there, on every board. See
+-- src/pce/common/pll/nano20k_pll.vhd and session memory pcetang_nano20k_clock_debt.md.
 -- OSD), full PCE+PCE-CD combo (NO_CD=>0), EXT_VRAM0=>1 (Nano 20K's whole engine does
 -- not fit on-chip). SOLE Nano 20K build as of 2026-08-30 -- the plain, HuCard-only
 -- variant (pcetang_nano20k.vhd/build_nano20k.tcl) is retired now that this file has
