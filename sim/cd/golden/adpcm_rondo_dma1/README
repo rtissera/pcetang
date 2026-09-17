@@ -1,0 +1,12 @@
+Golden ADPCM DMA-from-CD load, Akumajou Dracula X - Chi no Rondo: the game's first DMA load
+(beetle-pce-fast, emulated frame 12291).
+
+  $180D<=00  $1808/9<=0000  $180D<=03 $180D<=02 $180D<=00     write address <- 0
+  SELECT; CDB 08 00 10 1f 20 00                              READ(6) LBA 4127, 32 sectors
+  $180B<=02 (DMA enable) ... STATUS ... $180B<=00; STATUS and MESSAGE acknowledged
+
+sectors.hex     65536 bytes: user data of LBA 4127..4158, taken from the CHD itself
+dma_writes.hex  "addr value" for each of beetle's 65536 ADPCM RAM writes during that load
+
+The two were compared: 0 mismatches, addresses strictly sequential 0x0000..0xFFFF. So the
+golden does not depend on beetle's CD emulation being right.

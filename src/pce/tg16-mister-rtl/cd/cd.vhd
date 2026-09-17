@@ -165,7 +165,13 @@ architecture rtl of cd is
 	signal ADPCM_WRITE_PEND	: std_logic;
 	signal ADPCM_READ_PEND	: std_logic;
 	signal PLAY_READ_PEND	: std_logic;
-	signal DMA_WRITE_PEND	: std_logic;
+	-- PCE PORT (2026-09-17): explicit power-up value. This flag is NOT in the reset branch
+	-- below (ADPCM_WRITE_PEND/ADPCM_READ_PEND/PLAY_READ_PEND are), so in simulation it stayed
+	-- 'U', `DMA_WRITE_PEND = '0'` was never true, and ADPCM DMA-from-CD never took a single
+	-- byte -- which is why no simulation had ever exercised the path Rondo loads all its voice
+	-- data through. Gowin powers it up at 0, so hardware behaviour is unchanged. Not added to
+	-- the reset branch here on purpose: that would change synthesised logic.
+	signal DMA_WRITE_PEND	: std_logic := '0';
 	signal ADPCM_WRITE_NIB	: std_logic;
 	signal ADPCM_READ_NIB	: std_logic;
 	signal WRITE_PEND			: std_logic;

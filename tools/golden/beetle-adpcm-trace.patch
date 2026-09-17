@@ -1,5 +1,5 @@
 diff --git a/mednafen/pce_fast/pcecd.c b/mednafen/pce_fast/pcecd.c
-index 6b7cc79..a5d168a 100644
+index 6b7cc79..2260236 100644
 --- a/mednafen/pce_fast/pcecd.c
 +++ b/mednafen/pce_fast/pcecd.c
 @@ -378,6 +378,53 @@ bool PCECD_IsBRAMEnabled(void)
@@ -72,12 +72,14 @@ index 6b7cc79..a5d168a 100644
     return(ret);
  }
  
-@@ -502,6 +558,12 @@ static INLINE void Fader_Run(const int32 clocks)
+@@ -502,6 +558,14 @@ static INLINE void Fader_Run(const int32 clocks)
  void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
  {
     const uint8 V = data;
 +   { FILE *af = pce_adpcm_txt();
-+     if (af && (physAddr & 0xf) >= 0x8) {
++     /* all register WRITES (the SCSI command bytes that start a DMA load are $1801 writes);
++        reads of $1800-$1807 are polled constantly and stay out */
++     if (af) {
 +        fprintf(af, "f=%lu W %X <= %02x\n", pce_vgold_frames, (unsigned)(physAddr & 0xf), (unsigned)V); fflush(af); } }
 +   { FILE *gf = pce_cdlog();
 +     if (gf && pce_cdreg_n < 2000000) { pce_cdreg_n++;
@@ -85,7 +87,7 @@ index 6b7cc79..a5d168a 100644
  
     PCECD_Run(timestamp);
  
-@@ -589,6 +651,7 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
+@@ -589,6 +653,7 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
        case 0xa:
           ADPCM.WritePending = 3 * 11;
           ADPCM.WritePendingValue = data;
@@ -93,7 +95,7 @@ index 6b7cc79..a5d168a 100644
           break;
  
        case 0xb:	// adpcm dma
-@@ -625,6 +688,16 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
+@@ -625,6 +690,16 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
  
           if(!ADPCM.Playing && (data & 0x20))
           {
@@ -110,7 +112,7 @@ index 6b7cc79..a5d168a 100644
              ADPCM.bigdiv = ADPCM.bigdivacc * (16 - ADPCM.SampleFreq);
              ADPCM.Playing = true;
              ADPCM.HalfReached = false;	// Not sure about this.
-@@ -729,7 +802,12 @@ static INLINE void ADPCM_PB_Run(int32 basetime, int32 run_time)
+@@ -729,7 +804,12 @@ static INLINE void ADPCM_PB_Run(int32 basetime, int32 run_time)
  
           uint32 synthtime;
           nibble = (ADPCM.PlayBuffer >> (ADPCM.PlayNibble ^ 4)) & 0x0F;
@@ -123,7 +125,7 @@ index 6b7cc79..a5d168a 100644
  
           ADPCM.PlayNibble ^= 4;
  
-@@ -768,6 +846,12 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
+@@ -768,6 +848,12 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
           if(!(ADPCM.LastCmd & 0x10) && ADPCM.LengthCount < 0xFFFF)
              ADPCM.LengthCount++;
  
@@ -136,7 +138,7 @@ index 6b7cc79..a5d168a 100644
           ADPCM.RAM[ADPCM.WriteAddr++] = ADPCM.WritePendingValue;
           ADPCM.WritePending = 0;
        }
-@@ -784,6 +868,7 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
+@@ -784,6 +870,7 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
           {
              ADPCM.WritePendingValue = read_1808(timestamp);
              ADPCM.WritePending = 10 * 3;

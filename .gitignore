@@ -25,3 +25,4 @@ sim/cd/sweep_regwalk_results.txt
 sim/cd/adpcmwork/
 sim/cd/adpcmgoldwork/
 sim/cd/cosim/obj/
+sim/cd/adpcmdmawork/

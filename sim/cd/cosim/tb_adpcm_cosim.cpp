@@ -217,12 +217,14 @@ int main(int argc, char **argv) {
 	fprintf(pcm_out, "%d\n", (int16_t)top->ad_s);
 	fclose(pcm_out);
 
-	printf("RESULT golden=%zu consumed=%ld matched=%ld first_mismatch_at=%ld played_past_end=%ld start_nibble_addr=0x%05lX\n",
+	printf("RESULT golden=%zu consumed=%ld matched=%ld first_mismatch_at=%ld reads_past_end=%ld start_nibble_addr=0x%05lX\n",
 	       gold.size(), got, matched, first_bad, extra, start_addr < 0 ? 0 : start_addr);
 	printf("  port C accesses during playback: %ld cache HITS (WAIT never rose), %ld misses\n", acc_hit, acc_miss);
 	if (idle >= STALL_CYC) printf("  STOPPED: no nibble consumed for STALL_CYC cycles\n");
-	printf("%s\n", (got == (long)gold.size() && matched == (long)gold.size() && extra == 0) ? "PASS" :
-	       (matched == (long)gold.size() && extra == 1 ? "FAIL (known: 1-nibble overrun only)" : "FAIL"));
+	// One read past the end is the stop fetch (read, then discarded because length is 0 and
+	// playback stops); it is only accepted if AD_S has gone to 0. See tb_adpcm_golden.vhd.
+	bool ok = matched == (long)gold.size() && (extra == 0 || (extra == 1 && (int16_t)top->ad_s == 0));
+	printf("%s\n", ok ? (extra ? "PASS (+1 stop fetch, read and discarded, not decoded)" : "PASS") : "FAIL");
 	delete top;
 	return 0;
 }
