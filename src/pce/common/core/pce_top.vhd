@@ -138,7 +138,12 @@ entity pce_top is
 		VT_PATH_A : integer := 1;
 		-- Pass-through to HUC6280_CPU's DBG_PROBES (via HUC6280.vhd). Default 0.
 		-- Only Console 60K's debug build turns these on; they cost real timing.
-		DBG_PROBES : integer := 0
+		DBG_PROBES : integer := 0;
+		-- Arcade Card options, both default 0 (donor behaviour) -- see arcade.sv.
+		-- AC_REG_BUS registers the CPU bus into the card's write path (timing);
+		-- AC_SLIM shares ONE address adder instead of four (area, NOT yet functionally proven).
+		AC_REG_BUS : integer := 0;
+		AC_SLIM    : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -536,6 +541,11 @@ signal CPU_WAIT_N_I : std_logic;
 signal WAIT_EVER_LOW : std_logic := '0';
 
 component ARCADE_CARD is
+	generic(
+		-- Both default 0 = donor behaviour. See arcade.sv for what each does and why.
+		AC_REG_BUS : integer := 0;
+		AC_SLIM    : integer := 0
+	);
 	port(
 		CLK     : in  std_logic;
 		RST_N   : in  std_logic;
@@ -1376,6 +1386,10 @@ CD_RAM_WR <= CPU_PRE_WR and not (CD_RAM_CS_N and AC_RAM_CS_N);
 
 gen_ac : if AC_BUILD /= 0 generate
 AC : ARCADE_CARD
+generic map(
+	AC_REG_BUS => AC_REG_BUS,
+	AC_SLIM    => AC_SLIM
+)
 port map(
 	CLK     => CLK,
 	RST_N   => RESET_N,
