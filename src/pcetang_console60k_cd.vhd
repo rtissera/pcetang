@@ -437,6 +437,9 @@ architecture rtl of pcetang_console60k_cd is
    -- Previous cycle's rom_rd_i, and the address of the last request actually started.
    -- Together these turn a level into a real "new request" event -- see RB_IDLE.
    signal rom_rd_prev  : std_logic := '0';
+   -- pce_top's CPU_CLKEN, exported as ROM_CLKEN -- the CPU's own bus-cycle strobe, one pulse
+   -- per memory cycle. Wired `open` until 2026-09-18; see rd_new_req for what it now does.
+   signal rom_clken_i  : std_logic;
    signal rd_a_last    : std_logic_vector(21 downto 0) := (others => '1');
    -- Single definition of "a new ROM read is pending". Used BOTH by the FSM's start
    -- condition and by rom_rdy_comb: if those two ever disagreed, ROM_RDY could sit low
@@ -2107,8 +2110,24 @@ begin
    -- running (with one bad byte) instead of freezing, and dbg_rd_timeout_cnt reports how
    -- often over the trace channel -- a live count is far better evidence than another
    -- silent freeze.
-   rd_new_req <= '1' when rom_rd_i = '1' and (rom_rd_prev = '0' or rom_a /= rd_a_last)
-                 else '0';
+   -- EXPERIMENT 2026-09-18 (branch experiment/ce-strobe-rom): launch on the CPU's own bus-cycle
+   -- strobe instead of comparing the address, which is what the donor does
+   -- (TurboGrafx16.sv:768 `.rd(use_sdr & (rom_rd | cd_ram_rd) & ce_rom)`) and what this file's
+   -- own comment above already called "the cleanup".
+   --
+   -- WHY: the worst path on every board is
+   --   MI.ALUCtrl -> address mux -> `rom_a /= rd_a_last` 22-bit compare -> rd_new_req ->
+   --   rom_rdy_comb -> WAIT_N -> CPU_CLK_CNT
+   -- i.e. most of the delay is THIS compare and its routing, not the CPU. Using the strobe takes
+   -- the address out of the ready path entirely. It also catches back-to-back reads of the SAME
+   -- address, which the compare misses by construction.
+   --
+   -- RISK, stated plainly: a level-held read line with no per-cycle trigger is exactly the
+   -- stale-byte bug that stopped every CD game booting (see docs/MEMORY_BRIDGE_CONTRACT.md).
+   -- The strobe IS that trigger -- one launch per CPU memory cycle -- but if ROM_CLKEN ever
+   -- pulses without the CPU wanting a fetch, or fails to pulse when it does, this hangs or
+   -- returns stale data. The rd_timeout watchdog below is what keeps that observable.
+   rd_new_req <= '1' when rom_rd_i = '1' and rom_clken_i = '1' else '0';
 
    -- Low the instant a NEW read is pending, so the CPU cannot sample the previous byte
    -- in the cycle before the registered rom_rdy_i catches up. The rd_done term is
@@ -2821,7 +2840,7 @@ begin
       ROM_DO    => rom_do_i,
       ROM_SZ    => rom_sz_r,       -- dynamic 128K-1MB real HuCard bucket, see rom_sz_r above
       ROM_POP   => '0',
-      ROM_CLKEN => open,
+      ROM_CLKEN => rom_clken_i,
 
       BRM_A => brm_a, BRM_DI => brm_di, BRM_DO => brm_do, BRM_WE => brm_we,
 
