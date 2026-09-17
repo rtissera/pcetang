@@ -1,0 +1,216 @@
+diff --git a/mednafen/pce_fast/pcecd.c b/mednafen/pce_fast/pcecd.c
+index 6b7cc79..a5d168a 100644
+--- a/mednafen/pce_fast/pcecd.c
++++ b/mednafen/pce_fast/pcecd.c
+@@ -378,6 +378,53 @@ bool PCECD_IsBRAMEnabled(void)
+    return bBRAMEnabled;
+ }
+ 
++
++/* GOLDEN CD-REGISTER TRACE (scratch build 2026-09-14): every $1800-$180F access, so the
++   reference's command sequence can be diffed against the board's. Separate env var and
++   file from the VCE/VDC trace in vdc.c so the two do not interleave. */
++#include <stdio.h>
++#include <stdlib.h>
++static FILE *pce_cdlog(void)
++{
++   static FILE *f = NULL; static int tried = 0;
++   if (!tried) { const char *p = getenv("PCE_CDREG_LOG"); tried = 1; if (p && *p) f = fopen(p, "w"); }
++   return f;
++}
++static unsigned long pce_cdreg_n = 0;
++/* ---------------------------------------------------------------------------------------
++ * ADPCM golden trace (pcetang, 2026-09-17). Enabled only when PCE_ADPCM_LOG=<prefix> is set.
++ *   <prefix>.log          text: register writes $1808-$180F, play start/stop, with frame no.
++ *   <prefix>_writes.bin   8-byte records: u32 frame, u16 byte addr, u8 value, u8 src (0 CPU $180A, 1 DMA)
++ *   <prefix>_ram_<n>.bin  65536-byte ADPCM RAM image at the n-th playback start
++ *   <prefix>_nib.bin      one byte per nibble actually fed to the OKI decoder, in play order
++ * RAM here is BYTES; the FPGA stores one nibble per address, byte k -> nibbles 2k (high), 2k+1.
++ * ------------------------------------------------------------------------------------- */
++extern unsigned long pce_vgold_frames;
++static const char *pce_adpcm_prefix(void)
++{
++   static const char *p = NULL; static int tried = 0;
++   if (!tried) { tried = 1; p = getenv("PCE_ADPCM_LOG"); if (p && !*p) p = NULL; }
++   return p;
++}
++static FILE *pce_adpcm_open(const char *suffix)
++{
++   char path[1024];
++   snprintf(path, sizeof(path), "%s%s", pce_adpcm_prefix(), suffix);
++   return fopen(path, "wb");
++}
++static FILE *pce_adpcm_txt(void)
++{ static FILE *f = NULL; static int t = 0; if (!t && pce_adpcm_prefix()) { t = 1; f = pce_adpcm_open(".log"); } return f; }
++static FILE *pce_adpcm_wr(void)
++{ static FILE *f = NULL; static int t = 0; if (!t && pce_adpcm_prefix()) { t = 1; f = pce_adpcm_open("_writes.bin"); } return f; }
++static FILE *pce_adpcm_nib(void)
++{ static FILE *f = NULL; static int t = 0; if (!t && pce_adpcm_prefix()) { t = 1; f = pce_adpcm_open("_nib.bin"); } return f; }
++/* <prefix>_pcm.bin: int16 LE per decoded nibble = OKIADPCM_Decode() - 2048, before fade/LPF */
++static FILE *pce_adpcm_pcm(void)
++{ static FILE *f = NULL; static int t = 0; if (!t && pce_adpcm_prefix()) { t = 1; f = pce_adpcm_open("_pcm.bin"); } return f; }
++static uint8 pce_adpcm_wsrc = 0;
++static unsigned long pce_adpcm_plays = 0, pce_adpcm_nibs = 0;
++
++
+ uint8 PCECD_Read(uint32 timestamp, uint32 A)
+ {
+    uint8 ret = 0;
+@@ -478,6 +525,15 @@ uint8 PCECD_Read(uint32 timestamp, uint32 A)
+       }
+    }
+ 
++   { FILE *gf = pce_cdlog();
++     if (gf && pce_cdreg_n < 2000000) { pce_cdreg_n++;
++        fprintf(gf, "PCEREG R %01x => %02x\n", (unsigned)(A & 0xf), (unsigned)ret); } }
++   /* ADPCM golden trace: reads that CHANGE ADPCM state ($180A advances the read address)
++    * plus $180D readbacks. $180C status is polled constantly, so only its count is kept. */
++   { FILE *af = pce_adpcm_txt();
++     if (af && ((A & 0xf) == 0xA || (A & 0xf) == 0xD)) {
++        fprintf(af, "f=%lu R %X => %02x ReadAddr=%04x\n", pce_vgold_frames, (unsigned)(A & 0xf),
++                (unsigned)ret, (unsigned)ADPCM.ReadAddr); fflush(af); } }
+    return(ret);
+ }
+ 
+@@ -502,6 +558,12 @@ static INLINE void Fader_Run(const int32 clocks)
+ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
+ {
+    const uint8 V = data;
++   { FILE *af = pce_adpcm_txt();
++     if (af && (physAddr & 0xf) >= 0x8) {
++        fprintf(af, "f=%lu W %X <= %02x\n", pce_vgold_frames, (unsigned)(physAddr & 0xf), (unsigned)V); fflush(af); } }
++   { FILE *gf = pce_cdlog();
++     if (gf && pce_cdreg_n < 2000000) { pce_cdreg_n++;
++        fprintf(gf, "PCEREG W %01x <= %02x\n", (unsigned)(physAddr & 0xf), (unsigned)V); } }
+ 
+    PCECD_Run(timestamp);
+ 
+@@ -589,6 +651,7 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
+       case 0xa:
+          ADPCM.WritePending = 3 * 11;
+          ADPCM.WritePendingValue = data;
++         pce_adpcm_wsrc = 0;
+          break;
+ 
+       case 0xb:	// adpcm dma
+@@ -625,6 +688,16 @@ void PCECD_Write(uint32 timestamp, uint32 physAddr, uint8 data)
+ 
+          if(!ADPCM.Playing && (data & 0x20))
+          {
++            if (pce_adpcm_prefix()) {
++               FILE *af = pce_adpcm_txt(); char suf[64]; FILE *rf;
++               if (af) { fprintf(af, "f=%lu PLAY#%lu start ReadAddr=%04x LengthCount=%04x SampleFreq=%u Addr=%04x cmd=%02x nibs_so_far=%lu\n",
++                   pce_vgold_frames, pce_adpcm_plays, (unsigned)ADPCM.ReadAddr, (unsigned)ADPCM.LengthCount,
++                   (unsigned)ADPCM.SampleFreq, (unsigned)ADPCM.Addr, (unsigned)data, pce_adpcm_nibs); fflush(af); }
++               snprintf(suf, sizeof(suf), "_ram_%lu.bin", pce_adpcm_plays);
++               rf = pce_adpcm_open(suf);
++               if (rf) { fwrite(ADPCM.RAM, 1, 65536, rf); fclose(rf); }
++               pce_adpcm_plays++;
++            }
+             ADPCM.bigdiv = ADPCM.bigdivacc * (16 - ADPCM.SampleFreq);
+             ADPCM.Playing = true;
+             ADPCM.HalfReached = false;	// Not sure about this.
+@@ -729,7 +802,12 @@ static INLINE void ADPCM_PB_Run(int32 basetime, int32 run_time)
+ 
+          uint32 synthtime;
+          nibble = (ADPCM.PlayBuffer >> (ADPCM.PlayNibble ^ 4)) & 0x0F;
++         { FILE *nf = pce_adpcm_nib();
++           if (nf && pce_adpcm_nibs < 16000000UL) { fputc(nibble, nf); }
++           pce_adpcm_nibs++; }
+          pcm = OKIADPCM_Decode(&MSM5205, nibble) - 2048;
++         { FILE *pf = pce_adpcm_pcm();
++           if (pf && pce_adpcm_nibs <= 16000000UL) { int16 w = (int16)pcm; fputc(w & 255, pf); fputc((w >> 8) & 255, pf); } }
+ 
+          ADPCM.PlayNibble ^= 4;
+ 
+@@ -768,6 +846,12 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
+          if(!(ADPCM.LastCmd & 0x10) && ADPCM.LengthCount < 0xFFFF)
+             ADPCM.LengthCount++;
+ 
++         { FILE *wf = pce_adpcm_wr();
++           if (wf) { uint8 rec[8];
++              uint32 fr = (uint32)pce_vgold_frames; uint16 ad = (uint16)ADPCM.WriteAddr;
++              rec[0]=fr&255; rec[1]=(fr>>8)&255; rec[2]=(fr>>16)&255; rec[3]=(fr>>24)&255;
++              rec[4]=ad&255; rec[5]=(ad>>8)&255; rec[6]=ADPCM.WritePendingValue; rec[7]=pce_adpcm_wsrc;
++              fwrite(rec,1,8,wf); } }
+          ADPCM.RAM[ADPCM.WriteAddr++] = ADPCM.WritePendingValue;
+          ADPCM.WritePending = 0;
+       }
+@@ -784,6 +868,7 @@ static INLINE void ADPCM_Run(const int32 clocks, const int32 timestamp)
+          {
+             ADPCM.WritePendingValue = read_1808(timestamp);
+             ADPCM.WritePending = 10 * 3;
++            pce_adpcm_wsrc = 1;
+          }
+       }
+    }
+diff --git a/mednafen/pce_fast/vdc.c b/mednafen/pce_fast/vdc.c
+index 569a811..7239337 100644
+--- a/mednafen/pce_fast/vdc.c
++++ b/mednafen/pce_fast/vdc.c
+@@ -222,6 +222,7 @@ static INLINE void SetVCECR(uint8 V)
+ }
+ 
+ static unsigned int frame_counter;
++unsigned long pce_vgold_frames = 0;   /* golden trace: emulated frames (also read by pcecd.c's ADPCM log) */
+ static int32 need_vbi[2] = { 0, 0 };
+ static int32 line_leadin1 = 0;
+ static int32 magical, cyc_tot;
+@@ -318,11 +319,34 @@ DECLFR(VCE_Read)
+    return(0xFF);
+ }
+ 
++
++/* GOLDEN TRACE PROBE (scratch build, 2026-09-14): every VCE control-register write and
++   every VDC MWR (reg $09) write. Hardware tag 0xB3 on the Tang board showed the VCE CR
++   ending at 0xFF after exactly one write from Double Dragon 2's own code -- DOTCLOCK=512
++   and BW=1 -- while the VDC's BAT size never left 32x32. No real game writes 0xFF to
++   $0400, so this says whether the reference emulator does the same thing. */
++#include <stdio.h>
++#include <stdlib.h>
++static FILE *pce_vgold(void)
++{
++   static FILE *f = NULL;
++   static int tried = 0;
++   if (!tried) {
++      const char *p = getenv("PCE_VGOLD_LOG");
++      tried = 1;
++      if (p && *p) f = fopen(p, "w");
++   }
++   return f;
++}
++
+ DECLFW(VCE_Write)
+ {
+    switch(A&0x7)
+    {
+-      case 0: SetVCECR(V); break;
++      case 0: {
++         FILE *gf = pce_vgold();
++         if (gf) { fprintf(gf, "f=%lu VCECR <= %02x\n", pce_vgold_frames, (unsigned)V); fflush(gf); }
++         SetVCECR(V); break; }
+       case 2: vce.ctaddress &= 0x100; vce.ctaddress |= V; break;
+       case 3: vce.ctaddress &= 0x0FF; vce.ctaddress |= (V & 1) << 8; break;
+       case 4: vce.color_table[vce.ctaddress & 0x1FF] &= 0x100;
+@@ -424,7 +448,12 @@ DECLFW(VDC_Write)
+                    case 0x08: REGSETP(vdc->BYR, V, msb); vdc->BYR &= 0x1FF;
+                               vdc->BG_YOffset = vdc->BYR; // Set it on LSB and MSB writes(only changing on MSB breaks Youkai Douchuuki)
+                               break;
+-                   case 0x09: REGSETP(vdc->MWR, V, msb); break;
++                   case 0x09: REGSETP(vdc->MWR, V, msb);
++                              { FILE *gf = pce_vgold();
++                                if (gf) { fprintf(gf, "f=%lu VDCMWR msb=%d v=%02x -> MWR=%04x SCREEN=%d\n",
++                                          pce_vgold_frames, msb, (unsigned)V, (unsigned)vdc->MWR,
++                                          (int)((vdc->MWR >> 4) & 7)); fflush(gf); } }
++                              break;
+                    case 0x0a: REGSETP(vdc->HSR, V, msb); break;
+                    case 0x0b: REGSETP(vdc->HDR, V, msb); break;
+                    case 0x0c: REGSETP(vdc->VSR, V, msb); break;
+@@ -768,6 +797,7 @@ static void DrawOverscan(const vdc_t *vdc, uint16_t *target, const MDFN_Rect *lw
+ 
+ void VDC_RunFrame(EmulateSpecStruct *espec, bool IsHES)
+ {
++   pce_vgold_frames++;
+    bool fc_vrm;
+    int max_dc = 0;
+    MDFN_Surface *surface = espec->surface;

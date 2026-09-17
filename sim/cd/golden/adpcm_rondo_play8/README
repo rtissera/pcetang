@@ -1,0 +1,13 @@
+Golden ADPCM playback case from beetle-pce-fast, Akumajou Dracula X - Chi no Rondo,
+PLAY#8 at emulated frame 25059 (golden/run_adpcm_gold.sh; golden/adpcm_analyze.py).
+
+ram.hex   65536 bytes: ADPCM RAM image when playback started (beetle stores bytes; the FPGA
+          stores nibbles, byte k -> nibble 2k high, 2k+1 low)
+regs.txt  the game's exact ADPCM register accesses for this play, in order:
+          "W reg value" = write $180<reg>, "R reg 00" = read $180<reg>
+nib.hex   the 1448 nibbles beetle fed to its OKI decoder, in order
+          = 724 bytes from 0x8df8, high nibble first, then auto-stop at the latched length
+
+The R A (dummy read of $180A) while $180D bit 3 is set is load-bearing: cd.vhd only loads its
+read address during a pending read. A replay without it starts playback at address 0.
+Rondo loads ALL its ADPCM data by DMA from CD ($180B <= 02); none via CPU $180A.
