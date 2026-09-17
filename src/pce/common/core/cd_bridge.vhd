@@ -564,10 +564,12 @@ begin
 		variable sa       : unsigned(23 downto 0);
 		variable sa_vec    : std_logic_vector(23 downto 0);
 		variable sc        : unsigned(8 downto 0);
-		variable sapsp_lba : unsigned(23 downto 0);
-		variable sapsp_vec : std_logic_vector(23 downto 0);
-		variable sapep_lba : unsigned(23 downto 0);
-		variable sapep_vec : std_logic_vector(23 downto 0);
+		-- ONE shared audio-position decoder for SAPSP and SAPEP (2026-09-17). Both commands
+		-- use the identical cdb[9] & 0xC0 addressing, so decoding it twice built two 24-bit
+		-- BCD-AMSF multiply-adds and two TOC lookups. That cost ~300 LUTs and pushed Nano 20K
+		-- (90% logic) from 0 setup violations to 183. Decoded once here, into apos_lba.
+		variable apos_lba  : unsigned(23 downto 0);
+		variable apos_vec  : std_logic_vector(23 downto 0);
 		variable gdi_track : unsigned(7 downto 0);
 		variable amsf_m, amsf_s, amsf_f : unsigned(7 downto 0);
 	begin
@@ -624,6 +626,29 @@ begin
 						-- elsif below on the exact cycle a fetch just finished. See the
 						-- post-case latch-set below for why this doesn't double-arm.
 						comm_pending <= '0';
+
+						-- Shared audio-position decode (SAPSP/SAPEP use identical addressing). Harmless for
+						-- every other opcode: apos_lba is only read by those two handlers.
+						case CD_COMM(79 downto 78) is  -- cdb[9][7:6]
+							when "01" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
+								-- Real fix kept from the original SAPSP path: numeric_std's
+								-- "unsigned * natural" uses the operand's own width, which cannot
+								-- hold 4500/75 -- resize to 24 bits FIRST or the multiply wraps.
+								-- Caught by real Gowin synthesis (EX4923), not by GHDL.
+								amsf_m := bcd_to_u8(CD_COMM(23 downto 16));
+								amsf_s := bcd_to_u8(CD_COMM(31 downto 24));
+								amsf_f := bcd_to_u8(CD_COMM(39 downto 32));
+								apos_lba := resize(resize(amsf_m, 24) * 4500 +
+								                   resize(amsf_s, 24) * 75 +
+								                   resize(amsf_f, 24) - 150, 24);
+							when "10" =>  -- BCD track number: cdb[2], TOC lookup
+								apos_lba := toc_lba_tbl(to_integer(bcd_to_u8(CD_COMM(23 downto 16))));
+							when others =>  -- raw LBA, cdb[3:5] big-endian
+								apos_vec(23 downto 16) := CD_COMM(31 downto 24);
+								apos_vec(15 downto 8)  := CD_COMM(39 downto 32);
+								apos_vec(7 downto 0)   := CD_COMM(47 downto 40);
+								apos_lba := unsigned(apos_vec);
+						end case;
 						case CD_COMM(7 downto 0) is
 							when SCSI_OP_REQUEST_SENSE =>
 								-- Real drive-level condition overrides whatever's pending
@@ -708,43 +733,15 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
-									-- Real addressing modes, cdb[9] & 0xC0. Mednafen
-									-- (pcecd_drive.c DoNEC_PCE_SAPSP) and MAME 0.289
-									-- (nec/pce_cd.cpp, `mode = m_command_buffer[9] & 0xc0`)
-									-- agree exactly: 0x00 raw LBA from cdb[3..5], 0x40 BCD
-									-- AMSF from cdb[2..4], 0x80 BCD track from cdb[2].
-									-- FIXED 2026-09-17: this used to read "10" as AMSF, "11"
-									-- as track and take the raw LBA from cdb[2..4] -- all
-									-- three wrong. R-Type Complete CD sends
-									-- `d8 00 01 27 23 00 00 00 00 40`, i.e. AMSF 01:27:23
-									-- (LBA 6398); the old decode fell through to raw-LBA and
-									-- played from LBA 0x012723 = 75555.
-									case CD_COMM(79 downto 78) is  -- cdb[9][7:6]
-										when "01" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
-											-- Real fix: numeric_std's "unsigned * natural"
-											-- overload converts the literal to the SAME
-											-- width as the unsigned operand (8 bits here),
-											-- which can't hold 4500/75 -- resize to 24 bits
-											-- FIRST, or the multiply silently wraps. Caught
-											-- by real Gowin synthesis (EX4923), not GHDL --
-											-- this exact BCD-AMSF path wasn't covered by
-											-- tb_cd_bridge.vhd's own real test cases.
-											amsf_m := bcd_to_u8(CD_COMM(23 downto 16));
-											amsf_s := bcd_to_u8(CD_COMM(31 downto 24));
-											amsf_f := bcd_to_u8(CD_COMM(39 downto 32));
-											sapsp_lba := resize(
-												resize(amsf_m, 24) * 4500 +
-												resize(amsf_s, 24) * 75 +
-												resize(amsf_f, 24) - 150, 24);
-										when "10" =>  -- BCD track#: cdb[2], TOC lookup
-											sapsp_lba := toc_lba_tbl(to_integer(bcd_to_u8(CD_COMM(23 downto 16))));
-										when others =>  -- raw LBA, cdb[3:5] big-endian
-											sapsp_vec(23 downto 16) := CD_COMM(31 downto 24);
-											sapsp_vec(15 downto 8)  := CD_COMM(39 downto 32);
-											sapsp_vec(7 downto 0)   := CD_COMM(47 downto 40);
-											sapsp_lba := unsigned(sapsp_vec);
-									end case;
-									last_sapsp_lba <= sapsp_lba;
+									-- Addressing was decoded once, above the dispatch
+									-- (apos_lba): cdb[9] & 0xC0 -- 0x00 raw LBA from
+									-- cdb[3..5], 0x40 BCD AMSF cdb[2..4], 0x80 BCD track.
+									-- Mednafen (DoNEC_PCE_SAPSP) and MAME 0.289 agree.
+									-- FIXED 2026-09-17: this port used to read "10" as AMSF,
+									-- "11" as track and take the raw LBA from cdb[2..4] --
+									-- all three wrong. R-Type sends AMSF 01:27:23 (LBA 6398)
+									-- and the old decode played LBA 0x012723 = 75555.
+									last_sapsp_lba <= apos_lba;
 									-- Mednafen: read_sec_end = lead-out, PlayMode SILENT and
 									-- status PAUSED unless cdb[1] is nonzero, in which case
 									-- NORMAL/PLAYING. R-Type sends cdb[1]=0 here and only
@@ -763,7 +760,7 @@ begin
 									-- with the real play-start LBA, then advanced one raw audio
 									-- sector at a time as SCSI_READ_WAIT_BYTE's audio branch
 									-- completes each SECTOR_DATA_LAST.
-									read_lba       <= sapsp_lba;
+									read_lba       <= apos_lba;
 									-- Real re-arm at every playback start -- guards against a
 									-- real byte-count misalignment (e.g. a PAUSE landing
 									-- mid-sample on a prior session) silently swapping L/R or
@@ -787,26 +784,8 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
-									-- Real END position, same addressing modes as SAPSP
-									-- (Mednafen DoNEC_PCE_SAPEP / MAME set_audio_end_position).
-									case CD_COMM(79 downto 78) is  -- cdb[9][7:6]
-										when "01" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
-											amsf_m := bcd_to_u8(CD_COMM(23 downto 16));
-											amsf_s := bcd_to_u8(CD_COMM(31 downto 24));
-											amsf_f := bcd_to_u8(CD_COMM(39 downto 32));
-											sapep_lba := resize(
-												resize(amsf_m, 24) * 4500 +
-												resize(amsf_s, 24) * 75 +
-												resize(amsf_f, 24) - 150, 24);
-										when "10" =>  -- BCD track#: cdb[2], TOC lookup
-											sapep_lba := toc_lba_tbl(to_integer(bcd_to_u8(CD_COMM(23 downto 16))));
-										when others =>  -- raw LBA, cdb[3:5] big-endian
-											sapep_vec(23 downto 16) := CD_COMM(31 downto 24);
-											sapep_vec(15 downto 8)  := CD_COMM(39 downto 32);
-											sapep_vec(7 downto 0)   := CD_COMM(47 downto 40);
-											sapep_lba := unsigned(sapep_vec);
-									end case;
-									cdda_end_lba <= sapep_lba;
+									-- END position, from the same shared decode above.
+									cdda_end_lba <= apos_lba;
 									-- Real play mode from cdb[1], Mednafen's own mapping:
 									-- 0 silent/stop, 1 loop, 2 interrupt, 3 (and anything
 									-- else) normal.

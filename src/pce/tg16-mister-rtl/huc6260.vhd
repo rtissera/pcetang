@@ -1,3 +1,7 @@
+-- Modifications copyright (c) 2026 Romain Tisserand.
+-- This file is derived from third-party code and is NOT original work of
+-- this project; only the changes made here are covered by the line above.
+-- See THIRD_PARTY_LICENSES.md for the upstream project, author and licence.
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.STD_LOGIC_UNSIGNED.ALL;
