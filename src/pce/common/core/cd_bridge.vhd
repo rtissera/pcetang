@@ -322,6 +322,21 @@ architecture rtl of cd_bridge is
 	-- consistent without real audio streaming (see file header).
 	signal cdda_status   : std_logic_vector(1 downto 0) := CDDA_STOPPED;
 	signal last_sapsp_lba : unsigned(23 downto 0) := (others => '0');
+	-- Real audio play END position and play mode (2026-09-17). The drive, not the core,
+	-- owns these: MiSTer's own drive (Main_MiSTer/support/pcecd/pcecdd.cpp) streams audio
+	-- until `lba > CDDAEnd` and then loops or sends STATUS GOOD, and Mednafen's
+	-- pcecd_drive.c RunCDDA() does the same at `read_sec >= read_sec_end`. Without this
+	-- the board plays forever and any game that waits for "the music finished" hangs --
+	-- measured on hardware 2026-09-17: R-Type Complete CD (black screen after the intro)
+	-- and Prince of Persia (never starts), both parked in COMMAND phase after a 0xD9.
+	-- SAPSP seeds the end with the lead-out, exactly as Mednafen does, so playback always
+	-- has a bound even if a game never sends SAPEP.
+	signal cdda_end_lba  : unsigned(23 downto 0) := (others => '0');
+	-- LBA of the sector request currently on the wire (see SECTOR_LBA below).
+	signal sector_lba_r  : unsigned(23 downto 0) := (others => '0');
+	-- Real play mode, Mednafen's PLAYMODE_*: cdb[1] 0=silent/stop, 1=loop, 2=interrupt
+	-- (stop and raise the transfer-done IRQ by sending STATUS), 3=normal (stop, no IRQ).
+	signal cdda_mode     : std_logic_vector(1 downto 0) := "11";
 
 	-- Real audio-fetch tag -- distinguishes an audio-sector fetch from a real READ(6)
 	-- data-sector fetch while both share SCSI_READ_REQ/SCSI_READ_WAIT_BYTE (same LUT
@@ -474,7 +489,15 @@ begin
 	DBG_DEND  <= std_logic_vector(dend_ok) & std_logic_vector(dend_lost);
 	DATAIN_SECTORS <= datain_sect_n;
 
-	SECTOR_LBA <= std_logic_vector(read_lba);
+	-- The LBA of the request currently on the wire, latched when SECTOR_REQ is raised.
+	-- FIXED 2026-09-17: this used to be a plain continuous assignment from read_lba, but
+	-- the AUDIO path advances read_lba in the SAME clocked assignment that raises
+	-- SECTOR_REQ, so both landed on the same edge and every audio request went out one
+	-- sector past the one being asked for -- playback started at SAPSP+1 and a LOOP wrap
+	-- restarted at start+1. The data path was unaffected (READ(6) advances read_lba in
+	-- SCSI_READ_NEXT_SECTOR, a different cycle), which is why only the new CD-DA cases in
+	-- tb_cd_bridge.vhd caught it. Latching keeps both paths honest by construction.
+	SECTOR_LBA <= std_logic_vector(sector_lba_r);
 
 	-- Real TOC write + self-resetting extents, independent process (real, simple, no
 	-- interaction with the main command FSM's own state).
@@ -543,6 +566,8 @@ begin
 		variable sc        : unsigned(8 downto 0);
 		variable sapsp_lba : unsigned(23 downto 0);
 		variable sapsp_vec : std_logic_vector(23 downto 0);
+		variable sapep_lba : unsigned(23 downto 0);
+		variable sapep_vec : std_logic_vector(23 downto 0);
 		variable gdi_track : unsigned(7 downto 0);
 		variable amsf_m, amsf_s, amsf_f : unsigned(7 downto 0);
 	begin
@@ -562,6 +587,9 @@ begin
 			pending_key   <= SENSEKEY_NO_SENSE;
 			pending_asc   <= (others => '0');
 			cdda_status    <= CDDA_STOPPED;
+			cdda_end_lba   <= (others => '0');
+			sector_lba_r   <= (others => '0');
+			cdda_mode      <= "11";
 			last_sapsp_lba <= (others => '0');
 			resp_len       <= 1;
 			resp_idx       <= 0;
@@ -680,8 +708,19 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
+									-- Real addressing modes, cdb[9] & 0xC0. Mednafen
+									-- (pcecd_drive.c DoNEC_PCE_SAPSP) and MAME 0.289
+									-- (nec/pce_cd.cpp, `mode = m_command_buffer[9] & 0xc0`)
+									-- agree exactly: 0x00 raw LBA from cdb[3..5], 0x40 BCD
+									-- AMSF from cdb[2..4], 0x80 BCD track from cdb[2].
+									-- FIXED 2026-09-17: this used to read "10" as AMSF, "11"
+									-- as track and take the raw LBA from cdb[2..4] -- all
+									-- three wrong. R-Type Complete CD sends
+									-- `d8 00 01 27 23 00 00 00 00 40`, i.e. AMSF 01:27:23
+									-- (LBA 6398); the old decode fell through to raw-LBA and
+									-- played from LBA 0x012723 = 75555.
 									case CD_COMM(79 downto 78) is  -- cdb[9][7:6]
-										when "10" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
+										when "01" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
 											-- Real fix: numeric_std's "unsigned * natural"
 											-- overload converts the literal to the SAME
 											-- width as the unsigned operand (8 bits here),
@@ -697,16 +736,27 @@ begin
 												resize(amsf_m, 24) * 4500 +
 												resize(amsf_s, 24) * 75 +
 												resize(amsf_f, 24) - 150, 24);
-										when "11" =>  -- BCD track#: cdb[2], TOC lookup
+										when "10" =>  -- BCD track#: cdb[2], TOC lookup
 											sapsp_lba := toc_lba_tbl(to_integer(bcd_to_u8(CD_COMM(23 downto 16))));
-										when others =>  -- raw LBA, cdb[2:4] big-endian
-											sapsp_vec(23 downto 16) := CD_COMM(23 downto 16);
-											sapsp_vec(15 downto 8)  := CD_COMM(31 downto 24);
-											sapsp_vec(7 downto 0)   := CD_COMM(39 downto 32);
+										when others =>  -- raw LBA, cdb[3:5] big-endian
+											sapsp_vec(23 downto 16) := CD_COMM(31 downto 24);
+											sapsp_vec(15 downto 8)  := CD_COMM(39 downto 32);
+											sapsp_vec(7 downto 0)   := CD_COMM(47 downto 40);
 											sapsp_lba := unsigned(sapsp_vec);
 									end case;
 									last_sapsp_lba <= sapsp_lba;
-									cdda_status    <= CDDA_PLAYING;
+									-- Mednafen: read_sec_end = lead-out, PlayMode SILENT and
+									-- status PAUSED unless cdb[1] is nonzero, in which case
+									-- NORMAL/PLAYING. R-Type sends cdb[1]=0 here and only
+									-- starts playing on the SAPEP that follows.
+									cdda_end_lba   <= toc_leadout_lba;
+									if CD_COMM(15 downto 8) /= x"00" then
+										cdda_mode   <= "11";  -- PLAYMODE_NORMAL
+										cdda_status <= CDDA_PLAYING;
+									else
+										cdda_mode   <= "00";  -- PLAYMODE_SILENT
+										cdda_status <= CDDA_PAUSED;
+									end if;
 									-- Real fetch start: read_lba is the SAME register READ(6)
 									-- uses (shared, mutually exclusive by construction -- see
 									-- SCSI_IDLE's own audio-continue branch below), seeded here
@@ -737,9 +787,38 @@ begin
 									CD_MSG      <= x"00";
 									CD_STAT_GET <= '1';
 								else
+									-- Real END position, same addressing modes as SAPSP
+									-- (Mednafen DoNEC_PCE_SAPEP / MAME set_audio_end_position).
+									case CD_COMM(79 downto 78) is  -- cdb[9][7:6]
+										when "01" =>  -- BCD AMSF: cdb[2]=M cdb[3]=S cdb[4]=F
+											amsf_m := bcd_to_u8(CD_COMM(23 downto 16));
+											amsf_s := bcd_to_u8(CD_COMM(31 downto 24));
+											amsf_f := bcd_to_u8(CD_COMM(39 downto 32));
+											sapep_lba := resize(
+												resize(amsf_m, 24) * 4500 +
+												resize(amsf_s, 24) * 75 +
+												resize(amsf_f, 24) - 150, 24);
+										when "10" =>  -- BCD track#: cdb[2], TOC lookup
+											sapep_lba := toc_lba_tbl(to_integer(bcd_to_u8(CD_COMM(23 downto 16))));
+										when others =>  -- raw LBA, cdb[3:5] big-endian
+											sapep_vec(23 downto 16) := CD_COMM(31 downto 24);
+											sapep_vec(15 downto 8)  := CD_COMM(39 downto 32);
+											sapep_vec(7 downto 0)   := CD_COMM(47 downto 40);
+											sapep_lba := unsigned(sapep_vec);
+									end case;
+									cdda_end_lba <= sapep_lba;
+									-- Real play mode from cdb[1], Mednafen's own mapping:
+									-- 0 silent/stop, 1 loop, 2 interrupt, 3 (and anything
+									-- else) normal.
 									if CD_COMM(15 downto 8) = x"00" then  -- cdb[1]=0x00 => stop
+										cdda_mode   <= "00";
 										cdda_status <= CDDA_STOPPED;
 									else
+										case CD_COMM(9 downto 8) is
+											when "01"   => cdda_mode <= "01";  -- LOOP
+											when "10"   => cdda_mode <= "10";  -- INTERRUPT
+											when others => cdda_mode <= "11";  -- NORMAL
+										end case;
 										cdda_status <= CDDA_PLAYING;
 										-- real resume: re-fetch from the last known play position
 										-- (same "stand-in" precision as READSUBQ's own reported
@@ -877,6 +956,30 @@ begin
 								CD_MSG      <= x"00";
 								CD_STAT_GET <= '1';
 						end case;
+					elsif cdda_status = CDDA_PLAYING
+					      and (read_lba >= cdda_end_lba or read_lba >= toc_leadout_lba) then
+						-- Real END of the audio range (2026-09-17). Mednafen RunCDDA()'s own
+						-- switch, and MiSTer's drive (pcecdd.cpp) does the same from the ARM
+						-- side:
+						--   LOOP      -> jump back to the SAPSP start and keep playing
+						--   INTERRUPT -> stop AND send STATUS GOOD, which is what raises the
+						--                game's transfer-done IRQ (cd.vhd sets CD_DTD when the
+						--                status phase starts) -- the notification R-Type
+						--                Complete CD and Prince of Persia hang without
+						--   NORMAL/SILENT -> just stop
+						-- The lead-out test is Mednafen's own "don't play past the user area".
+						if cdda_mode = "01" and read_lba < toc_leadout_lba then
+							read_lba <= last_sapsp_lba;
+						else
+							cdda_status <= CDDA_STOPPED;
+							if cdda_mode = "10" then
+								pending_key <= SENSEKEY_NO_SENSE;
+								pending_asc <= (others => '0');
+								CD_STAT     <= x"00";
+								CD_MSG      <= x"00";
+								CD_STAT_GET <= '1';
+							end if;
+						end if;
 					elsif cdda_status = CDDA_PLAYING then
 						-- Real audio auto-continue: no host command arrived this cycle, and
 						-- playback is live -- fetch the next raw audio sector. A real command
@@ -1016,6 +1119,7 @@ begin
 				-- cd_bridge.vhd's own SECTOR_IS_AUDIO port comment).
 				when SCSI_READ_REQ =>
 					SECTOR_REQ      <= '1';
+					sector_lba_r    <= read_lba;
 					SECTOR_IS_AUDIO <= is_audio_read;
 					req_wdog        <= (others => '0');
 					audio_byte_ct   <= (others => '0');
@@ -1104,6 +1208,9 @@ begin
 							-- visiting SCSI_IDLE between runs -- bounded, not absent.
 							if v_out > 0 and v_out < AUDIO_MAX_OUT
 							   and cdda_status = CDDA_PLAYING
+							   -- never prefetch past the real end position (2026-09-17); the
+							   -- end action itself runs at the SCSI_IDLE dispatch above
+							   and read_lba < cdda_end_lba and read_lba < toc_leadout_lba
 							   and comm_pending = '0' and CD_COMM_SEND = '0'
 							   and CDDA_SPACE >= resize((v_out + 1) * CDDA_SECTOR_FRAMES, 13) then
 								-- SECTOR_LBA is a continuous assignment from read_lba, so the
@@ -1111,6 +1218,7 @@ begin
 								-- -- exactly the sector being asked for -- while read_lba moves
 								-- on for the next one.
 								SECTOR_REQ      <= '1';
+								sector_lba_r    <= read_lba;
 								SECTOR_IS_AUDIO <= '1';
 								read_lba        <= read_lba + 1;
 								v_out           := v_out + 1;

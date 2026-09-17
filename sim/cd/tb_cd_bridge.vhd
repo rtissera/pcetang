@@ -316,6 +316,7 @@ begin
 		variable rx_count : integer;
 		variable exp_byte  : std_logic_vector(7 downto 0);
 		variable sense_exp : sense_data_t;
+		variable req_mark  : integer;
 		variable req_seen  : boolean := false;
 	begin
 		wait for CLK_PERIOD * 4;
@@ -478,10 +479,12 @@ begin
 		-- 11. SAPSP (raw LBA=0x1000) -> READSUBQ real status(PLAYING=0x00) + real absolute
 		-- AMSF (BCD 00:56:46), relative fields are a named stand-in (all zero).
 		cd_comm(7 downto 0)   <= x"D8";
-		cd_comm(79 downto 78) <= "00";  -- cdb[9][7:6] = "00" = raw LBA
-		cd_comm(23 downto 16) <= x"00";  -- cdb[2] (MSB of raw LBA)
-		cd_comm(31 downto 24) <= x"10";  -- cdb[3]
-		cd_comm(39 downto 32) <= x"00";  -- cdb[4] (LSB)  => LBA = 0x1000
+		cd_comm(15 downto 8)  <= x"01";  -- cdb[1] /= 0 => play (Mednafen: 0 arms, PAUSED)
+		cd_comm(79 downto 78) <= "00";  -- cdb[9][7:6] = "00" = raw LBA, cdb[3..5]
+		cd_comm(23 downto 16) <= x"00";  -- cdb[2] (unused in this mode)
+		cd_comm(31 downto 24) <= x"00";  -- cdb[3] (MSB of raw LBA)
+		cd_comm(39 downto 32) <= x"10";  -- cdb[4]
+		cd_comm(47 downto 40) <= x"00";  -- cdb[5] (LSB)  => LBA = 0x1000
 		send_cmd(clk, cd_comm_send);
 		wait until rising_edge(clk) and cd_stat_get = '1';
 		check_eq(errors, cd_stat, x"00", "SAPSP status");
@@ -511,7 +514,8 @@ begin
 		-- this exact path hid a real EX4923 width-truncation bug (unsigned*4500 with a
 		-- too-narrow operand) that GHDL didn't catch and gw_sh's real synthesis did.
 		cd_comm(7 downto 0)   <= x"D8";
-		cd_comm(79 downto 78) <= "10";  -- cdb[9][7:6] = "10" = BCD AMSF
+		cd_comm(15 downto 8)  <= x"01";  -- cdb[1] /= 0 => play
+		cd_comm(79 downto 78) <= "01";  -- cdb[9] = 0x40 = BCD AMSF (Mednafen/MAME)
 		cd_comm(23 downto 16) <= x"01";  -- cdb[2] = BCD M
 		cd_comm(31 downto 24) <= x"30";  -- cdb[3] = BCD S
 		cd_comm(39 downto 32) <= x"25";  -- cdb[4] = BCD F
@@ -561,10 +565,12 @@ begin
 		-- 13. SAPSP again (re-arm PLAYING) -> PAUSE while playing -> real GOOD,
 		-- READSUBQ -> real status byte 0x02 (PAUSED)
 		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
 		cd_comm(79 downto 78) <= "00";
 		cd_comm(23 downto 16) <= x"00";
-		cd_comm(31 downto 24) <= x"10";
-		cd_comm(39 downto 32) <= x"00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"10";
+		cd_comm(47 downto 40) <= x"00";
 		send_cmd(clk, cd_comm_send);
 		wait until rising_edge(clk) and cd_stat_get = '1';
 		wait for CLK_PERIOD * 4;
@@ -609,11 +615,16 @@ begin
 		wait for CLK_PERIOD * 4;
 
 		-- 15. Real MCU-fed CDDA v2 -- SAPSP (raw LBA=0x1000) starts playback.
+		-- UPDATED 2026-09-17 with the real addressing: Mednafen's DoNEC_PCE_SAPSP and MAME
+		-- 0.289 both take the raw LBA from cdb[3..5] (not cdb[2..4]) and play only when
+		-- cdb[1] is nonzero. This case encoded the port's own earlier mis-decode.
 		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01"; -- cdb[1] /= 0 => play now
 		cd_comm(79 downto 78) <= "00";  -- cdb[9][7:6] = "00" = raw LBA
-		cd_comm(23 downto 16) <= x"00"; -- cdb[2] (MSB of raw LBA)
-		cd_comm(31 downto 24) <= x"10"; -- cdb[3]
-		cd_comm(39 downto 32) <= x"00"; -- cdb[4] (LSB) => LBA = 0x1000
+		cd_comm(23 downto 16) <= x"00"; -- cdb[2] (unused in this mode)
+		cd_comm(31 downto 24) <= x"00"; -- cdb[3] (MSB of raw LBA)
+		cd_comm(39 downto 32) <= x"10"; -- cdb[4]
+		cd_comm(47 downto 40) <= x"00"; -- cdb[5] (LSB) => LBA = 0x1000
 		send_cmd(clk, cd_comm_send);
 		-- CD_DM and CD_STAT_GET both pulse on the same real dispatch cycle -- catch
 		-- CD_DM here (this also consumes SAPSP's completion, no separate stat_get wait).
@@ -659,6 +670,7 @@ begin
 		-- checking the real data-sector fetch.
 		cd_comm(7 downto 0)   <= x"08";
 		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(15 downto 13) <= "000";
 		cd_comm(23 downto 16) <= x"19";
 		cd_comm(31 downto 24) <= x"05";
 		cd_comm(39 downto 32) <= x"01";
@@ -687,6 +699,140 @@ begin
 		end if;
 
 		wait for CLK_PERIOD * 4;
+
+		-- ------------------------------------------------------------------------
+		-- 15b-15e. REAL AUDIO END POSITION AND PLAY MODES (2026-09-17)
+		--
+		-- Why these exist: on hardware (Console 60K, 2026-09-17) R-Type Complete CD went
+		-- black after its intro and Prince of Persia never started, both parked in COMMAND
+		-- phase right after a 0xD9 (SAPEP). The bridge accepted SAPEP but threw the end
+		-- position away and never stopped, looped or reported completion, so a game waiting
+		-- for "the music finished" waited forever. Reference for every value below:
+		-- Mednafen pcecd_drive.c (DoNEC_PCE_SAPSP/SAPEP + RunCDDA) and MAME 0.289
+		-- nec/pce_cd.cpp, which agree.
+		-- The TOC loaded in test 3 is: track 1 audio @ 0, track 2 data @ 0x1800,
+		-- lead-out @ 0x2000.
+
+		-- stop the playback test 15 left running (cdb[1]=0 => PLAYMODE_SILENT + stop)
+		cd_comm(7 downto 0)   <= x"D9";
+		cd_comm(15 downto 8)  <= x"00";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"20";
+		cd_comm(47 downto 40) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 200;
+
+		-- 15b. INTERRUPT mode (cdb[1]=2): play 0x1000..0x1002, then STOP and send STATUS.
+		-- The status is the whole point -- cd.vhd raises the game's transfer-done IRQ when
+		-- the status phase starts, and that is the notification R-Type waits for.
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(79 downto 78) <= "00";  -- raw LBA, cdb[3..5]
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"10";
+		cd_comm(47 downto 40) <= x"00";  -- start = 0x001000
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		cd_comm(7 downto 0)   <= x"D9";
+		cd_comm(15 downto 8)  <= x"02";  -- PLAYMODE_INTERRUPT
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"10";
+		cd_comm(47 downto 40) <= x"03";  -- end = 0x001003
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';   -- SAPEP's own GOOD status
+		for i in 0 to 2 loop
+			wait until rising_edge(clk) and sector_req = '1' and sector_is_audio = '1';
+			check_eq(errors, sector_lba, std_logic_vector(to_unsigned(16#1000# + i, 24)),
+			         "INTERRUPT-mode audio fetch " & integer'image(i));
+		end loop;
+		-- end reached: STATUS GOOD, and nothing fetched past the end position
+		wait until rising_edge(clk) and (cd_stat_get = '1' or (sector_req = '1' and sector_is_audio = '1'));
+		if sector_req = '1' then
+			report "FAIL: INTERRUPT mode fetched past the end position (lba "
+			     & to_hstring(sector_lba) & ")" severity error;
+			errors <= errors + 1;
+		else
+			check_eq(errors, cd_stat, x"00", "INTERRUPT-mode end-of-play status");
+		end if;
+		req_mark := req_count;
+		wait for CLK_PERIOD * 4000;
+		if req_count /= req_mark then
+			report "FAIL: INTERRUPT mode kept fetching after the end ("
+			     & integer'image(req_count - req_mark) & " requests)" severity error;
+			errors <= errors + 1;
+		end if;
+
+		-- 15c. LOOP mode (cdb[1]=1): 0x1800, 0x1801, then back to the SAPSP start.
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"18";
+		cd_comm(47 downto 40) <= x"00";  -- start = 0x001800
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		cd_comm(7 downto 0)   <= x"D9";
+		cd_comm(15 downto 8)  <= x"01";  -- PLAYMODE_LOOP
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"18";
+		cd_comm(47 downto 40) <= x"02";  -- end = 0x001802
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		for i in 0 to 1 loop
+			wait until rising_edge(clk) and sector_req = '1' and sector_is_audio = '1';
+			check_eq(errors, sector_lba, std_logic_vector(to_unsigned(16#1800# + i, 24)),
+			         "LOOP-mode audio fetch " & integer'image(i));
+		end loop;
+		wait until rising_edge(clk) and sector_req = '1' and sector_is_audio = '1';
+		check_eq(errors, sector_lba, x"001800", "LOOP-mode wrap back to the SAPSP start");
+
+		-- 15d. BCD AMSF addressing (cdb[9]=0x40): 00:03:00 -> 3*75 - 150 = 75 = 0x4B.
+		cd_comm(7 downto 0)   <= x"D9";   -- stop the loop first
+		cd_comm(15 downto 8)  <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 200;
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(79 downto 78) <= "01";   -- cdb[9] = 0x40 => BCD AMSF
+		cd_comm(23 downto 16) <= x"00";  -- M
+		cd_comm(31 downto 24) <= x"03";  -- S
+		cd_comm(39 downto 32) <= x"00";  -- F
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait until rising_edge(clk) and sector_req = '1' and sector_is_audio = '1';
+		check_eq(errors, sector_lba, x"00004B", "BCD-AMSF SAPSP start LBA");
+
+		-- 15e. BCD track addressing (cdb[9]=0x80): track 2 -> 0x1800 from the loaded TOC.
+		cd_comm(7 downto 0)   <= x"D9";
+		cd_comm(15 downto 8)  <= x"00";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"20";
+		cd_comm(47 downto 40) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 200;
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(79 downto 78) <= "10";   -- cdb[9] = 0x80 => BCD track number
+		cd_comm(23 downto 16) <= x"02";  -- track 2
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait until rising_edge(clk) and sector_req = '1' and sector_is_audio = '1';
+		check_eq(errors, sector_lba, x"001800", "BCD-track SAPSP start LBA");
+		-- leave the bus idle for the tests that follow
+		cd_comm(7 downto 0)   <= x"D9";
+		cd_comm(15 downto 8)  <= x"00";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"20";
+		cd_comm(47 downto 40) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 200;
 
 		-- ------------------------------------------------------------------------
 		-- 14. MULTI-SECTOR READ(6) AGAINST THE REAL MCU DELIVERY SHAPE
