@@ -17,6 +17,15 @@ fetches launched nothing while the ready stayed high. Multi-byte code could not 
 from CD-RAM at all. See `MEMORY_BRIDGE_CONTRACT.md` for the contract this violated, why
 the donor is immune by construction, and the audit of every other ported memory client.
 
+**CD-DA playback is complete, not just streaming (2026-09-17).** The drive now honours the
+audio END position: SAPEP's end LBA and play mode are stored and acted on, so playback loops,
+stops, or reports completion the way Mednafen and MAME both do. The completion status is what
+raises the game's transfer-done interrupt. Two further real bugs went with it: SAPSP/SAPEP
+address decoding (mode is `cdb[9] & 0xC0`; raw LBA comes from cdb[3..5]) and an audio fetch that
+went out one sector late on every playback and every loop wrap. Hardware result: **R-Type
+Complete CD and Prince of Persia went from black screen to fully playable, Rondo plays through**,
+Bonk III unchanged. Tag `pcecd-cdda-endpos-2026-09-17`.
+
 **CD audio (CD-DA) plays at full rate.** Measured 2026-09-17 on Rondo and Bonk III:
 74.8 audio sectors/s against the 75/s CD-DA needs (99.8 % of realtime), up from 66 %. Two
 fixes: CD-DA samples are byte-swapped (CHD stores them big-endian), and the MCU now sends
@@ -50,7 +59,7 @@ deliberate trade, not an oversight — see below.
 | Video on real hardware | **locked, stable, 4:3** | not tested | not tested |
 | Audio on real hardware | works (PSG) | not tested | not tested |
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
-| **CD game runs on real hardware** | **YES** (Rondo, R-Type Complete CD) | not tested | not tested |
+| **CD game runs on real hardware** | **YES** — Rondo, R-Type Complete CD, Prince of Persia, Bonk III, DD2 all playable | not tested | not tested |
 | CD-DA music on real hardware | **YES, full rate** | not tested | not tested |
 | ADPCM voices on real hardware | **missing — open issue** | not tested | not tested |
 | CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
