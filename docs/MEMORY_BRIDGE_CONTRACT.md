@@ -124,7 +124,7 @@ continuous during playback) and would stall the CPU on accesses it is not making
 | ROM, Primer 25K | edge OR address change | correct |
 | ROM, Nano 20K | **edge only** | **defective by inspection**, fixed 2026-09-15 — not yet observed on hardware, because that board's BL616 has not been flashed yet (it has one; see below) |
 | CD-RAM / Arcade Card, all three boards | **edge only** | **broken, observed on hardware**, fixed 2026-09-15 |
-| ADPCM RAM, all three boards | `ADPCM_RAM_SLOT_CNT` counter change | correct by construction |
+| ADPCM RAM, all three boards | `ADPCM_RAM_SLOT_CNT` counter change | **was broken** — wrongly listed as correct by construction; fixed 2026-09-17, see below |
 | VRAM0 / VRAM1 (`vram0_cache`) | `dck_ce` clock enable | correct trigger — see caveat below |
 | Backup RAM (`BRM_*`) | on-chip `spram`, no bridge | not applicable |
 | Work RAM, PSG, palette | on-chip | not applicable |
@@ -180,3 +180,34 @@ that reproduces the broken bridge on demand. This is the second time this file m
 a false conclusion (the first was an unwired `FIFO_SPACE` port defaulting to "plenty of
 room"); diff a testbench's port map and its memory models against the board's before
 trusting a result from it.
+
+## Correction, 2026-09-17: the ADPCM bridge was NOT correct by construction
+
+The audit above listed ADPCM RAM as safe because it detected a new access on a change of
+`ADPCM_RAM_SLOT_CNT`. That is only true if the request is already raised when the slot
+begins, and it is not: the pend flags behind `ADPCM_RAM_REQ` rise on the MSM5205 sample
+clock, on SCSI REQ and on CPU `$180A` accesses, none of them aligned to DRAM slots. A request
+that rose mid-slot launched nothing, `READY` was still `'1'` from the previous access, and
+`cd.vhd` consumed a stale nibble or counted a write that never reached SDRAM. This is what
+silenced ADPCM voices.
+
+There was a second, subtler instance of the same class *inside* `cd.vhd`: its wait gate
+decides on one cycle and `DRAM_CLKEN` is consumed on the next, so a pend rising in between
+was consumed with no access at all. No bridge could see that in time.
+
+`sim/cd/tb_adpcm_bridge.vhd` measured it with the real `cd.vhd` and an SDRAM model, best case
+(no CD-RAM contention), 4000 nibbles each way:
+
+| | writes never reaching SDRAM | playback reads stale |
+|---|---|---|
+| as shipped | 16.7 % | 23.7 % |
+| bridge fixed only | 0 | 2.7 % |
+| bridge fixed + `cd.vhd` `DRAM_REQ_SEEN` | **0** | **0** |
+
+A negative control (fixed bridge, old `cd.vhd`) makes the checker report 108 address skips,
+so the zero is not a blind checker.
+
+The lesson for the contract: **a "new access" detector is only correct if it cannot miss a
+request that starts at any cycle, and a wait gate is only correct if the thing consumed is
+the thing it decided on.** Detecting on a slot, strobe or counter boundary is the same
+mistake as detecting on a rising edge, whenever the request itself is not aligned to it.

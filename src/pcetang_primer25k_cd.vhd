@@ -508,6 +508,9 @@ architecture rtl of pcetang_primer25k_cd is
    -- the second. DRAM_SLOT_CNT changes on every slot boundary regardless of decoded
    -- slot type -- see cd.vhd's ADPCM_RAM_SLOT_CNT comment for the full trace.
    signal adpcm_slot_cnt_r  : std_logic_vector(1 downto 0) := (others => '0');
+   signal adpcm_bridge_req_r   : std_logic := '0';
+   signal adpcm_new_comb       : std_logic;
+   signal adpcm_ram_ready_comb : std_logic;
 
    type cdr_owner_t is (OWNER_NONE, OWNER_CDRAM, OWNER_ADPCM);
    signal cdr_owner : cdr_owner_t := OWNER_NONE;
@@ -964,6 +967,34 @@ begin
                   else '0';
    cd_ram_rdy_comb <= cd_ram_rdy_i and not (cd_new_comb and not cd_done);
 
+   -- PCE PORT (2026-09-17): ADPCM RAM new-request detect. ROOT CAUSE of missing ADPCM
+   -- voices (e.g. Dracula X Rondo's speech), with the cd.vhd DRAM_REQ_SEEN change.
+   --
+   -- This used to launch an SDRAM access only on the FIRST cycle of a DRAM slot
+   -- (`if slot changed then adpcm_new := req`). But the pend flags behind ADPCM_RAM_REQ
+   -- rise at arbitrary times -- PLAY_READ_PEND on the MSM5205 sample clock, DMA_WRITE_PEND
+   -- on SCSI REQ, CPU $180A accesses -- not on slot boundaries. A request that rose
+   -- mid-slot launched nothing, READY was still '1' from the previous access, cd.vhd's
+   -- wait gate passed, and it consumed a stale nibble or counted a write that never
+   -- reached SDRAM. Same bug class as the CD-RAM stale byte: see MEMORY_BRIDGE_CONTRACT.md,
+   -- which wrongly listed this bridge as correct by construction.
+   --
+   -- Measured in sim/cd/tb_adpcm_bridge.vhd (real cd.vhd, this logic, an SDRAM model, no
+   -- CD-RAM contention = best case), 4000 nibbles each way:
+   --   before:                     16.7% of writes never reached SDRAM, 23.7% of reads stale
+   --   this + cd.vhd DRAM_REQ_SEEN: 0 lost, 0 stale (a negative control with the old cd.vhd
+   --                                confirms the checker catches the remaining race)
+   --
+   -- Now: launch on a slot change OR on REQ rising within the slot -- the "edge OR address
+   -- change" rule, with the slot change standing in for the address change, so a two-nibble
+   -- write still gets its second launch. READY drops combinationally the instant a new
+   -- request appears, so the gate can never pass on a stale '1' from the previous access.
+   adpcm_new_comb <= '1' when adpcm_ram_req_i = '1'
+                               and (adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r
+                                    or adpcm_bridge_req_r = '0')
+                     else '0';
+   adpcm_ram_ready_comb <= adpcm_ram_ready_i and not adpcm_new_comb;
+
    process (clk_pce)
       variable cd_new, adpcm_new : std_logic;
    begin
@@ -972,13 +1003,10 @@ begin
          cdram_rd_r      <= cd_ram_rd;
          cdram_wr_r      <= cd_ram_wr;
          adpcm_slot_cnt_r <= adpcm_ram_slot_cnt_i;
+         adpcm_bridge_req_r <= adpcm_ram_req_i;
 
          cd_new := cd_new_comb;
-         if adpcm_ram_slot_cnt_i /= adpcm_slot_cnt_r then
-            adpcm_new := adpcm_ram_req_i;
-         else
-            adpcm_new := '0';
-         end if;
+         adpcm_new := adpcm_new_comb;   -- see adpcm_new_comb's comment
 
          if cd_new = '1' then
             cd_pend      <= '1';
@@ -1189,7 +1217,7 @@ begin
       ADPCM_RAM_A => adpcm_ram_a_i, ADPCM_RAM_DO => adpcm_ram_do_i,
       ADPCM_RAM_WE => adpcm_ram_we_i, ADPCM_RAM_REQ => adpcm_ram_req_i,
       ADPCM_RAM_SLOT_CNT => adpcm_ram_slot_cnt_i,
-      ADPCM_RAM_DI => adpcm_ram_di_i, ADPCM_RAM_READY => adpcm_ram_ready_i,
+      ADPCM_RAM_DI => adpcm_ram_di_i, ADPCM_RAM_READY => adpcm_ram_ready_comb,
       -- PCE PORT (2026-08-29): '0'->'1' -- real, non-aliasing 2MB SDRAM window now
       -- exists (AC_SDRAM_BASE, see that constant's own comment).
       AC_EN => '1',

@@ -77,7 +77,11 @@ architecture rtl of MSM5205 is
 	constant SIT : StepIndexTable_t := ("0010","0100","0110","1000");
 	
 	 
-	signal CLK_CNT    : unsigned(5 downto 0);
+	-- PCE PORT (2026-09-17): explicit power-up value. No reset reaches this counter, so in
+	-- simulation it stayed 'U' forever, VCK_R never fired, and ADPCM playback never asked for
+	-- a single read -- which hid the ADPCM RAM bridge bug from every sim until it was found.
+	-- On the FPGA Gowin powers registers up at 0 anyway, so hardware behaviour is unchanged.
+	signal CLK_CNT    : unsigned(5 downto 0) := (others => '0');
 	signal SAMPLE_RCE : std_logic;
 	signal SAMPLE_FCE : std_logic;
 	 

@@ -184,6 +184,9 @@ architecture rtl of cd is
 	signal DRAM_SLOT 			: DRAMSlot_t; 
 	signal DRAM_CLK_CNT		: unsigned(4 downto 0);
 	signal DRAM_CLKEN			: std_logic;
+	-- PCE PORT (2026-09-17): was a request present when the gate below released this slot?
+	-- See the gate's comment. Consumers act on a pending read/write only if it was.
+	signal DRAM_REQ_SEEN		: std_logic := '0';
 	signal DRAM_SLOT_CNT		: unsigned(1 downto 0);
 	
 	--ADPCM decoder
@@ -437,7 +440,7 @@ begin
 				case DRAM_SLOT is
 					when SLOT_READ =>
 						NEW_ADPCM_LEN := std_logic_vector(unsigned(ADPCM_LEN) - 1);
-						if ADPCM_READ_PEND = '1' or PLAY_READ_PEND = '1' then
+						if DRAM_REQ_SEEN = '1' and (ADPCM_READ_PEND = '1' or PLAY_READ_PEND = '1') then
 							M5205_D <= ADRAM_DO;
 							if PLAY_READ_PEND = '1' then
 								PLAY_READ_PEND <= '0';
@@ -479,7 +482,7 @@ begin
 						
 					when SLOT_WRITE =>
 						NEW_ADPCM_LEN := std_logic_vector(unsigned(ADPCM_LEN) + 1);
-						if ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1' then
+						if DRAM_REQ_SEEN = '1' and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1') then
 							ADPCM_WRITE_NIB <= not ADPCM_WRITE_NIB;
 							if ADPCM_WRITE_NIB = '1' then
 								ADPCM_LEN <= NEW_ADPCM_LEN;
@@ -516,7 +519,7 @@ begin
 				ADPCM_HALF <= '0';
 			end if;
 			
-			if DRAM_CLKEN = '1' and DRAM_SLOT = SLOT_WRITE and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1') then
+			if DRAM_CLKEN = '1' and DRAM_SLOT = SLOT_WRITE and DRAM_REQ_SEEN = '1' and (ADPCM_WRITE_PEND = '1' or DMA_WRITE_PEND = '1') then
 				if ADPCM_CTRL(1) = '1' then
 					ADPCM_WRADDR <= ADPCM_OFFS & "0";
 				else
@@ -530,7 +533,7 @@ begin
 				end if;
 			end if;
 			
-			if DRAM_CLKEN = '1' and DRAM_SLOT = SLOT_READ and (ADPCM_READ_PEND = '1' or PLAY_READ_PEND = '1') then
+			if DRAM_CLKEN = '1' and DRAM_SLOT = SLOT_READ and DRAM_REQ_SEEN = '1' and (ADPCM_READ_PEND = '1' or PLAY_READ_PEND = '1') then
 				if ADPCM_CTRL(3) = '1' then
 					ADPCM_RDADDR <= ADPCM_OFFS & "0";
 				else
@@ -719,6 +722,27 @@ begin
 					if ADPCM_RAM_REQ = '0' or ADPCM_RAM_READY = '1' then
 						DRAM_CLK_CNT <= (others => '0');
 						DRAM_CLKEN <= '1';
+						-- PCE PORT (2026-09-17): record what the gate actually decided on.
+						--
+						-- The decision is made on THIS cycle but DRAM_CLKEN, being a register,
+						-- is consumed on the NEXT one (M5205_D <= ADRAM_DO, the pend flags
+						-- cleared, the address advanced). A pend that rises in between --
+						-- PLAY_READ_PEND on the MSM5205 sample clock, DMA_WRITE_PEND on SCSI REQ,
+						-- a CPU $180A access -- was never seen by the gate, so no SDRAM access
+						-- was made for it, yet it would be consumed as if one had: a stale
+						-- nibble played, or a nibble counted as written that never reached RAM.
+						-- The external bridge cannot catch this, it is one cycle inside cd.vhd.
+						--
+						-- Measured in sim/cd/tb_adpcm_bridge.vhd: with the board bridge fixed,
+						-- every one of the remaining 108/4000 stale playback reads had
+						-- ADPCM_RAM_REQ low on this cycle. The consumers below now require
+						-- DRAM_REQ_SEEN; a late pend simply waits for the next slot round
+						-- (72 cycles), which the original DRAM refresh timing tolerates.
+						if ADPCM_RAM_REQ = '1' then
+							DRAM_REQ_SEEN <= '1';
+						else
+							DRAM_REQ_SEEN <= '0';
+						end if;
 					end if;
 					-- else: hold at 17, waiting for the external ADPCM RAM bridge
 				else
