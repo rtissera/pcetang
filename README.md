@@ -120,10 +120,19 @@ millisecond):
 See the header of `run_cd_boot_llvm.sh` for the three things ghdl-llvm needs before it will
 start at all.
 
-The MCU-side firmware lives in a separate repo (a fork of nand2mario's
-`firmware-bl616`); the CD sector server is `core/pcecd.cpp` there. That fork also carries
-the `.sgx` loader support and a HID descriptor-parser fix, so the current feature set
-needs it — a build against stock TangCore firmware will not load SuperGrafx ROMs.
+### The companion firmware is required, not optional
+
+The BL616 MCU firmware lives in a separate repo, a fork of nand2mario's
+`firmware-bl616`. **Stock TangCore firmware has no PC Engine support of any kind** — its
+cores are NES, SNES, GBA, Mega Drive, Master System and PC/XT. The fork adds:
+
+- `core/pce.cpp` — HuCard (`.pce`, `.sgx`) loading
+- `core/pcecd.cpp` / `.h` — the whole CD-ROM² side: TOC upload, the sector server that
+  streams CHD sectors over UART, CD-DA delivery by DMA and the ADPCM feed
+- a HID descriptor-parser fix for controllers that use extended (4-byte) usage items
+
+So a bitstream from this repo running against stock firmware loads nothing at all — no
+HuCard, no disc. The two repositories are one system and have to be built together.
 
 ## How this was built
 
