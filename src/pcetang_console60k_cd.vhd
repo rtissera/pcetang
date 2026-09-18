@@ -2786,7 +2786,7 @@ begin
    -- Turning them off buys back real margin. The trace tags 0xE0-0xE8 that read them now
    -- report zeros; the CD tags this project actually uses (cdprog, 0xA5/0xA6/0xB0) come
    -- from the CD path and are unaffected.
-   generic map (LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 0,
+   generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 1, DBG_PROBES => 0,
                 CDDA_DEPTH_LOG2 => 12)
    port map (
       RESET      => not core_resetn,
