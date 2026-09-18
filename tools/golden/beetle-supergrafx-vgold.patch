@@ -1,0 +1,67 @@
+diff --git a/mednafen/pce_fast/vdc.cpp b/mednafen/pce_fast/vdc.cpp
+index 0729283..60430da 100644
+--- a/mednafen/pce_fast/vdc.cpp
++++ b/mednafen/pce_fast/vdc.cpp
+@@ -289,8 +289,41 @@ DECLFR(VCE_Read)
+    return (0xFF);
+ }
+ 
++
++/* PCE PORT (2026-09-18): golden-trace instrumentation for the SuperGrafx defect hunt.
++   Gated entirely on the PCE_VGOLD_LOG environment variable, so an unset build behaves
++   exactly as before. Emits the same fields as golden/sgx_vgold.lua does out of MAME, so
++   the two independent references can be diffed line for line -- neither is trusted alone.
++   Frame numbers are mandatory: without them a late write reads like an init write, which
++   has already caused one wrong root-cause call on this project. */
++#include <stdlib.h>
++static FILE *pce_vgold_fp = NULL;
++static int pce_vgold_open = 0;
++uint32 pce_vgold_frames = 0;
++static FILE *pce_vgold(void)
++{
++   if (!pce_vgold_open)
++   {
++      const char *path = getenv("PCE_VGOLD_LOG");
++      pce_vgold_open = 1;
++      if (path && *path)
++         pce_vgold_fp = fopen(path, "w");
++   }
++   return pce_vgold_fp;
++}
++static void pce_vgold_log(const char *blk, uint32 A, uint8 V)
++{
++   FILE *f = pce_vgold();
++   if (f)
++   {
++      fprintf(f, "%u W %s %06X %02X\n", (unsigned)pce_vgold_frames, blk, (unsigned)A, V);
++      fflush(f);
++   }
++}
++
+ DECLFW(VCE_Write)
+ {
++   pce_vgold_log("VCE", A, V);
+    switch (A & 0x7)
+    {
+    case 0:
+@@ -374,6 +407,12 @@ static void DoDMA(vdc_t *vdc)
+ 
+ DECLFW(VDC_Write)
+ {
++   /* Same block split the MAME tap uses: on a SuperGrafx $08-$0F is the VPC and
++      $10-$17 is the second VDC; on a plain PC Engine everything is VDC0. */
++   if (VDC_TotalChips == 2)
++      pce_vgold_log(((A & 0x1F) >= 0x10) ? "VDC1" : (((A & 0x1F) >= 0x08) ? "VPC" : "VDC0"), A, V);
++   else
++      pce_vgold_log("VDC0", A, V);
+    int msb = A & 1;
+    int chip = 0;
+    vdc_t *vdc;
+@@ -908,6 +947,7 @@ static void DrawOverscan(const vdc_t *vdc, uint16_t *target, const MDFN_Rect *lw
+ 
+ void VDC_RunFrame(EmulateSpecStruct *espec, bool IsHES)
+ {
++   pce_vgold_frames++;
+    vdc_t *vdc              = &vdc_chips[0];
+    int max_dc              = 0;
+    MDFN_Surface *surface   = espec->surface;

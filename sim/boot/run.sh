@@ -107,6 +107,7 @@ ghdl -r "${GHDL_FLAGS[@]}" tb_pce_boot \
 	-gTRACE_N="$TRACE_N" \
 	-gTRACE_SKIP="$TRACE_SKIP" \
 	-gROM_SZ_G="X\"$ROM_SZ\"" \
+	-gVGOLD_FILE="${VGOLD_FILE:-}" \
 	-gROM_LAT="$ROM_LAT" \
 	-gDUMP_AFTER_VDC="$DUMP_AFTER_VDC" \
 	-gAC_BUILD_G="$AC_BUILD" \

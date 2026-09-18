@@ -49,7 +49,15 @@ entity tb_pce_boot is
 		-- rises ROM_LAT cycles later. This does NOT model sdram.sv -- it only tests
 		-- whether the handshake protocol itself can stall the HuC6280, independently of
 		-- whether the returned data is correct.
-		ROM_LAT    : integer := 0
+		ROM_LAT    : integer := 0;
+		-- GOLDEN VIDEO TRACE (2026-09-18). When non-empty, every CPU write that lands on
+		-- VDC0/VDC1/VPC/VCE is appended to this file in EXACTLY the format the two reference
+		-- emulators emit -- "<frame> W <block> <addr> <data>" -- so a board/sim trace can be
+		-- diffed line for line against golden/sgx_vgold.lua (MAME) or the instrumented
+		-- beetle-supergrafx build. <frame> here is the VBLANK edge count, which is what
+		-- beetle's own VDC_RunFrame counter counts, though the two may sit one frame apart
+		-- at the very start.
+		VGOLD_FILE : string := ""
 	);
 end entity;
 
@@ -313,6 +321,10 @@ begin
 
 		variable l : line;
 
+		file vgold_f : text;
+		variable vgold_open : boolean := false;
+		variable vgold_l : line;
+
 		variable n_vdc0_wr : integer := 0;
 		variable n_vdc1_wr : integer := 0;
 		variable n_vpc_wr  : integer := 0;
@@ -507,6 +519,27 @@ begin
 				end if;
 
 				if cpu_wr_n = '0' then
+					-- Golden video trace: same line format as the reference emulators.
+					if VGOLD_FILE /= "" then
+						if not vgold_open then
+							file_open(vgold_f, VGOLD_FILE, write_mode);
+							vgold_open := true;
+						end if;
+						if vdc0_sel_n = '0' or vdc1_sel_n = '0'
+						   or vpc_sel_n = '0' or vce_sel_n = '0' then
+							write(vgold_l, vbl_edges);
+							write(vgold_l, string'(" W "));
+							if    vdc0_sel_n = '0' then write(vgold_l, string'("VDC0 "));
+							elsif vdc1_sel_n = '0' then write(vgold_l, string'("VDC1 "));
+							elsif vpc_sel_n  = '0' then write(vgold_l, string'("VPC  "));
+							else                        write(vgold_l, string'("VCE  "));
+							end if;
+							write(vgold_l, hex(cpu_a(11 downto 0)));
+							write(vgold_l, string'(" "));
+							write(vgold_l, hex(cpu_do));
+							writeline(vgold_f, vgold_l);
+						end if;
+					end if;
 					if vdc0_sel_n = '0' then
 						n_vdc0_wr := n_vdc0_wr + 1;
 						if first_vdc = 0 ns then
