@@ -139,11 +139,11 @@ entity pce_top is
 		-- Pass-through to HUC6280_CPU's DBG_PROBES (via HUC6280.vhd). Default 0.
 		-- Only Console 60K's debug build turns these on; they cost real timing.
 		DBG_PROBES : integer := 0;
-		-- Arcade Card options, both default 0 (donor behaviour) -- see arcade.sv.
-		-- AC_REG_BUS registers the CPU bus into the card's write path (timing);
-		-- AC_SLIM shares ONE address adder instead of four (area, NOT yet functionally proven).
-		AC_REG_BUS : integer := 0;
-		AC_SLIM    : integer := 0
+		-- Arcade Card variant select. 0 = arcade.sv, byte-identical to the donor. 1 =
+		-- arcade_slim.sv, which registers the card's write bus (timing) and shares ONE address
+		-- adder instead of four (area). A separate module rather than a parameter because
+		-- GowinSynthesis cannot bind a VHDL generic to a Verilog module (EX4677).
+		AC_SLIM : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -541,11 +541,28 @@ signal CPU_WAIT_N_I : std_logic;
 signal WAIT_EVER_LOW : std_logic := '0';
 
 component ARCADE_CARD is
-	generic(
-		-- Both default 0 = donor behaviour. See arcade.sv for what each does and why.
-		AC_REG_BUS : integer := 0;
-		AC_SLIM    : integer := 0
+	port(
+		CLK     : in  std_logic;
+		RST_N   : in  std_logic;
+
+		EN      : in  std_logic;
+		WR_N    : in  std_logic;
+		RD_N    : in  std_logic;
+		A       : in  std_logic_vector(20 downto 0);
+		DI      : in  std_logic_vector(7 downto 0);
+		DO      : out std_logic_vector(7 downto 0);
+
+		SEL_N   : out std_logic;
+
+		RAM_CS_N: out std_logic;
+		RAM_A   : out std_logic_vector(20 downto 0)
 	);
+end component;
+
+-- Slim variant of the card, selected by the AC_SLIM generic. A separate MODULE rather than a
+-- parameter because GowinSynthesis cannot bind a VHDL generic to a Verilog module:
+-- `ERROR (EX4677): Binding entity 'ARCADE_CARD' does not have generic ...`. See arcade_slim.sv.
+component ARCADE_CARD_SLIM is
 	port(
 		CLK     : in  std_logic;
 		RST_N   : in  std_logic;
@@ -1384,12 +1401,27 @@ CD_RAM_DO <= CPU_DO;
 CD_RAM_RD <= CPU_PRE_RD and not (CD_RAM_CS_N and AC_RAM_CS_N);
 CD_RAM_WR <= CPU_PRE_WR and not (CD_RAM_CS_N and AC_RAM_CS_N);
 
-gen_ac : if AC_BUILD /= 0 generate
+gen_ac : if AC_BUILD /= 0 and AC_SLIM = 0 generate
 AC : ARCADE_CARD
-generic map(
-	AC_REG_BUS => AC_REG_BUS,
-	AC_SLIM    => AC_SLIM
-)
+port map(
+	CLK     => CLK,
+	RST_N   => RESET_N,
+
+	EN      => CD_EN and AC_EN,
+	WR_N    => CPU_WR_N,
+	RD_N    => CPU_RD_N,
+	A       => CPU_A,
+	DI      => CPU_DO,
+	DO      => AC_DO,
+	SEL_N   => AC_SEL_N,
+
+	RAM_CS_N=> AC_RAM_CS_N,
+	RAM_A   => AC_RAM_A
+);
+end generate;
+
+gen_ac_slim : if AC_BUILD /= 0 and AC_SLIM /= 0 generate
+AC : ARCADE_CARD_SLIM
 port map(
 	CLK     => CLK,
 	RST_N   => RESET_N,
