@@ -1,3 +1,13 @@
+NOTE: the .hex fixtures below are NOT in this repository. They are a real game's disc
+data (Konami) and are not redistributed. Regenerate them from your own dump with:
+
+    scripts/make_adpcm_golden.py "Akumajou Dracula X - Chi no Rondo.chd"
+
+That script holds only the sector NUMBERS, which are metadata, and rebuilds every file
+byte-identically (verified against the original capture's MD5s). dma_writes.hex and
+nib.hex are pure derivations of sectors.hex and ram.hex respectively, so they need no
+separate capture.
+
 Golden ADPCM DMA-from-CD load, Akumajou Dracula X - Chi no Rondo: the game's first DMA load
 (beetle-pce-fast, emulated frame 12291).
 

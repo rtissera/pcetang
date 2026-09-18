@@ -1,6 +1,6 @@
 # Where this core actually stands
 
-Last updated 2026-09-17. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-18. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
@@ -32,8 +32,12 @@ fixes: CD-DA samples are byte-swapped (CHD stores them big-endian), and the MCU 
 sectors by DMA while decoding the next libchdr hunk, with the FPGA prefetching one sector
 ahead. See `CD_AUDIO_TIMING.md`.
 
-**Known open issue: ADPCM voices appear to be missing** (e.g. Rondo's speech). Not yet
-investigated. CD-DA music and HuCard PSG audio are fine.
+**ADPCM voices work (2026-09-18).** The earlier "voices missing" entry here is resolved:
+DD2 plays its in-game ADPCM samples and Rondo plays through. One known residual: DD2's
+title-screen voice is cut short. A separate real bug was found and fixed the same day --
+`cd.vhd` cleared the ADPCM DMA run bit once per 2048-byte sector, where both beetle and
+MAME keep DMA asserted for the whole transfer and clear it at the STATUS phase. That is
+why Sapphire used to reboot; it now reaches "NOW LOADING" and holds.
 
 **HuCard works on Tang Console 60K.** `1943 Kai (Japan).pce` and `Raiden` boot and play,
 with sound and both controllers, at 720p60 over HDMI with a correct 4:3 aspect. That is
@@ -45,9 +49,15 @@ serves matches the reference in both LBA and data, and the boot command sequence
 command-for-command — but games still died with a dark screen until the CD-RAM bridge fix
 landed on 2026-09-16. They now boot and play.
 
-**To get there the targets were deliberately degraded to plain HuCard.** CD-ROM²,
-the Arcade Card and SuperGrafx are all compiled out or untested. This was a
-deliberate trade, not an oversight — see below.
+**SuperGrafx runs for the first time (2026-09-18).** With `LITE => 0` the Console 60K
+build gains the second VDC and the HuC6202 priority mixer, and the BL616 firmware now
+accepts `.sgx` ROMs. Three of four titles boot -- Battle Ace, Aldynes and Daimakaimura --
+all with rendering defects (missing sprites, graphic corruption); 1941 Counter Attack
+stays black. See the SuperGrafx section below for the six mechanisms already ruled out.
+
+**The Arcade Card is compiled in but its games do not run (2026-09-18).** Sapphire,
+Garou Densetsu 2 and World Heroes 2 all stall waiting on the CD unit rather than on
+Arcade Card RAM or registers.
 
 ## Per-board matrix
 
@@ -62,33 +72,62 @@ deliberate trade, not an oversight — see below.
 | Controllers on real hardware | works (DS2 P1) | not tested | not tested |
 | **CD game runs on real hardware** | **YES** — Rondo, R-Type Complete CD, Prince of Persia, Bonk III, DD2 all playable | not tested | not tested |
 | CD-DA music on real hardware | **YES, full rate** | not tested | not tested |
-| ADPCM voices on real hardware | **missing — open issue** | not tested | not tested |
+| ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | not tested | not tested |
 | CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
-| Arcade Card | **compiled out** (`AC_BUILD => 0`) | **compiled out** | **compiled out** |
-| SuperGrafx | off (`LITE => 1`) | off (`LITE => 1`) | off (`LITE => 1`) |
+| Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
+| SuperGrafx | **on — 3 of 4 boot**, rendering defects | off (`LITE => 1`) | off (no room) |
 
 Exact generic maps, so this cannot drift from the source:
 
-    Console 60K  LITE => 1, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 0, DBG_PROBES => 0,
-                 CDDA_DEPTH_LOG2 => 12, SGX => '1' (see note below)
+    Console 60K  LITE => 0, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 1, DBG_PROBES => 0,
+                 CDDA_DEPTH_LOG2 => 12, SGX => '1'
     Primer 25K   LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0, SGX => '0'
     Nano 20K     LITE => 1, EXT_VRAM0 => 1, NO_CD => 0, AC_BUILD => 0, VT_PATH_A => 0, SGX => '0'
 
-All three boards compile the CD subsystem (Console 60K turned it back on for the CD
-bring-up and runs games; the other two have never had it exercised). The Arcade Card and
-SuperGrafx are out on all three. SF2' mapper and backup RAM are in on all three.
+All three boards compile the CD subsystem (Console 60K runs games; the other two have
+never had it exercised). Console 60K now also builds SuperGrafx and the Arcade Card;
+neither fits on Primer 25K or Nano 20K. SF2' mapper and backup RAM are in on all three.
+Console 60K resources with everything on: logic 27153/59904 (46%), BSRAM 110/118 (94%),
+0 setup / 0 hold violations, clk_pce 42.887 MHz actual against a 42.857 requirement.
 
-`SGX => '1'` on Console 60K is an inconsistency, not a feature. `LITE` decides what is
-BUILT: with `LITE => 1` the second VDC, the HuC6202 priority mixer and the cheat engine do
-not exist, and the VDC/VPC chip-select decode that `SGX` controls sits inside
-`generate_SGX`, so it is gone too. `SGX` is a runtime input; its one use left with
-`LITE => 1` is `pce_top.vhd`'s work-RAM address (`RAM_A(14 downto 13)`). The CPU selects
-work RAM for pages $F8-$FB and the RAM block is always 32KB, so with `SGX='1'` pages
-$F9-$FB are separate RAM (SuperGrafx) and with `SGX='0'` they mirror $F8 (PC Engine).
-Risk today is low: only software that reads $F8 data through a $F9-$FB mirror, or that
-detects a SuperGrafx by testing that RAM, would behave differently. Fix is to derive
-`SGX` from `LITE`; it changes the bitstream, so it waits for the current build's hardware
-confirmation.
+`SGX => '1'` on Console 60K is now correct rather than an inconsistency: this board
+builds with `LITE => 0`, so the second VDC, the HuC6202 priority mixer and the VDC/VPC
+chip-select decode inside `generate_SGX` all exist. On Primer 25K and Nano 20K, `LITE`
+stays 1 and `SGX` stays '0'.
+
+(Historical note, kept because it explains older bitstreams: when those boards ran
+`LITE => 1` with `SGX => '1'`, the only surviving effect was `pce_top.vhd`'s work-RAM
+address decode -- pages $F9-$FB were separate RAM instead of mirroring $F8. Low risk, but
+it is why some earlier builds differed subtly.)
+
+## SuperGrafx: what is ruled out (2026-09-18)
+
+Symptoms are stable across two different bitstreams (SGX alone, and SGX + Arcade Card),
+which already argues against anything marginal. Eliminated, each with a measurement, not
+an argument:
+
+- **VRAM1 is not on SDRAM.** This board is `EXT_VRAM0 => 0` and never sets `EXT_VRAM1`,
+  so both VDCs' VRAM is on-chip BSRAM. The "stale byte" class of bug cannot apply.
+- **ROM size, mapping and headers are correct.** The `.sgx` files are exact powers of two
+  (no copier headers) and the `rom_sz` buckets resolve correctly for 512K and 1MB.
+- **The RTL is donor code and it simulates correctly.** `huc6202.vhd` is byte-identical to
+  MiSTer; `huc6260.vhd` identical bar a debug tap; `pce_top.vhd`'s SGX decode identical;
+  the CPU identical. All four games boot in `sim/boot` and program both VDCs -- 1941
+  writes VDC1 15392 times in 60 ms, while 1943 Kai (a plain HuCard) writes it zero times,
+  which confirms the SGX address decode.
+- **No cross-instance BSRAM merge.** Synthesis reports VDC0 and VDC1 as twins (2228 vs
+  2208 registers, 4965 vs 4961 LUTs), each with its own SAT and both sprite line buffers.
+  The single `DI0019` merge in the log is a reset-less free-running counter, which is safe.
+- **Not the unsupported cross-port RAM collision.** Gowin UG285 leaves same-address
+  cross-port read+write undefined, and the sim stubs paper over it -- so it was counted:
+  Battle Ace (broken) 0 collisions, 1943 Kai (working) 2. Backwards from the hypothesis.
+- **Not timing.** Full PnR on this exact config: 0 setup / 0 hold violated endpoints, and
+  the 25 worst setup paths are all the known CPU-microcode-to-bridge path, with no VDC1,
+  VPC or sprite path among them.
+
+The cause is not known. The next step is a hardware probe that splits the path: count CPU
+writes reaching `CPU_VDC1_SEL_N`, non-transparent `VDC1_COLNO` pixels, and VPC selection
+of VDC1 -- which separates "never written" from "renders nothing" from "mixer drops it".
 
 ## Known debt: Nano 20K core clock (2026-09-17)
 
@@ -230,7 +269,20 @@ SELECT + D-pad RIGHT (`OSD_KEY_CODE`, firmware default `OPTION_OSD_KEY_SELECT_RI
 
 ## Open items on Console 60K, in priority order
 
-None of these block HuCard play. All observed on real hardware 2026-09-10.
+Added 2026-09-18, ahead of the older list below:
+
+0a. **Arcade Card games stall on the CD interrupt path.** Sapphire holds at "NOW LOADING"
+    while toggling `$1802` (the CD IRQ mask) with only 16 sector requests and zero ADPCM
+    accesses; Garou Densetsu 2 parks in the SCSI COMMAND phase; World Heroes 2 sticks in
+    DATA IN with bytes offered and never consumed. None is an Arcade Card RAM or register
+    fault. Next: compare `$1802` masking, the transfer-done flag (`cd.vhd` sets `CD_DTD`
+    at the status phase) and the ADPCM end/half interrupts against Mednafen's `pcecd.c`.
+0b. **SuperGrafx rendering defects** — see the dedicated section above.
+0c. **HDMI residual tearing ~2.7%** (down from 17.2% via three line buffers) plus a
+    low-level shimmer that is inherent: the exact lock needs 755.16 output lines per
+    frame, so the servo dithers 755/756. PLL search for an exact ratio was exhausted.
+
+None of the items below block HuCard play. All observed on real hardware 2026-09-10.
 
 1. **Core speed fluctuates** — audible/visible slowdown then speed-up during play. Not
    the video path: the VTOTAL loop tracks the source rather than forcing it, and the
@@ -256,6 +308,12 @@ Primer 25K and Nano 20K carry faithful ports of every Console 60K fix (ROM bridg
 joypad polarity and d-pad bits, DS2 readers, 48 kHz audio strobe). They synthesise and
 close timing. **No HuCard has booted on either, and no pad has been plugged into
 either.** A clean gw_sh run proves synthesis and timing. It does not prove a picture.
+
+There is also a practical blocker, found 2026-09-18: **neither board has an SD path in
+this design.** `board_sdh_gpio_init()` needs GPIO 10-15, and on Primer 25K the FPGA↔BL616
+UART1 link uses 10/11 (Nano 20K uses 11/13) -- the same pins. Storage has to arrive over
+USB, and the Console 60K USB-A ports are wired to the FPGA's low-speed soft host rather
+than the BL616, so bring-up on those two boards is waiting on a USB-C OTG adapter.
 
 
 ## CD-ROM² — detail (2026-09-11)

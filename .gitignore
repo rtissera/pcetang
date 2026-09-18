@@ -27,3 +27,10 @@ sim/cd/adpcmgoldwork/
 sim/cd/cosim/obj/
 sim/cd/adpcmdmawork/
 sim/hdmi/obj
+
+# ADPCM golden fixtures are real game disc data (Konami) and are NOT redistributed.
+# Regenerate locally from your own dump: scripts/make_adpcm_golden.py <game.chd>
+sim/cd/golden/adpcm_rondo_dma1/sectors.hex
+sim/cd/golden/adpcm_rondo_dma1/dma_writes.hex
+sim/cd/golden/adpcm_rondo_play8/ram.hex
+sim/cd/golden/adpcm_rondo_play8/nib.hex

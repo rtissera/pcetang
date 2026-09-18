@@ -4,9 +4,14 @@ PC Engine / TurboGrafx-16 core for Sipeed Tang FPGA boards, integrated with
 [TangCore](https://github.com/nand2mario/tangcore) (BL616-based ROM loading, joypad and
 on-screen display).
 
-**HuCard games boot and play on Tang Console 60K** — 720p60 HDMI with a correct 4:3
-aspect, PSG audio, two controllers and an in-game OSD. CD-ROM² loads real CHD images and
-boots the system card, but **no CD game is playable yet**.
+**HuCard and CD-ROM² games boot and play on Tang Console 60K** — 720p60 HDMI with a
+correct 4:3 aspect, PSG audio, two controllers and an in-game OSD. CD games run from real
+CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
+Prince of Persia, Rondo of Blood and Bonk III are playable. SuperGrafx games load and
+three of four boot, with rendering defects. Arcade Card titles do not run yet.
+
+Primer 25K and Nano 20K build clean but have **never run a game** — don't buy hardware on
+the strength of this table.
 
 ## Credits
 
@@ -31,9 +36,14 @@ UART. GPL-3.0 throughout — see
 | **HuCard game runs on real hardware** | **yes** | not tested | not tested |
 | Video / audio / controllers on real hardware | yes | not tested | not tested |
 | CD-ROM²: system card boots off a CHD | **yes** | not tested | not tested |
-| **CD game playable** | **no** | no | no |
-| Arcade Card | compiled out | compiled out | compiled out |
-| SuperGrafx | off | off | off |
+| **CD game playable, with CD-DA and ADPCM** | **yes** | not tested | not tested |
+| SuperGrafx | **3 of 4 boot**, rendering defects | compiled out | no room |
+| Arcade Card | compiled in, **games stall** | no room | no room |
+
+"Not tested" on Primer 25K and Nano 20K means exactly that: those bitstreams have never
+been loaded onto a board with a game. Neither board has an SD path in this design — their
+SD pins carry the FPGA↔BL616 UART link — so storage has to come over USB, which is
+untested.
 
 [docs/STATUS.md](docs/STATUS.md) is the honest long form — it is deliberately blunt about
 what is *verified on real hardware* versus what merely *compiles*, because those are very
@@ -54,20 +64,37 @@ payload are filtered out, plus the per-command reply bytes), and `scripts/cd_gol
 normalises a mednafen trace, a GHDL log or a hardware trace to one token stream and reports
 the first divergence.
 
+**On real hardware, CD games play.** R-Type Complete CD, Prince of Persia, Rondo of Blood
+and Bonk III run with CD-DA music and ADPCM voices. Double Dragon II plays with its title
+voice cut short. Sectors are served from a CHD by the BL616 companion over UART at 99.8%
+of realtime.
+
 ### What does not
 
-**No CD game boots on real hardware yet.** The simulation result above is a strong claim
-about the RTL and a weak one about the board: it does not model SDRAM, the BL616 companion,
-or real UART timing.
+**Arcade Card games do not run.** Sapphire reaches "NOW LOADING" and stops; Garou Densetsu
+2 and World Heroes 2 black-screen after the system card. None of the three looks like an
+Arcade Card RAM or register fault — all three sit waiting on the CD unit, which points at
+the CD interrupt path.
 
-An earlier version of this section claimed the CD data path was "verified byte-for-byte on
-four discs". That claim was wrong. It rested on a probe that captured the first eight bytes
-of each sector; when the whole sector was finally compared against the reference, sectors
-were corrupt from byte 91 onward. Two real faults were behind it, both in `SCSI.vhd`'s DATA
-IN path — a burst that ran across sector boundaries, and `CD_DATA_END` being asserted early
-so `cd_bridge` completed a multi-sector read while data was still streaming. Both are fixed;
-the byte-for-byte claim is only made for simulation, because that is the only place it has
-actually been checked end to end.
+**SuperGrafx renders incorrectly.** Battle Ace plays but loses sprites; Aldynes and
+Daimakaimura show graphic corruption; 1941 Counter Attack stays black. Six candidate
+mechanisms have been eliminated with measurements — the VDC RTL is donor code, it
+simulates correctly, it synthesises with both VDCs fully intact, and the design closes
+timing with the critical path nowhere near the video logic. The cause is not yet known.
+
+**Video is not perfect.** The scandoubler carries about 2.7% residual line tearing (down
+from 17.2%) and a low-level shimmer that is inherent to the 755.16-output-lines-per-frame
+ratio; the servo dithers between 755 and 756.
+
+### A claim that was wrong, kept here on purpose
+
+An earlier version of this file claimed the CD data path was "verified byte-for-byte on
+four discs". That was wrong. It rested on a probe that captured the first eight bytes of
+each sector; when whole sectors were finally compared, they were corrupt from byte 91
+onward. Two real faults were behind it, both in `SCSI.vhd`'s DATA IN path — a burst
+running across sector boundaries, and `CD_DATA_END` asserting early so `cd_bridge`
+completed a multi-sector read while data was still streaming. Both are fixed. The episode
+is why this file separates "verified on hardware" from "compiles" so pedantically.
 
 ## Building
 
@@ -94,4 +121,20 @@ See the header of `run_cd_boot_llvm.sh` for the three things ghdl-llvm needs bef
 start at all.
 
 The MCU-side firmware lives in a separate repo (a fork of nand2mario's
-`firmware-bl616`); the CD sector server is `core/pcecd.cpp` there.
+`firmware-bl616`); the CD sector server is `core/pcecd.cpp` there. That fork also carries
+the `.sgx` loader support and a HID descriptor-parser fix, so the current feature set
+needs it — a build against stock TangCore firmware will not load SuperGrafx ROMs.
+
+## How this was built
+
+Development was AI-assisted (Claude, under my direction) — the commit trailers record it
+per commit, and they are staying there.
+
+What matters more than that is how claims in this repo are checked, because "it should
+work" has been wrong here repeatedly. The working rule is that nothing is claimed until
+it has run: changes are reproduced in simulation before they are fixed, diffed against
+golden traces captured from instrumented reference emulators (beetle-pce-fast and MAME),
+verified with negative controls, built through real `gw_sh` synthesis with timing
+reports, and finally gated on running on real hardware. Several sections of this README
+exist specifically to record claims that turned out to be wrong and how they were caught
+— see the byte-for-byte episode above, and `docs/STATUS.md`.
