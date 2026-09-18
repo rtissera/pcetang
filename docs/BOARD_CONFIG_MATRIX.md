@@ -60,6 +60,40 @@ SuperGrafx is BSRAM-bound (117/118 on its own); `syn_preserve` frees the 9 block
 comfortable. The Arcade Card closes with unmodified donor code — the 2026-09-09 removal is
 obsolete.
 
+## Why the Arcade Card cannot follow the same route on Nano 20K
+
+The Primer 25K chain does not transfer, and the blocker is BSRAM, measured not guessed.
+
+On Primer, moving VRAM on-chip cost **+26 blocks net** (27 → 53 after `syn_preserve`). Nano 20K
+has **46 blocks in total**:
+
+| step | Nano 20K BSRAM |
+|---|---|
+| shipping | 40/46 |
+| with `syn_preserve` | 31/46 |
+| + on-chip VRAM (+26) | **≈ 57/46 — over by ~11** |
+
+No combination of trims reaches 26 free blocks on this device: PSG Path A would shed 6 but costs
+399 setup violations, and halving the CD-DA FIFO buys ~2. So `EXT_VRAM0 => 1` is genuinely forced
+on Nano 20K, not a legacy choice — and without on-chip VRAM there is no timing gain either, since
+Primer's +3.3% came from removing the SDRAM round trip from the video path.
+
+The old route does not work either: 18613 + ~1500 LUTs ≈ 97% logic, at **+0.09%** timing margin on
+an already-reduced clock, when the Arcade Card's own paths were the worst paths on both larger
+boards. The next available clock notch (27 × 14/9 = 42.0 MHz) buys ~1% margin at the cost of 2.2%
+slow audio — audible, and not worth it.
+
+**The only lever with the right magnitude is `cd_bridge` (4004 LUTs on Primer 25K).** A diet
+shedding 1500–2000 LUTs is the single change that could make the Arcade Card fit on Nano's logic
+budget, and freeing logic at 90% utilisation may also relieve the routing congestion that dominates
+the critical path. Both effects are plausible and unmeasured. It is also real work on the module
+that took the CD stack from "never boots" to five playable games, so it needs the whole CD
+simulation suite as regression.
+
+**What this means for release claims:** full PC Engine CD including Arcade Card titles on
+Console 60K and Primer 25K; CD-ROM² and Super CD-ROM² without the Arcade Card on Nano 20K. That
+mirrors the real hardware tiers, where the Arcade Card was a separate purchase.
+
 ## Measured dead ends — do not retry without new evidence
 
 | attempt | result |
