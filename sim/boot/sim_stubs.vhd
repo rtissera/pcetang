@@ -115,6 +115,35 @@ architecture sim of dpram9_dpb_wm01 is
 	type mem_t is array (0 to 511) of std_logic_vector(8 downto 0);
 	shared variable mem : mem_t := (others => (others => '0'));
 begin
+	-- COLLISION PROBE (2026-09-18). Gowin UG285 states that a same-address cross-port
+	-- read+write is NOT supported on DPB/DPX9B: on real silicon the reading port returns
+	-- an undefined value. This behavioural model returns a well-defined one, so a clean
+	-- sim here proves nothing about hardware unless the collision never actually occurs.
+	-- This process only COUNTS the condition (it does not corrupt the data), so enabling
+	-- it cannot change any other sim result -- it turns "could this happen?" into a
+	-- number. Reports the first 20 and then every 10000th, so a hot loop cannot flood
+	-- the log. Purely simulation-side: no build_*.tcl compiles this file.
+	--
+	-- MEASURED 2026-09-18, 60 ms each: Battle Ace (missing sprites on hardware) = 0
+	-- collisions; 1943 Kai (sprites correct on hardware) = 2. Backwards from the
+	-- hypothesis, so the unsupported-collision theory is DEAD as an explanation of the
+	-- SuperGrafx sprite defects. Kept because it is the only thing that can re-answer
+	-- the question cheaply if the sprite path changes.
+	probe : process (clock)
+		variable n : integer := 0;
+	begin
+		if rising_edge(clock) then
+			if address_a = address_b and (wren_a xor wren_b) = '1' then
+				n := n + 1;
+				if n <= 20 or (n mod 10000) = 0 then
+					report "SPRBUF_COLLIDE #" & integer'image(n) &
+					       " addr=" & integer'image(to_integer(unsigned(address_a)))
+					       severity note;
+				end if;
+			end if;
+		end if;
+	end process;
+
 	process (clock) begin
 		if rising_edge(clock) then
 			if wren_a = '1' then
@@ -160,6 +189,27 @@ architecture sim of dpram8x16_dpb_wm01 is
 	type mem_t is array (0 to 255) of std_logic_vector(15 downto 0);
 	shared variable mem : mem_t := (others => (others => '0'));
 begin
+	-- Same collision probe as dpram9_dpb_wm01 above, on the SAT. Port A is the SATB DMA
+	-- write, port B is the sprite-evaluation read (and the cold-reset clear sweep), so a
+	-- hit here means a DMA write and an eval read landed on the same SAT entry in the
+	-- same cycle -- the case UG285 leaves undefined. Note SAT, unlike SPR_LINE_BUF0/1,
+	-- never got the one-cycle-delayed-write workaround; it was only switched to the
+	-- forced-WRITE_MODE primitive. See huc6270.vhd's header, fix 3.
+	probe : process (clock)
+		variable n : integer := 0;
+	begin
+		if rising_edge(clock) then
+			if address_a = address_b and (wren_a xor wren_b) = '1' then
+				n := n + 1;
+				if n <= 20 or (n mod 10000) = 0 then
+					report "SAT_COLLIDE #" & integer'image(n) &
+					       " addr=" & integer'image(to_integer(unsigned(address_a)))
+					       severity note;
+				end if;
+			end if;
+		end if;
+	end process;
+
 	process (clock) begin
 		if rising_edge(clock) then
 			if wren_a = '1' then

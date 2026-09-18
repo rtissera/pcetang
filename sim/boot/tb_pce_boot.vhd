@@ -318,6 +318,28 @@ begin
 		variable n_vpc_wr  : integer := 0;
 		variable n_vce_wr  : integer := 0;
 		variable n_vdc0_rd : integer := 0;
+		-- SGX IRQ-CLEAR PROBE (2026-09-18). On a SuperGrafx the CPU's single IRQ1 line is
+		-- `VDC0_IRQ_N and VDC1_IRQ_N` (donor-identical), so an IRQ raised by VDC1 can only
+		-- be cleared by READING VDC1's status register at $0010 -- which n_vdc0_rd alone
+		-- cannot see. These count the VDC1/VPC status reads and measure how long the
+		-- merged line stays low, separating "never acknowledged" from "acknowledged and
+		-- re-raised".
+		--
+		-- WHAT IT ACTUALLY MEASURED, so nobody re-runs this expecting a hit: it does NOT
+		-- discriminate the hardware fault. Hardware trace tag 0xD2 shows 1941 taking 2
+		-- IRQ1s with the line left ASSERTED while Battle Ace takes 0x32db with it idle,
+		-- but at 90 ms of sim BOTH read zero status registers and hold IRQ1 low for the
+		-- entire run (longest run == total). Aldynes is the only one that acks (13 VDC0 +
+		-- 5 VDC1 reads). So "never acknowledges" is not the fault signature -- at this
+		-- depth 1941 and Battle Ace are still in a VRAM upload loop and the sim has not
+		-- reached the point where they diverge. Treat a difference here as meaningful
+		-- only once a run gets past that loop.
+		variable n_vdc1_rd : integer := 0;
+		variable n_vpc_rd  : integer := 0;
+		-- CPU_CE cycles with the merged IRQ1 line asserted, and the longest single run.
+		variable irq1_low_cyc  : integer := 0;
+		variable irq1_run      : integer := 0;
+		variable irq1_run_max  : integer := 0;
 
 		variable n_vdc0_irq : integer := 0;
 		variable n_vdc1_irq : integer := 0;
@@ -510,8 +532,23 @@ begin
 					elsif vce_sel_n = '0' then
 						n_vce_wr := n_vce_wr + 1;
 					end if;
-				elsif cpu_rd_n = '0' and vdc0_sel_n = '0' then
-					n_vdc0_rd := n_vdc0_rd + 1;
+				elsif cpu_rd_n = '0' then
+					if vdc0_sel_n = '0' then
+						n_vdc0_rd := n_vdc0_rd + 1;
+					elsif vdc1_sel_n = '0' then
+						n_vdc1_rd := n_vdc1_rd + 1;
+					elsif vpc_sel_n = '0' then
+						n_vpc_rd := n_vpc_rd + 1;
+					end if;
+				end if;
+
+				-- Merged IRQ1 as the CPU sees it (pce_top wires IRQ1_N => VDC0 and VDC1).
+				if (vdc0_irq_n and vdc1_irq_n) = '0' then
+					irq1_low_cyc := irq1_low_cyc + 1;
+					irq1_run     := irq1_run + 1;
+					if irq1_run > irq1_run_max then irq1_run_max := irq1_run; end if;
+				else
+					irq1_run := 0;
 				end if;
 			end if;
 		end loop;
@@ -533,6 +570,10 @@ begin
 		write(l, string'("  VDC1 writes         : ")); write(l, n_vdc1_wr); writeline(output, l);
 		write(l, string'("  VPC  writes         : ")); write(l, n_vpc_wr);  writeline(output, l);
 		write(l, string'("  VCE  writes         : ")); write(l, n_vce_wr);  writeline(output, l);
+		write(l, string'("  VDC1 reads          : ")); write(l, n_vdc1_rd); writeline(output, l);
+		write(l, string'("  VPC  reads          : ")); write(l, n_vpc_rd);  writeline(output, l);
+		write(l, string'("  IRQ1 low CPU cycles : ")); write(l, irq1_low_cyc); writeline(output, l);
+		write(l, string'("  IRQ1 longest run    : ")); write(l, irq1_run_max); writeline(output, l);
 		write(l, string'("  VDC0 IRQ assertions : ")); write(l, n_vdc0_irq); writeline(output, l);
 		write(l, string'("  VDC1 IRQ assertions : ")); write(l, n_vdc1_irq); writeline(output, l);
 		write(l, string'("  CD   IRQ assertions : ")); write(l, n_cd_irq);   writeline(output, l);
