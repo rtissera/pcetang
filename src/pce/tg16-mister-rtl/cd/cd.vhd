@@ -419,6 +419,19 @@ begin
 				CD_DTD <= '0';
 			end if;
 			
+			-- End of the data-in phase: the drive raises C/D for STATUS. That is where the
+			-- real hardware drops the DMA request bits, so a game polling $180B sees 0 exactly
+			-- when the whole transfer is done. MAME clears both bits (&= 0xFC), Mednafen only
+			-- bit 0; clearing both is harmless because games write $180B <= 00 next anyway.
+			-- STATUS phase is C/D asserted AND I/O asserted (device -> host). COMMAND phase
+			-- also asserts C/D but with I/O the other way, so testing C/D alone cleared the
+			-- bits the moment the CDB was sent and DMA never ran at all -- measured: zero
+			-- nibble writes.
+			if SCSI_CD_N = '0' and SCSI_IO_N = '0' and SCSI_BSY_N = '0' then
+				ADPCM_DMA_RUN <= '0';
+				ADPCM_DMA_EN  <= '0';
+			end if;
+
 			SCSI_ACK_N_OLD <= SCSI_ACK_N;
 			if CD_DTR = '0' and SCSI_REQ_N = '0' and SCSI_BSY_N = '0' and SCSI_CD_N = '1' and SCSI_MSG_N = '1' and SCSI_IO_N = '0' then
 				CD_DTR <= '1';
@@ -427,7 +440,20 @@ begin
 				CD_DATA_CNT <= CD_DATA_CNT + 1;
 				if CD_DATA_CNT = 2047 then
 					CD_DTR <= '0';
-					ADPCM_DMA_RUN <= '0';
+					-- ADPCM_DMA_RUN is NOT cleared here any more (2026-09-18). $180B bit 0 means
+					-- "DMA this transfer", not "DMA this sector": both Mednafen (pcecd.c, bit 0
+					-- cleared in the ACK-release path only once the drive has entered STATUS)
+					-- and MAME 0.289 (nec/pce_cd.cpp clear_ack: `if (m_scsi_CD)
+					-- m_adpcm_dma_reg &= 0xFC;`) keep it set for the WHOLE data-in phase.
+					--
+					-- Clearing it per 2048-byte sector stopped a mode-01 load after ONE sector of
+					-- the 32 requested. Sapphire does `$180B <= 01` then polls $180B until it
+					-- reads 0 -- measured in a beetle trace: 300254 reads over 31 frames, then it
+					-- writes 0 and proceeds. With the old behaviour it saw 0 after ~1 frame,
+					-- believed a 64KB load had finished with 2KB transferred, and ran into
+					-- garbage: on hardware the game reached "NOW LOADING" and rebooted to the
+					-- syscard. Rondo is unaffected because it uses mode 02 (ADPCM_DMA_EN), which
+					-- was never cleared here.
 				end if;
 			elsif CD_DTR = '1' and (SCSI_BSY_N = '1' and SCSI_BSY_N_OLD = '0') then
 				CD_DTR <= '0';
