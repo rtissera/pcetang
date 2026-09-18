@@ -31,6 +31,27 @@ DUMP_AFTER_VDC="${9:-0}"
 AC_BUILD="${10:-1}"
 NO_CD="${11:-0}"
 
+# tb_pce_boot's ROM_SZ_G generic defaults to X"080" (512K). Every run before 2026-09-18
+# used that default regardless of the actual file, so any ROM that is not 512K was
+# simulated with the WRONG pce_top ROM_A mapping -- a 1MB .sgx mirrored its lower half
+# over its upper half and could not possibly boot, for a reason the board does not have.
+# Derive the bucket from the real file size instead, using exactly the same thresholds
+# as pcetang_console60k_cd.vhd's rom_sz_r (search "dynamic bucket rounding" there), so
+# sim and board agree by construction. Override with ROM_SZ=0xNNN if needed.
+rom_bytes=$(stat -c %s "$ROM")
+# A 512-byte copier header is stripped by the firmware before the core ever sees it.
+if [ $(( rom_bytes % 1024 )) -eq 512 ]; then rom_bytes=$(( rom_bytes - 512 )); fi
+if   [ "$rom_bytes" -le 131072 ];  then rom_sz_default=020
+elif [ "$rom_bytes" -le 262144 ];  then rom_sz_default=040
+elif [ "$rom_bytes" -le 393216 ];  then rom_sz_default=060
+elif [ "$rom_bytes" -le 524288 ];  then rom_sz_default=080
+elif [ "$rom_bytes" -le 786432 ];  then rom_sz_default=0C0
+elif [ "$rom_bytes" -le 1048576 ]; then rom_sz_default=000
+else                                    rom_sz_default=280
+fi
+ROM_SZ="${ROM_SZ:-$rom_sz_default}"
+echo "run.sh: $rom_bytes bytes -> ROM_SZ=X\"$ROM_SZ\"  SGX=$SGX  CD_EN=$CD_EN" >&2
+
 mkdir -p "$WORK"
 rm -f "$WORK"/*.o "$WORK"/*.cf "$WORK"/tb_pce_boot 2>/dev/null || true
 
@@ -85,6 +106,7 @@ ghdl -r "${GHDL_FLAGS[@]}" tb_pce_boot \
 	-gCD_EN_G="'$CD_EN'" \
 	-gTRACE_N="$TRACE_N" \
 	-gTRACE_SKIP="$TRACE_SKIP" \
+	-gROM_SZ_G="X\"$ROM_SZ\"" \
 	-gROM_LAT="$ROM_LAT" \
 	-gDUMP_AFTER_VDC="$DUMP_AFTER_VDC" \
 	-gAC_BUILD_G="$AC_BUILD" \
