@@ -29,6 +29,7 @@ int main(int argc, char **argv) {
     dut->resetn = 0; dut->overlay = 0; dut->overlay_color = 0;
     int tears = 0, out_lines = 0, prev_cy = -1, line_val = -1; bool line_dirty = false;
     std::map<int,int> shown;          // source value -> how many output lines showed it
+    std::map<int,int> tear_cy;        // where in the frame the torn lines are
     int last_frame = 0, frames = 0;
 
     while (frames < frames_wanted) {
@@ -57,7 +58,7 @@ int main(int argc, char **argv) {
                 // Skip the first frame: the buffers start empty, so its lines are not
                 // representative of steady state.
                 if (frames >= 1) {
-                    if (line_dirty) tears++;
+                    if (line_dirty) { tears++; tear_cy[prev_cy]++; }
                     if (line_val > 0) shown[line_val]++;
                     out_lines++;
                 }
@@ -79,7 +80,18 @@ int main(int argc, char **argv) {
     for (auto &kv : shown) dist[kv.second]++;
     printf("output lines per source value: ");
     for (auto &kv : dist) printf("%d->%dx  ", kv.first, kv.second);
-    printf("\n%s\n", tears == 0 ? "PASS: no line ever showed two source lines" : "FAIL: torn lines present");
+    printf("\n");
+    if (!tear_cy.empty()) {
+        int lo = tear_cy.begin()->first, hi = tear_cy.rbegin()->first;
+        printf("torn output lines span cy=%d..%d; first 12: ", lo, hi);
+        int n = 0;
+        for (auto &kv : tear_cy) { if (n++ >= 12) break; printf("%d ", kv.first); }
+        printf("\n");
+        int in_active = 0;
+        for (auto &kv : tear_cy) if (kv.first < 720) in_active += kv.second;
+        printf("of %d torn lines, %d are inside the 720 active output lines\n", tears, in_active);
+    }
+    printf("%s\n", tears == 0 ? "PASS: no line ever showed two source lines" : "FAIL: torn lines present");
     delete dut;
     return tears == 0 ? 0 : 1;
 }
