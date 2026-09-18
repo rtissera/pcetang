@@ -6964,6 +6964,22 @@ architecture rtl of HUC6280_MC is
 
 
 	signal MI    		: MicroInst_r;
+	-- MEASURED BSRAM<->LOGIC TRADE, not a timing fix (2026-09-18, branch
+	-- experiment/syn-preserve-mi). GowinSynthesis dissolves these output flops and rebuilds the
+	-- fields from IR/STATE (74% of the table below is 'X', and MI is redundant with IR&STATE --
+	-- both load from NEXT_IR/NEXT_STATE on the same EN), which also implements the table in
+	-- BSRAM. Preserving MI keeps the flops AND moves the table into logic:
+	--   board        Fmax before -> after      Logic            BSRAM
+	--   Nano 20K     42.466 -> 42.636 (+0.4%)  90% -> 93%       40/46 -> 31/46
+	--   Primer 25K   42.907 -> 42.879 (-0.07%) 94% -> 97%       36/56 -> 27/56
+	--   Console 60K  43.056 -> 42.917 (-0.3%)  32% -> 34%       78/118 -> 69/118
+	-- Consistently -9 BSRAM blocks for +500..870 LUTs. It is NOT a timing lever (the critical
+	-- path is route-dominated: 12.8 ns route vs 8.4 ns cell), so it is NOT on main. Use it only
+	-- when BSRAM binds and logic is free -- i.e. Console 60K for SuperGrafx (previously 113/118,
+	-- razor-thin) or a full-frame HDMI buffer (~20-33 blocks). See session memory
+	-- pcetang_microcode_path_analysis.md.
+	attribute syn_preserve : integer;
+	attribute syn_preserve of MI : signal is 1;
 	signal ALUFlags	: ALUCtrl_r;
 
 begin
