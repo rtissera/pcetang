@@ -101,6 +101,7 @@ localparam AUDIO_RATE = 48000;
 localparam LINE_ABITS = $clog2(MAX_LINE_SAMPLES);   // 10 bits for 540
 
 wire [9:0] cy, frameHeight;
+wire [9:0] cy_dbg /* verilator public_flat_rd */ = cy;   // sim/hdmi/tb_sd_buffer.cpp taps this
 wire [10:0] cx, frameWidth;
 
 //
@@ -111,10 +112,23 @@ wire [10:0] cx, frameWidth;
 // (video_ce pulses within the active window), not by raw master-clock position --
 // keeps the buffer small regardless of DOTCLOCK mode.
 //
-logic [8:0] sd_buffer [0:2*(2**LINE_ABITS)-1];   // 9-bit raw RGB (3/3/3), no palette
-logic wr_line_toggle;
+// THREE line buffers, not two (2026-09-18). With two, the writer overwrites the buffer the
+// reader is mid-way through on ~70% of reads, so the bottom of a displayed line comes from a
+// DIFFERENT source line than the top -- a horizontal seam inside the line that moves as the
+// servo drifts the phase. That is the "picture mostly fine but scrambled line by line" seen on
+// real hardware.
+//
+// Why two is not enough at 720p, in the design's own numbers: a source line takes
+// 2730/42.857e6 = 63.70 us to WRITE, and the reader shows a line across 2 output lines =
+// 2*1650/74.375e6 = 44.37 us. The reader latches the most recently completed buffer, then the
+// writer finishes the other buffer 63.70 us later and comes straight back to the one still
+// being read. Modelled in sim/hdmi/sd_race.py: 522 collisions in 749 reads with 2 buffers,
+// ZERO with 3. Cost is one extra BSRAM block.
+localparam int N_LINE_BUF = 3;
+logic [8:0] sd_buffer [0:N_LINE_BUF*(2**LINE_ABITS)-1];   // 9-bit raw RGB (3/3/3), no palette
+logic [1:0] wr_line_idx;                 // 0..2, replaces the old ping-pong toggle
 logic [LINE_ABITS-1:0] wr_cnt;
-logic [LINE_ABITS-1:0] line_width [0:1];   // real captured sample count per buffer line,
+logic [LINE_ABITS-1:0] line_width [0:N_LINE_BUF-1];   // real captured sample count per buffer line,
                                             // latched at end of each source line -- this
                                             // is what lets mid-frame DOTCLOCK changes
                                             // (huc6260.vhd's real, live-reconfigurable
@@ -122,18 +136,27 @@ logic [LINE_ABITS-1:0] line_width [0:1];   // real captured sample count per buf
                                             // each line is stretched by its OWN real
                                             // width, not a fixed assumption.
 
+// Index of the most recently COMPLETED line, plus a toggle that flips once per completed
+// source line. The reader uses the toggle as its "a new line is ready" event instead of
+// counting output lines, which is what made a source line appear for 2 or 4 output lines
+// (never 3) even though the real ratio is 2.871.
+logic [1:0] wr_done_idx;
+logic       wr_done_tick;
+
 reg video_hs_r, video_vs_r;
 always_ff @(posedge clk) begin
 	video_hs_r <= video_hs;
 	video_vs_r <= video_vs;
 
 	if (video_hs & ~video_hs_r) begin              // new line
-		line_width[wr_line_toggle] <= wr_cnt;      // latch this line's real sample count
-		wr_line_toggle <= ~wr_line_toggle;
+		line_width[wr_line_idx] <= wr_cnt;         // latch this line's real sample count
+		wr_line_idx <= (wr_line_idx == N_LINE_BUF-1) ? 2'd0 : wr_line_idx + 2'd1;
+		wr_done_idx <= wr_line_idx;                // the line that just COMPLETED
+		wr_done_tick <= ~wr_done_tick;             // toggled once per completed source line
 		wr_cnt <= 0;
 	end else if (video_ce && ~video_hbl && ~video_vbl) begin
 		if (wr_cnt < MAX_LINE_SAMPLES - 1) begin
-			sd_buffer[{wr_line_toggle, wr_cnt}] <= {video_r, video_g, video_b};
+			sd_buffer[wr_line_idx * (2**LINE_ABITS) + wr_cnt] <= {video_r, video_g, video_b};
 			wr_cnt <= wr_cnt + 1'b1;
 		end
 	end
@@ -245,25 +268,37 @@ end
 // margin per source line) -- standard synchronizer discipline, not optional. The
 // line_width[] array itself only needs to be stable by the time wr_line_toggle_sync
 // settles, which it is given that same margin.
-reg wr_line_toggle_meta, wr_line_toggle_sync;
+// 2-flop synchroniser for the "source line completed" event and the index that goes with it.
+// wr_done_idx is stable well before the tick that announces it (it is written in the same
+// clk edge, and the reader only samples it after TWO clk_pixel edges), the same argument the
+// old toggle relied on.
+reg wr_done_tick_meta, wr_done_tick_sync, wr_done_tick_prev;
+reg [1:0] wr_done_idx_meta, wr_done_idx_sync;
 always_ff @(posedge clk_pixel) begin
-	wr_line_toggle_meta <= wr_line_toggle;
-	wr_line_toggle_sync <= wr_line_toggle_meta;
+	wr_done_tick_meta <= wr_done_tick;
+	wr_done_tick_sync <= wr_done_tick_meta;
+	wr_done_tick_prev <= wr_done_tick_sync;
+	wr_done_idx_meta  <= wr_done_idx;
+	wr_done_idx_sync  <= wr_done_idx_meta;
 end
+wire src_line_ready = (wr_done_tick_sync != wr_done_tick_prev);
 
 reg [23:0] rgb;
 reg active;
 reg [LINE_ABITS-1:0] sx;                 // current source sample index within the line
 reg [10:0] xcnt;
 reg [9:0] out_line_pair;                 // output line / 2 -- which real source line
-reg line_toggle_rd;
+reg [1:0] line_idx_rd;
+reg [1:0] pend_idx;                      // completed line waiting for an output-line boundary
+reg [LINE_ABITS-1:0] pend_width;
+reg pend_valid;
 reg [LINE_ABITS-1:0] cur_line_width;     // latched from line_width[] at the start of
                                           // each output line pair -- CDC-crossed as a
                                           // slow-changing bus, same discipline as
                                           // vram0_cache's own registered crossings.
 reg [9:0] cy_r;
 
-wire [LINE_ABITS:0] mem_rd_addr = {line_toggle_rd, sx};
+wire [LINE_ABITS+1:0] mem_rd_addr = line_idx_rd * (2**LINE_ABITS) + sx;
 logic [8:0] sd_rdata;
 always_ff @(posedge clk_pixel) sd_rdata <= sd_buffer[mem_rd_addr];
 
@@ -288,15 +323,28 @@ always @(posedge clk_pixel) begin
 	end
 
 	cy_r <= cy;
+	// A completed source line is REMEMBERED here...
+	if (src_line_ready) begin
+		pend_idx   <= wr_done_idx_sync;
+		pend_width <= line_width[wr_done_idx_sync];
+		pend_valid <= 1'b1;
+	end
+	// ...but only ADOPTED at an output-line boundary. Switching source line in the middle of
+	// an output line puts two different lines in one displayed line, which is the very defect
+	// this change exists to remove -- sim/hdmi/tb_sd_buffer.cpp measured 93% torn lines when
+	// this was applied immediately.
+	//
+	// Adopting on every boundary (rather than every SECOND one, as the old cy[0]==0 rule did)
+	// is what gives the natural 2/3 pattern: a source line lasts 2.871 output lines at 720p,
+	// so it is shown twice when the next one is not ready yet and three times when it is.
+	// The old rule could only ever show 2 or 4, which is visibly uneven line thickness.
 	if (cy != cy_r) begin
-		// One real source line is read out over 2 output lines (line-doubling).
-		// wr_line_toggle_sync just flipped to start writing the NEXT line, so the most
-		// recently COMPLETED line is ~wr_line_toggle_sync -- read that one.
-		if (cy[0] == 1'b0) begin
-			line_toggle_rd  <= ~wr_line_toggle_sync;
-			cur_line_width  <= line_width[~wr_line_toggle_sync];
-			out_line_pair   <= out_line_pair + 1'b1;
+		if (pend_valid) begin
+			line_idx_rd    <= pend_idx;
+			cur_line_width <= pend_width;
+			pend_valid     <= 1'b0;
 		end
+		if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;   // OSD row counter only
 	end
 
 	if (cx == 0) begin sx <= 0; xcnt <= 0; end
