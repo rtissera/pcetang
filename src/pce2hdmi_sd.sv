@@ -46,7 +46,15 @@ module pce2hdmi_sd #(
 	parameter VIDEO_REFRESH = 60.0,
 	parameter CLKFRQ        = 27000,   // kHz
 	parameter SCREEN_WIDTH  = 720,
-	parameter SCREEN_HEIGHT = 480
+	parameter SCREEN_HEIGHT = 480,
+	// Core clock in kHz, needed to derive the output-lines-per-source-line ratio. Nano 20K
+	// runs 42428 and the other two 42857, and this module is instantiated with no generic map
+	// on some boards, so it must be passed explicitly rather than assumed.
+	parameter PCE_CLK_KHZ   = 42857,
+	parameter SRC_LINE_CLKS = 2730,       // clk_pce cycles per source line (huc6260)
+	// Output line at which source line 0 is drawn. Also the reader's lag behind the writer:
+	// it must stay inside the buffer window (see the DDA comment below).
+	parameter VOUT_START    = 20
 ) (
 	input clk,          // PCE core clock (CLK into pce_top.vhd), source/write domain
 	input resetn,
@@ -100,6 +108,7 @@ localparam AUDIO_BIT_WIDTH = 16;
 localparam AUDIO_RATE = 48000;
 localparam LINE_ABITS = $clog2(MAX_LINE_SAMPLES);   // 10 bits for 540
 
+localparam int FRAME_W_NOM = (VIDEOID == 4) ? 1650 : (VIDEOID == 2 || VIDEOID == 3) ? 858 : 800;
 wire [9:0] cy, frameHeight;
 wire [9:0] cy_dbg /* verilator public_flat_rd */ = cy;   // sim/hdmi/tb_sd_buffer.cpp taps this
 wire [10:0] cx, frameWidth;
@@ -124,9 +133,15 @@ wire [10:0] cx, frameWidth;
 // writer finishes the other buffer 63.70 us later and comes straight back to the one still
 // being read. Modelled in sim/hdmi/sd_race.py: 522 collisions in 749 reads with 2 buffers,
 // ZERO with 3. Cost is one extra BSRAM block.
-localparam int N_LINE_BUF = 3;
+// FOUR line buffers. Three is not enough for the pull reader below: the reader's lag behind
+// the writer must stay inside [0, N-2.13] output lines, i.e. [0,1.87] with 3 buffers and
+// [0,4.74] with 4, while steady-state phase wander is about a line. Four costs NO extra BSRAM
+// (3 x 1024 x 9 bits already occupies two blocks and 4 x 1024 x 9 = 36864 bits fits the same
+// two) and it makes the slot index a plain k[1:0], which deletes a multiply and the mod-3 wrap.
+localparam int N_LINE_BUF = 4;
 logic [8:0] sd_buffer [0:N_LINE_BUF*(2**LINE_ABITS)-1];   // 9-bit raw RGB (3/3/3), no palette
-logic [1:0] wr_line_idx;                 // 0..2, replaces the old ping-pong toggle
+logic [1:0] wr_line_idx;                 // slot = source line number mod 4
+logic [8:0] wr_line_no;                  // source line number within the frame, 0..262
 logic [LINE_ABITS-1:0] wr_cnt;
 logic [LINE_ABITS-1:0] line_width [0:N_LINE_BUF-1];   // real captured sample count per buffer line,
                                             // latched at end of each source line -- this
@@ -140,23 +155,33 @@ logic [LINE_ABITS-1:0] line_width [0:N_LINE_BUF-1];   // real captured sample co
 // source line. The reader uses the toggle as its "a new line is ready" event instead of
 // counting output lines, which is what made a source line appear for 2 or 4 output lines
 // (never 3) even though the real ratio is 2.871.
-logic [1:0] wr_done_idx;
+logic [8:0] wr_done_no;                  // number of the most recently completed source line
 logic       wr_done_tick;
 
-reg video_hs_r, video_vs_r;
+reg video_hs_r, video_vs_r, video_vbl_r;
 always_ff @(posedge clk) begin
-	video_hs_r <= video_hs;
-	video_vs_r <= video_vs;
+	video_hs_r  <= video_hs;
+	video_vs_r  <= video_vs;
+	video_vbl_r <= video_vbl;
 
-	if (video_hs & ~video_hs_r) begin              // new line
+	// The source line NUMBER drives the slot, and it restarts every frame. Without the reset
+	// the slot at frame start would rotate (263 mod 4 = 3), so the reader's k[1:0] would point
+	// at the wrong buffer on three frames out of four.
+	if (~video_vbl & video_vbl_r) begin            // vblank ends: first active line coming
+		wr_line_no  <= 0;
+		wr_line_idx <= 0;
+	end else if (video_hs & ~video_hs_r) begin     // new line
 		line_width[wr_line_idx] <= wr_cnt;         // latch this line's real sample count
-		wr_line_idx <= (wr_line_idx == N_LINE_BUF-1) ? 2'd0 : wr_line_idx + 2'd1;
-		wr_done_idx <= wr_line_idx;                // the line that just COMPLETED
-		wr_done_tick <= ~wr_done_tick;             // toggled once per completed source line
+		if (~video_vbl) begin                      // only ACTIVE lines advance the counter
+			wr_line_no  <= wr_line_no + 1'b1;
+			wr_line_idx <= wr_line_idx + 2'd1;     // wraps naturally at 4
+		end
+		wr_done_no   <= wr_line_no;                // the line that just COMPLETED
+		wr_done_tick <= ~wr_done_tick;
 		wr_cnt <= 0;
 	end else if (video_ce && ~video_hbl && ~video_vbl) begin
 		if (wr_cnt < MAX_LINE_SAMPLES - 1) begin
-			sd_buffer[wr_line_idx * (2**LINE_ABITS) + wr_cnt] <= {video_r, video_g, video_b};
+			sd_buffer[{wr_line_idx, wr_cnt}] <= {video_r, video_g, video_b};
 			wr_cnt <= wr_cnt + 1'b1;
 		end
 	end
@@ -273,13 +298,13 @@ end
 // clk edge, and the reader only samples it after TWO clk_pixel edges), the same argument the
 // old toggle relied on.
 reg wr_done_tick_meta, wr_done_tick_sync, wr_done_tick_prev;
-reg [1:0] wr_done_idx_meta, wr_done_idx_sync;
+reg [8:0] wr_done_no_meta, wr_done_no_sync;
 always_ff @(posedge clk_pixel) begin
 	wr_done_tick_meta <= wr_done_tick;
 	wr_done_tick_sync <= wr_done_tick_meta;
 	wr_done_tick_prev <= wr_done_tick_sync;
-	wr_done_idx_meta  <= wr_done_idx;
-	wr_done_idx_sync  <= wr_done_idx_meta;
+	wr_done_no_meta   <= wr_done_no;
+	wr_done_no_sync   <= wr_done_no_meta;
 end
 wire src_line_ready = (wr_done_tick_sync != wr_done_tick_prev);
 
@@ -288,17 +313,40 @@ reg active;
 reg [LINE_ABITS-1:0] sx;                 // current source sample index within the line
 reg [10:0] xcnt;
 reg [9:0] out_line_pair;                 // output line / 2 -- which real source line
+// ==================== PULL READER (2026-09-18) ====================
+//
+// The reader used to be ARRIVAL-DRIVEN: it showed whatever source line had just completed. That
+// makes the picture follow the writer's timing, so every time the VTOTAL servo dithers by one
+// line the whole image hops a line. Measured by diffing consecutive renders of a static frame:
+// ~2% of subpixels change on a frame where vtotal is unchanged (the source phase creeps 0.16
+// line/frame regardless), and ~14% on a frame where vtotal steps. That hop is the shimmer, and
+// no control-law change can remove it while the reader follows arrivals.
+//
+// Instead the reader now PULLS: a DDA fixes which source line belongs to which OUTPUT line, so
+// source line k is always drawn at the same cy. The 2/3 thickness pattern becomes STATIC, the
+// creep is absorbed by the line FIFO, and the servo's dither only moves arrival times inside the
+// buffer window instead of moving the picture.
+//
+//   src_index = (cy - VOUT_START) / R,  R = output lines per source line
+//             = (cy - VOUT_START) * (SRC_LINE_CLKS * clk_pixel) / (frameWidth * clk_pce)
+//
+// computed incrementally: add 1/R each output line. 1/R in 16.16 fixed point, from the two clock
+// parameters so it is right on every board (Nano 20K runs 42428 kHz, the others 42857).
+localparam int unsigned DDA_INC =
+	(64'd65536 * FRAME_W_NOM * PCE_CLK_KHZ) / (SRC_LINE_CLKS * (CLKFRQ));
+reg [24:0] dda_acc;                      // 9.16 fixed point: integer part is the source line
+wire [8:0] src_index = dda_acc[24:16];
+wire [8:0] src_index_dbg /* verilator public_flat_rd */ = src_index;
+wire [8:0] wr_done_no_dbg /* verilator public_flat_rd */ = wr_done_no_sync;
 reg [1:0] line_idx_rd;
-reg [1:0] pend_idx;                      // completed line waiting for an output-line boundary
-reg [LINE_ABITS-1:0] pend_width;
-reg pend_valid;
+reg [LINE_ABITS-1:0] cur_line_width_r;
 reg [LINE_ABITS-1:0] cur_line_width;     // latched from line_width[] at the start of
                                           // each output line pair -- CDC-crossed as a
                                           // slow-changing bus, same discipline as
                                           // vram0_cache's own registered crossings.
 reg [9:0] cy_r;
 
-wire [LINE_ABITS+1:0] mem_rd_addr = line_idx_rd * (2**LINE_ABITS) + sx;
+wire [LINE_ABITS+1:0] mem_rd_addr = {line_idx_rd, sx};
 logic [8:0] sd_rdata;
 always_ff @(posedge clk_pixel) sd_rdata <= sd_buffer[mem_rd_addr];
 
@@ -314,7 +362,7 @@ always @(posedge clk_pixel) begin
 	else if (cx == x_stop) begin active_t = 0; active <= 0; end
 
 	if (active_t | active) begin
-		xcnt_next = xcnt + cur_line_width;
+		xcnt_next = xcnt + cur_line_width_r;
 		xcnt <= xcnt_next;
 		if (xcnt_next >= act_w) begin
 			xcnt <= xcnt_next - act_w;
@@ -323,29 +371,18 @@ always @(posedge clk_pixel) begin
 	end
 
 	cy_r <= cy;
-	// A completed source line is REMEMBERED here...
-	if (src_line_ready) begin
-		pend_idx   <= wr_done_idx_sync;
-		pend_width <= line_width[wr_done_idx_sync];
-		pend_valid <= 1'b1;
+	// The DDA decides which source line this output line shows. Reset at the top of the frame
+	// so the mapping is identical every frame -- that is what pins the 2/3 pattern.
+	if (cy == 0 && cy != cy_r) begin
+		dda_acc     <= 0;
+		line_idx_rd <= 0;
+	end else if (cy != cy_r && cy >= VOUT_START) begin
+		dda_acc     <= dda_acc + DDA_INC;
+		line_idx_rd <= src_index[1:0];
+		cur_line_width_r <= line_width[src_index[1:0]];
 	end
-	// ...but only ADOPTED at an output-line boundary. Switching source line in the middle of
-	// an output line puts two different lines in one displayed line, which is the very defect
-	// this change exists to remove -- sim/hdmi/tb_sd_buffer.cpp measured 93% torn lines when
-	// this was applied immediately.
-	//
-	// Adopting on every boundary (rather than every SECOND one, as the old cy[0]==0 rule did)
-	// is what gives the natural 2/3 pattern: a source line lasts 2.871 output lines at 720p,
-	// so it is shown twice when the next one is not ready yet and three times when it is.
-	// The old rule could only ever show 2 or 4, which is visibly uneven line thickness.
-	if (cy != cy_r) begin
-		if (pend_valid) begin
-			line_idx_rd    <= pend_idx;
-			cur_line_width <= pend_width;
-			pend_valid     <= 1'b0;
-		end
-		if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;   // OSD row counter only
-	end
+	if (cy != cy_r && cy[0] == 1'b0)
+		out_line_pair <= out_line_pair + 1'b1;   // OSD row counter only
 
 	if (cx == 0) begin sx <= 0; xcnt <= 0; end
 	if (cy == 0) begin out_line_pair <= 0; end
@@ -354,7 +391,9 @@ end
 // 9-bit RGB (3/3/3) -> 24-bit, bit-replication expansion (r3,r3,r3[2:1]), not a
 // palette step -- same technique pce2hdmi.sv uses for its default COLOR_BITS=3 case.
 always @(posedge clk_pixel) begin
-	if (active & v_active) begin
+	// Blank before VOUT_START too: until then src_index is still 0 and the writer may not have
+	// finished source line 0, so the reader would show the previous frame's occupant of slot 0.
+	if (active & v_active & (cy >= VOUT_START) & (src_index < 9'd242)) begin
 		if (overlay)
 			rgb <= {overlay_color[4:0],3'b0,overlay_color[9:5],3'b0,overlay_color[14:10],3'b0};
 		else

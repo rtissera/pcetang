@@ -25,9 +25,12 @@ int main(int argc, char **argv) {
     long long pce_clk = 0;
     int src_x = 0, src_y = 0;
     int frames_wanted = argc > 1 ? atoi(argv[1]) : 3;
+    int settle = argc > 2 ? atoi(argv[2]) : 1;   // skip the servo's pull-in
 
     dut->resetn = 0; dut->overlay = 0; dut->overlay_color = 0;
     int tears = 0, out_lines = 0, prev_cy = -1, line_val = -1; bool line_dirty = false;
+    int line0_n = 0, tear_show = 0;
+    int lag_min = 9999, lag_max = -9999; long lag_sum = 0, lag_n = 0;
     std::map<int,int> shown;          // source value -> how many output lines showed it
     std::map<int,int> tear_cy;        // where in the frame the torn lines are
     int last_frame = 0, frames = 0;
@@ -52,12 +55,31 @@ int main(int argc, char **argv) {
             dut->clk_pixel = 0; dut->eval();
             dut->clk_pixel = 1; dut->eval();
             int cy = dut->rootp->pce2hdmi_sd__DOT__cy_dbg;
+            {   // where does source line 0 complete, in output lines?
+                static int prev_no = -1;
+                int no = dut->rootp->pce2hdmi_sd__DOT__wr_done_no_dbg;
+                if (no == 0 && prev_no != 0 && frames >= settle && line0_n < 6) {
+                    printf("   frame %d: source line 0 completed at output cy=%d\n", frames, cy);
+                    line0_n++;
+                }
+                prev_no = no;
+            }
+            // Measure what is DISPLAYED, not what the buffer holds: the module blanks outside
+            // its own active window, and a blanked pixel is not a tear.
             int active = dut->rootp->pce2hdmi_sd__DOT__active;
-            int val = dut->rootp->pce2hdmi_sd__DOT__sd_rdata & 7;
+            unsigned rgbv = dut->rootp->pce2hdmi_sd__DOT__rgb;
+            int val = (rgbv >> 21) & 7;        // top 3 bits of the red channel = the source value
             if (cy != prev_cy) {                    // new output line
+                if (frames >= settle && dut->rootp->pce2hdmi_sd__DOT__src_index_dbg < 242) {
+                    int lag = (int)dut->rootp->pce2hdmi_sd__DOT__wr_done_no_dbg
+                            - (int)dut->rootp->pce2hdmi_sd__DOT__src_index_dbg;
+                    if (lag < lag_min) lag_min = lag;
+                    if (lag > lag_max) lag_max = lag;
+                    lag_sum += lag; lag_n++;
+                }
                 // Skip the first frame: the buffers start empty, so its lines are not
                 // representative of steady state.
-                if (frames >= 1) {
+                if (frames >= settle) {
                     if (line_dirty) { tears++; tear_cy[prev_cy]++; }
                     if (line_val > 0) shown[line_val]++;
                     out_lines++;
@@ -67,9 +89,21 @@ int main(int argc, char **argv) {
             }
             // Zeros are buffer entries never written yet (Verilator zero-init) and the
             // blanking margins of a short source line -- they are not evidence of tearing.
+            if (frames == settle+1 && cy == 200 && active) {   // dumpline
+                static int n=0; if (n<24) { printf("%s%d", n?",":"      cy=200 vals: ", val); n++; }
+                if (n==24) { printf("   (src_index=%d line_idx=%d)\n",
+                    dut->rootp->pce2hdmi_sd__DOT__src_index_dbg, 0); n++; }
+            }
             if (active && val != 0) {
                 if (line_val < 0) line_val = val;
-                else if (val != line_val) line_dirty = true;
+                else if (val != line_val) {
+                    if (!line_dirty && tear_show < 6) {
+                        printf("      torn cy=%d: showed %d then %d (src_index=%d)\n",
+                               cy, line_val, val, dut->rootp->pce2hdmi_sd__DOT__src_index_dbg);
+                        tear_show++;
+                    }
+                    line_dirty = true;
+                }
             }
             t_pix += T_PIX;
         }
@@ -91,6 +125,8 @@ int main(int argc, char **argv) {
         for (auto &kv : tear_cy) if (kv.first < 720) in_active += kv.second;
         printf("of %d torn lines, %d are inside the 720 active output lines\n", tears, in_active);
     }
+    printf("reader lag behind writer (source lines): min=%d max=%d mean=%.2f   [must stay in 0..%d]\n",
+           lag_min, lag_max, lag_n ? (double)lag_sum/lag_n : 0.0, 2);
     printf("%s\n", tears == 0 ? "PASS: no line ever showed two source lines" : "FAIL: torn lines present");
     delete dut;
     return tears == 0 ? 0 : 1;
