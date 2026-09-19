@@ -41,7 +41,7 @@ entity nano20k_pll is
    port (
       clkin      : in  std_logic;    -- 27 MHz crystal
 
-      clk_pce    : out std_logic;    -- 42.4286 MHz -- PCE/SGX/TG16 core master clock
+      clk_pce    : out std_logic;    -- 43.2 MHz -- PCE/SGX/TG16 core master clock
       clk_pce_d2 : out std_logic;    -- 21.6 MHz -- spare tap (CLKOUTD), unused so far
 
       clk_sdram  : out std_logic;    -- 135 MHz -- on-package SDRAM (sdram32.sv), same net
@@ -129,17 +129,17 @@ begin
    generic map (
       FCLKIN    => "27",
       DEVICE    => "GW2AR-18C",
-      -- 2026-09-17: 43.2 -> 42.4286 MHz (27 * 11/7). The CD-DA end-position work pushed this
-      -- board (90% logic) past its own 43.2 MHz constraint -- best of a 4-way place/route sweep
-      -- was 42.431 MHz with 51 setup violations. 42.4286 sits just under that, and relaxing the
-      -- target also lets the placer stop fighting a goal it cannot reach.
-      -- Accuracy: the exact PCE rate is 42.9545 MHz (12x NTSC colourburst). 27 * 35/22 would hit
-      -- it exactly but needs PFD 27/22 = 1.23 MHz, far below this rPLL's ~3 MHz floor. With
-      -- PFD >= 3 MHz the reachable neighbours are 43.2 (+0.57%), 42.4286 (-1.22%) and 42.0
-      -- (-2.2%). So this trades a little speed accuracy for a board that closes timing at all.
-      IDIV_SEL  => 6,           -- /7  -> PFD 3.857 MHz
-      FBDIV_SEL => 10,          -- x11 -> 42.4286 MHz
-      ODIV_SEL  => 16           -- VCO 678.9 MHz
+      -- RESTORED to 43.2 MHz on 2026-09-19, after being dropped to 42.4286 in b63865c.
+      -- That drop was blamed on the CD-DA work pushing a 90%-full board over the edge (183
+      -- setup violations, Fmax 42.367). The real cause was a stray `syn_preserve` on the
+      -- HuC6280 microcode register, which forced the microcode table out of BSRAM and into
+      -- ~660 LUTs of congestion -- see HUC6280_MC.vhd's PRESERVE_MI generic. With that back
+      -- to 0 and place_option 1, this board closes at 43.2 with 0 violations and Fmax
+      -- 44.475 (+2.95%), MORE margin than the slow clock ever had (+1.73%). Games are no
+      -- longer 1.22% slow.
+      IDIV_SEL  => 4,           -- /5  -> PFD 5.4 MHz
+      FBDIV_SEL => 7,           -- x8  -> 43.2 MHz
+      ODIV_SEL  => 16           -- VCO 691.2 MHz
    )
    port map (
       CLKOUT   => clk_pce_i,

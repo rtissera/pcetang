@@ -21,7 +21,9 @@ entity HUC6280_CPU is
 		-- on this exact repo that tying an unused debug path off at the top level does
 		-- NOT prune it (it cost Primer 25K 721 and Nano 20K 20 violations). A generic
 		-- constant folds at elaboration and the logic genuinely disappears.
-		DBG_PROBES : integer := 0
+		DBG_PROBES : integer := 0;
+		-- See HUC6280_MC's own generic comment: per-board BSRAM<->logic trade.
+		PRESERVE_MI : integer := 0
 	);
 	port( 
 		CLK		: in std_logic;
@@ -253,6 +255,7 @@ begin
 	end process;
 	
 	MCODE: entity work.HUC6280_MC
+	generic map ( PRESERVE_MI => PRESERVE_MI )
 	port map (
 		CLK		=> CLK,
 		RST_N		=> RST_N,

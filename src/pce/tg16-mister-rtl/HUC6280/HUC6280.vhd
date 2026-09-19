@@ -16,7 +16,9 @@ entity HUC6280 is
 		-- Pass-through to HUC6280_CPU's DBG_PROBES -- see that entity's header. Default
 		-- 0: the probes are off unless a board explicitly asks, because they cost real
 		-- timing on the microcode -> PSG path.
-		DBG_PROBES : integer := 0
+		DBG_PROBES : integer := 0;
+		-- See HUC6280_MC's own generic comment.
+		PRESERVE_MI : integer := 0
 	);
 	port(
 		CLK		: in std_logic;
@@ -143,7 +145,7 @@ begin
 	
 	
 	CORE : entity work.HUC6280_CPU
-	generic map ( DBG_PROBES => DBG_PROBES )
+	generic map ( DBG_PROBES => DBG_PROBES, PRESERVE_MI => PRESERVE_MI )
 	port map (
 		CLK 		=> CLK,
 		RST_N 	=> RST_N,

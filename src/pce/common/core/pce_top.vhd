@@ -138,7 +138,13 @@ entity pce_top is
 		VT_PATH_A : integer := 1;
 		-- Pass-through to HUC6280_CPU's DBG_PROBES (via HUC6280.vhd). Default 0.
 		-- Only Console 60K's debug build turns these on; they cost real timing.
-		DBG_PROBES : integer := 0
+		DBG_PROBES : integer := 0;
+		-- PRESERVE_MI (2026-09-19): per-board BSRAM<->logic trade on the HuC6280 microcode
+		-- table -- see HUC6280_MC.vhd's own generic comment for the measured numbers. 1 costs
+		-- ~660 LUTs and frees ~9 BSRAM blocks. Console 60K sets it because SuperGrafx makes
+		-- that board BSRAM-bound; Primer 25K and Nano 20K are LOGIC-bound and MUST leave it 0
+		-- or they stop routing.
+		PRESERVE_MI : integer := 0
 	);
 	port(
 		RESET			: in  std_logic;
@@ -593,7 +599,7 @@ generate_NOCHEAT: if (LITE /= 0) generate begin
 end generate;
 
 CPU : entity work.HUC6280
-generic map ( VT_PATH_A => VT_PATH_A, DBG_PROBES => DBG_PROBES )
+generic map ( VT_PATH_A => VT_PATH_A, DBG_PROBES => DBG_PROBES, PRESERVE_MI => PRESERVE_MI )
 port map(
 	CLK 		=> CLK,
 	RST_N		=> RESET_N,

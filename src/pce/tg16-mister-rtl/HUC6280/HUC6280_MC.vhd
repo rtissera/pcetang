@@ -5,6 +5,15 @@ library work;
 use work.HUC6280_PKG.all;
 
 entity HUC6280_MC is
+    -- PRESERVE_MI (2026-09-19): selects the measured BSRAM<->logic trade described at the
+    -- syn_preserve attribute below. 0 = donor behaviour (table in BSRAM, ~262 LUT on
+    -- Primer 25K); 1 = flops preserved and the table pushed into logic (~920 LUT, -9 BSRAM
+    -- blocks). It MUST be per-board: Console 60K needs it because SuperGrafx makes that
+    -- board BSRAM-bound, while Primer 25K and Nano 20K are LOGIC-bound and it costs them
+    -- the whole routing margin. An unconditional attribute reached main by accident in
+    -- 60b061f (a commit labelled "docs") and broke both small boards -- 397 unrouted nets
+    -- on Nano 20K, 20 on Primer 25K -- which is exactly what the comment below predicted.
+    generic ( PRESERVE_MI : integer := 0 );
     port( 
         CLK		: in std_logic;
 		  RST_N	: in std_logic;
@@ -6974,12 +6983,15 @@ architecture rtl of HUC6280_MC is
 	--   Primer 25K   42.907 -> 42.879 (-0.07%) 94% -> 97%       36/56 -> 27/56
 	--   Console 60K  43.056 -> 42.917 (-0.3%)  32% -> 34%       78/118 -> 69/118
 	-- Consistently -9 BSRAM blocks for +500..870 LUTs. It is NOT a timing lever (the critical
-	-- path is route-dominated: 12.8 ns route vs 8.4 ns cell), so it is NOT on main. Use it only
+	-- path is route-dominated: 12.8 ns route vs 8.4 ns cell), so it is OFF BY DEFAULT. Use it only
 	-- when BSRAM binds and logic is free -- i.e. Console 60K for SuperGrafx (previously 113/118,
 	-- razor-thin) or a full-frame HDMI buffer (~20-33 blocks). See session memory
 	-- pcetang_microcode_path_analysis.md.
 	attribute syn_preserve : integer;
-	attribute syn_preserve of MI : signal is 1;
+	-- Value is CONDITIONAL, same technique as huc6270.vhd's SGX_BUILD attribute: a generic
+	-- folds at elaboration so the logic genuinely differs per board, and a `generate` cannot
+	-- carry an attribute for a signal declared in the enclosing architecture.
+	attribute syn_preserve of MI : signal is PRESERVE_MI;
 	signal ALUFlags	: ALUCtrl_r;
 
 begin

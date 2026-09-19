@@ -90,7 +90,15 @@ set_option -bit_compress 1
 # place1/route1 183 (42.367), place2/route0 421 (41.772), place0/route1 51 (42.431) -- best.
 # With the clock then moved to 42.4286 MHz (see nano20k_pll.vhd), place0/route1 closes at 0/0,
 # Fmax 42.466. place_option 2 at the new clock is NOT close: 1025 setup violations, 40.637 MHz.
-set_option -place_option 0
+# 2026-09-19: place_option 0 -> 1. With PRESERVE_MI back to 0 (the microcode table returns
+# to BSRAM, see HUC6280_MC.vhd) this board routes again, but place_option 0 then left 53
+# setup-violated endpoints at 42.116 MHz against a 42.429 requirement. Identical netlist
+# (18571 LUT, 42/46 BSRAM) placed with option 1: 0 violations, 43.164 MHz, +1.73% margin.
+# Option 2 was swept too and converges to a byte-identical bitstream, so 1 is chosen simply
+# as the lower-numbered of the two that work. Do not move this back to 0 without re-running
+# the sweep -- this board is at 90% logic / 92% BSRAM and placement, not area, is what
+# decides whether it closes.
+set_option -place_option 1
 set_option -route_option 1
 
 # TRIED, REAL NO-OP (2026-08-31): `-maxfan 16` (Gowin's SYN04 "Fanout Guide") was tested

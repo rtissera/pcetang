@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Tang Nano 20K, pcetang Phase 1. Two real rPLLs (nano20k_pll.vhd, unchanged from
-# NECTang): core master (clk_pce, 42.4286 MHz -- see nano20k_pll.vhd) and HDMI (135/27 MHz, both now real loads
+# NECTang): core master (clk_pce, 43.2 MHz) and HDMI (135/27 MHz, both now real loads
 # via sdram32.sv and pce2hdmi.sv respectively -- unlike NECTang's own bring-ups, which
 # never load both at once). The 135 MHz net is declared once, as clk_sdram -- see below
 # for why not also as clk_135 (nano20k_pll.vhd's own port name for the same net).
@@ -14,7 +14,7 @@
 
 create_clock -name clk -period 37.037 [get_ports {clk}]
 
-create_generated_clock -name clk_pce   -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 11 [get_nets {clk_pce}]
+create_generated_clock -name clk_pce   -source [get_ports {clk}] -master_clock clk -divide_by 5 -multiply_by 8 [get_nets {clk_pce}]
 create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -multiply_by 5 [get_nets {clk_sdram}]
 
 # vram0_cache.vhd drives sdram32's RAM_A_* directly from the clk_pce domain -- same CDC

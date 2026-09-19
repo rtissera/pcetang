@@ -2786,8 +2786,11 @@ begin
    -- Turning them off buys back real margin. The trace tags 0xE0-0xE8 that read them now
    -- report zeros; the CD tags this project actually uses (cdprog, 0xA5/0xA6/0xB0) come
    -- from the CD path and are unaffected.
+   -- PRESERVE_MI => 1: this board runs SuperGrafx and the Arcade Card and is BSRAM-bound
+   -- (110/118), so trading ~660 LUTs of its very large logic surplus for ~9 BSRAM blocks is
+   -- the right way round here. Primer 25K and Nano 20K are logic-bound and leave it 0.
    generic map (LITE => 0, EXT_VRAM0 => 0, NO_CD => 0, AC_BUILD => 1, DBG_PROBES => 0,
-                CDDA_DEPTH_LOG2 => 12)
+                PRESERVE_MI => 1, CDDA_DEPTH_LOG2 => 12)
    port map (
       RESET      => not core_resetn,
       COLD_RESET => not core_resetn,
