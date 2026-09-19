@@ -33,17 +33,35 @@ UART. GPL-3.0 throughout — see
 | | Console 60K | Primer 25K | Nano 20K |
 |---|---|---|---|
 | Builds clean (gw_sh, 0 errors, 0 timing violations) | yes | yes | yes |
-| **HuCard game runs on real hardware** | **yes** | not tested | not tested |
-| Video / audio / controllers on real hardware | yes | not tested | not tested |
-| CD-ROM²: system card boots off a CHD | **yes** | not tested | not tested |
-| **CD game playable, with CD-DA and ADPCM** | **yes** | not tested | not tested |
+| Bitstream loads, core runs on real hardware | yes | **yes** (HDMI sync locked) | never loaded |
+| **HuCard game runs on real hardware** | **yes** | no — no storage path | no — no storage path |
+| Video / audio / controllers on real hardware | yes | no | no |
+| CD-ROM²: system card boots off a CHD | **yes** | no | no |
+| **CD game playable, with CD-DA and ADPCM** | **yes** | no | no |
 | SuperGrafx | **all 4 tested boot and play** | compiled out | no room |
 | Arcade Card | compiled in, **games stall** | no room | no room |
 
-"Not tested" on Primer 25K and Nano 20K means exactly that: those bitstreams have never
-been loaded onto a board with a game. Neither board has an SD path in this design — their
-SD pins carry the FPGA↔BL616 UART link — so storage has to come over USB, which is
-untested.
+### Why only one board plays games
+
+This is not "untested" — it was measured, and the cause is the boards' hardware, not this
+core. **Console 60K has two USB-C ports; Primer 25K and Nano 20K have one, and the onboard
+debugger firmware owns it.** That leaves the BL616 MCU with no USB controller free to host
+storage on, and TangCore's model is "cores and ROMs live on storage attached to the BL616".
+
+- **Console 60K** — microSD wired to the BL616. This is the architecture everything assumes,
+  and it works.
+- **Primer 25K** — no microSD connector at all, and its single USB-C is the debugger port.
+  An instrumented USB mass-storage device presented to it recorded **zero USB configurations
+  and zero sector reads**, against a control of 4413 transactions on a PC. Nothing ever
+  enumerates. The core itself is fine: loaded over JTAG, it runs and HDMI locks.
+- **Nano 20K** — a microSD slot exists, but it is wired to **FPGA pins 80-85**, and the
+  BL616's SD-host pins are consumed by JTAG and by the UART link to the FPGA. The MCU has no
+  electrical path to the card.
+
+The fix for both is a small external MCU on the UART link the core already speaks
+(`iosys_bl616` takes ROMs over UART, so it costs no FPGA logic). That work is scoped but
+deliberately out of scope for this release, which is about the board that actually plays
+games.
 
 [docs/STATUS.md](docs/STATUS.md) is the honest long form — it is deliberately blunt about
 what is *verified on real hardware* versus what merely *compiles*, because those are very

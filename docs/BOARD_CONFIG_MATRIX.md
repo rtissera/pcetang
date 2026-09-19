@@ -1,24 +1,59 @@
 # Measured board configuration matrix
 
-Every number here is a real `gw_sh` post-place-and-route build, measured 2026-09-17/18.
-Nothing in this file is estimated. Configurations marked **not shipped** have never run on
-hardware; they are measurements, not recommendations.
+Every number here is a real `gw_sh` post-place-and-route build. Nothing is estimated.
+Configurations marked **not shipped** have never run on hardware; they are measurements,
+not recommendations.
 
 ## What each board ships today
+
+Measured 2026-09-20 by the `synthesis` CI workflow, which rebuilds all three boards and
+fails on any timing violation — so this table cannot silently drift from the tree again.
 
 | | Nano 20K (GW2AR-18C) | Primer 25K (GW5A-25A) | Console 60K (GW5AT-60B) |
 |---|---|---|---|
 | Setup / hold violations | 0 / 0 | 0 / 0 | 0 / 0 |
-| Core clock | 42.4286 MHz | 42.857 MHz | 42.857 MHz |
-| Fmax (margin) | 42.466 (+0.09%) | 42.907 (+0.12%) | 43.056 (+0.46%) |
-| Logic | 18613/20736 (90%) | 21509/23040 (94%) | 19173/59904 (32%) |
-| BSRAM | 40/46 (87%) | 36/56 (65%) | 78/118 (66%) |
-| Binding constraint | logic + timing | logic + routing | BSRAM |
-| Hardware-tested | never | never | yes, 5 CD games |
-| Speed accuracy | 1.22% slow | 0.23% slow | 0.23% slow |
+| Core clock | **43.200 MHz** | 42.857 MHz | 42.857 MHz |
+| Fmax (margin) | 44.475 (**+2.95%**) | 43.389 (+1.24%) | 42.902 (+0.105%) |
+| Logic | 18571/20736 (90%) | 21664/23040 (**95%**) | 27005/59904 (46%) |
+| BSRAM | 42/46 (**92%**) | 38/56 (68%) | 110/118 (**94%**) |
+| Binding constraint | logic + BSRAM | logic | BSRAM + timing |
+| Speed accuracy | exact | 0.23% slow | 0.23% slow |
+| Bitstream runs on hardware | never loaded | yes (HDMI locks) | yes |
+| **Plays games on hardware** | **no — no storage path** | **no — no storage path** | **yes, 13 titles** |
 
-HuCard, CD-ROM², CD-DA, ADPCM and the SF2' mapper are in on all three. The Arcade Card and
-SuperGrafx are out on all three.
+### Features per board
+
+| | Nano 20K | Primer 25K | Console 60K |
+|---|---|---|---|
+| HuCard `.pce` | yes | yes | yes |
+| HuCard > 832 KB | yes | yes | **yes, HW-confirmed** |
+| SF2' mapper (2560 KB) | yes | yes | yes |
+| CD-ROM² + CD-DA + ADPCM | built | built | **yes, HW-confirmed** |
+| SuperGrafx | no (no room) | no (`LITE => 1`) | **yes, all 4 titles** |
+| Arcade Card | no (no room) | no (no room) | built, **games stall** |
+| VRAM0 | SDRAM + prefetch | SDRAM + prefetch | on-chip |
+| PSG path | Path 0 (BRAM) | Path A | Path A |
+
+### What inverted since the 2026-09-17 revision of this file
+
+- **Console 60K is now the tightest board on margin** (+0.105%) and nearly out of BSRAM
+  (94%) — SuperGrafx and the Arcade Card cost exactly that. The two small boards now have
+  10–30x more timing headroom than it does, the reverse of the long-standing assumption.
+- **Nano 20K runs at the full 43.200 MHz**, not 42.4286. The 1.22% slowdown recorded below
+  is retired: no microcode pipelining was needed, the cause was a stray `syn_preserve`
+  attribute that had reached `main` inside a commit labelled "docs".
+- **SuperGrafx and the Arcade Card are no longer out on all three** — both are in on
+  Console 60K.
+
+### Why only one board plays games
+
+Not a property of this core, and measured rather than assumed. **Console 60K has two USB-C
+ports; Primer 25K and Nano 20K have one, and the onboard debugger firmware owns it**, so
+their BL616 has no USB controller free to host storage on. Primer 25K additionally has no
+microSD at all; Nano 20K has one, but it is wired to **FPGA pins 80-85** where the MCU
+cannot reach it. An instrumented USB mass-storage device presented to the Primer recorded
+zero USB configurations and zero sector reads, against 4413 transactions for the same
+device on a PC. See `STATUS.md`.
 
 ## Measured configurations that are better, but NOT SHIPPED
 
@@ -87,12 +122,24 @@ slow audio — audible, and not worth it.
 shedding 1500–2000 LUTs is the single change that could make the Arcade Card fit on Nano's logic
 budget, and freeing logic at 90% utilisation may also relieve the routing congestion that dominates
 the critical path. Both effects are plausible and unmeasured. It is also real work on the module
-that took the CD stack from "never boots" to five playable games, so it needs the whole CD
+that took the CD stack from "never boots" to a working CD path (13 titles hardware-tested), so it needs the whole CD
 simulation suite as regression.
 
-**What this means for release claims:** full PC Engine CD including Arcade Card titles on
-Console 60K and Primer 25K; CD-ROM² and Super CD-ROM² without the Arcade Card on Nano 20K. That
-mirrors the real hardware tiers, where the Arcade Card was a separate purchase.
+**What this means for release claims — REVISED 2026-09-20.** The paragraph that stood here
+said "full PC Engine CD including Arcade Card titles on Console 60K and Primer 25K". Both
+halves were wrong, and this is the one place in this file where being wrong would leak
+straight into a public claim, so state it exactly:
+
+- **Console 60K**: HuCards (including >832 KB), CD-ROM² and Super CD-ROM² with CD-DA and
+  ADPCM, and all four SuperGrafx titles — confirmed on hardware across 13 titles. The
+  Arcade Card is compiled in but **its games stall**, so it is not a claim.
+- **Primer 25K and Nano 20K**: build clean and the core runs, but **neither plays a game**,
+  because neither board's MCU can reach storage. Not a CD-tier distinction at all — a
+  storage one. See "Why only one board plays games" above.
+
+So the honest headline is one board, stated precisely, plus a measured explanation for the
+other two. The Arcade Card tier mirroring real hardware remains an aspiration, not a
+shipped feature.
 
 ## Measured dead ends — do not retry without new evidence
 

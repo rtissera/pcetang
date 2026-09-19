@@ -1,6 +1,6 @@
 # Where this core actually stands
 
-Last updated 2026-09-18. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-19. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
@@ -70,20 +70,22 @@ Arcade Card RAM or registers.
 
 | | Console 60K | Primer 25K | Nano 20K |
 |---|---|---|---|
-| Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes (at a reduced clock, see below) |
-| Core clock | 42.857 MHz | 42.857 MHz | **42.4286 MHz** (was 43.2; games run 1.22% slow) |
-| BSRAM | 78/118 | 36/56 | 40/46 |
-| **HuCard runs on real hardware** | **YES** | not tested | not tested |
-| Video on real hardware | **locked, stable, 4:3** | not tested | not tested |
-| Audio on real hardware | works (PSG) | not tested | not tested |
-| Controllers on real hardware | works (DS2 P1) | not tested | not tested |
-| **CD game runs on real hardware** | **YES** — Rondo, R-Type Complete CD, Prince of Persia, Bonk III, DD2 all playable | not tested | not tested |
-| CD-DA music on real hardware | **YES, full rate** | not tested | not tested |
-| ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | not tested | not tested |
-| CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
+| Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
+| Core clock | 42.857 MHz | 42.857 MHz | **43.200 MHz** (full speed restored 2026-09-19) |
+| Timing margin | +0.105% | +1.24% | +2.95% |
+| Logic / BSRAM | 27005/59904, 110/118 | 21664/23040, 38/56 | 18571/20736, 42/46 |
+| Bitstream loads, core runs on hardware | yes | **yes, 2026-09-19** (HDMI sync locked) | **never loaded** |
+| **HuCard runs on real hardware** | **YES** | no — no storage path | no — no storage path |
+| Video on real hardware | **locked, stable, 4:3** | sync only, no ROM to run | not run |
+| Audio on real hardware | works (PSG) | no | no |
+| Controllers on real hardware | works (DS2 P1) | no | no |
+| **CD game runs on real hardware** | **YES** — Rondo, R-Type Complete CD, Prince of Persia, Bonk III, DD2 all playable | no | no |
+| CD-DA music on real hardware | **YES, full rate** | no | no |
+| ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | no | no |
+| CD-ROM² | compiled in, **runs games** | compiled in, **no storage path** | compiled in, **no storage path** |
 | Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
 | SuperGrafx | **on — all 4 tested boot and play** | off (`LITE => 1`) | off (no room) |
-| **HuCard > 832 KB** | **FIXED + HW-CONFIRMED 2026-09-19** | same fix, untested | same fix, untested |
+| **HuCard > 832 KB** | **FIXED + HW-CONFIRMED 2026-09-19** (13 titles) | same fix, built | same fix, built |
 
 Exact generic maps, so this cannot drift from the source:
 
@@ -203,7 +205,17 @@ cross-port RAM collision (counted: broken game 0, working game 2), and timing (0
 0 hold, worst paths nowhere near the video logic). Kept here because they are all still
 true and stop the next person re-walking them.
 
-## Known debt: Nano 20K core clock (2026-09-17)
+## Known debt: Nano 20K core clock (2026-09-17) — RETIRED 2026-09-19
+
+**This debt is paid. Nano 20K runs at the full 43.200 MHz again, with +2.95% margin — the
+largest of the three boards.** No microcode pipelining was needed. The real cause was a
+stray `syn_preserve` attribute on the HuC6280 microcode register that had reached `main`
+inside a commit labelled "docs"; it pushed the microcode table out of BSRAM into ~660 LUTs
+and stopped both small boards routing. It is now a per-board generic (`PRESERVE_MI`), set
+only on Console 60K where the BSRAM saving helps. The account below is kept because the
+PLL arithmetic and the sweep results are still correct and still useful.
+
+
 
 The CD-DA end-position work added ~307 LUTs, and Nano 20K was already at 90% logic. It went to 183
 setup violations; a four-way place/route sweep only reached 42.431 MHz against a 43.2 MHz
@@ -385,11 +397,37 @@ joypad polarity and d-pad bits, DS2 readers, 48 kHz audio strobe). They synthesi
 close timing. **No HuCard has booted on either, and no pad has been plugged into
 either.** A clean gw_sh run proves synthesis and timing. It does not prove a picture.
 
-There is also a practical blocker, found 2026-09-18: **neither board has an SD path in
-this design.** `board_sdh_gpio_init()` needs GPIO 10-15, and on Primer 25K the FPGA↔BL616
-UART1 link uses 10/11 (Nano 20K uses 11/13) -- the same pins. Storage has to arrive over
-USB, and the Console 60K USB-A ports are wired to the FPGA's low-speed soft host rather
-than the BL616, so bring-up on those two boards is waiting on a USB-C OTG adapter.
+### The storage blocker, settled 2026-09-19 — it is the boards, not the core
+
+Earlier revisions of this file said bring-up was "waiting on a USB-C OTG adapter". That
+was wrong, and the real answer is worth stating precisely because it is measured rather
+than argued.
+
+**Console 60K has two USB-C ports. Primer 25K and Nano 20K have one, and the onboard
+debugger firmware owns it.** TangCore's model is that cores and ROMs live on storage
+attached to the BL616; on the two small boards the BL616 has no USB controller free and
+no SD it can reach.
+
+* **Primer 25K** — no microSD connector at all. An ESP32-S3 was programmed as a USB
+  mass-storage device presenting a clean USB 2.0, full-speed, FAT32 drive, instrumented to
+  count host activity. Plugged into the Primer it recorded **zero USB configurations and
+  zero sector reads**; the same device on a PC recorded 4413 SD transactions. Nothing ever
+  enumerates. Also ruled out by test: stick size and filesystem (irrelevant — nothing
+  enumerated), stale debugger firmware (ours is byte-identical to Sipeed's current
+  `2025030317`), and relocating our firmware to flash `0x0` (the bootrom rejects it; it is
+  linked for `0x40000`).
+* **Nano 20K** — a microSD slot exists, but it is wired to **FPGA pins 80-85**. The BL616's
+  SD-host pins are consumed by JTAG (TMS 16, TCK 10, TDI 14, TDO 12) and by UART1
+  (TX 11, RX 13), so the MCU has no electrical path to the card.
+
+The core itself is not implicated. Loaded over JTAG on Primer 25K, it runs and HDMI sync
+locks; the screen is black only because no ROM was delivered.
+
+**The fix is a small external MCU** on the UART link the core already speaks. `iosys_bl616`
+receives ROMs and CD sectors over UART, so an external companion costs **no FPGA logic** —
+which matters, because these boards sit at 95% and 90% logic utilisation. Controllers are
+unaffected either way: DualShock 2 pads are read directly in fabric and never pass through
+an MCU. That work is scoped and deliberately out of scope for this release.
 
 
 ## CD-ROM² — detail (2026-09-11)
