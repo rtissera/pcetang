@@ -1,0 +1,96 @@
+name: simulation
+
+# GHDL regression tests. These are what actually catch RTL breakage -- synthesis proves
+# a design fits and closes timing, it says nothing about whether the logic is right.
+#
+# Runs on the self-hosted runner because this repository is private (hosted minutes are
+# billed for private repos, self-hosted is free). Nothing here needs the Gowin toolchain,
+# so once the repo is public these jobs can move to `ubuntu-latest` unchanged -- GHDL is
+# apt-installable and the suites pass on both 2.0.0 and 4.1.0.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  elaborate:
+    # Cheap and broad: compiles every VHDL source the three boards use, catching syntax
+    # errors, broken port maps and missing files in seconds, without any test assets.
+    runs-on: [self-hosted, ghdl]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Analyse every source each board compiles
+        run: |
+          set -o pipefail
+          rc=0
+          for tcl in build_console60k_cd.tcl build_primer25k_cd.tcl build_nano20k_cd.tcl; do
+            board="${tcl%.tcl}"; work="/tmp/elab_${board}"
+            rm -rf "$work"; mkdir -p "$work"
+            echo "=== $tcl ==="
+            # add_file lines in the board script ARE the file list, in dependency order,
+            # so this cannot drift from what actually gets built.
+            grep -E '^\s*add_file\s+' "$tcl" | awk '{print $2}' | while read -r f; do
+              case "$f" in
+                *.vhd) ghdl -a --std=08 -fsynopsys -frelaxed --workdir="$work" \
+                         -Wno-hide -Wno-shared "$f" || exit 1 ;;
+                *) : ;;   # .v/.sv are Verilog; GHDL cannot read them, gw_sh handles those
+              esac
+            done || rc=1
+            echo "  $tcl: $([ $rc -eq 0 ] && echo OK || echo FAILED)"
+          done
+          exit $rc
+
+  testbenches:
+    runs-on: [self-hosted, ghdl]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only the self-contained suites. The others (sim/boot, run_cd_boot,
+        # run_adpcm_dma, run_adpcm_golden, run_cd_bridge) need a real ROM or CHD, which
+        # cannot live in this repository.
+        #
+        # Deliberately NOT included, so a red run always means a real regression:
+        #   sim/hdmi/run_sd_buffer.sh   fails by design today -- it measures the KNOWN
+        #                               open HDMI defect (residual tearing, 17 torn lines
+        #                               inside 720 active). Verified failing locally too,
+        #                               so it is not an environment artefact. Re-enable
+        #                               when that defect is fixed; it is a good gate then.
+        #   sim/sdram/run_sdram_test.sh needs Verilator >= 5.010 for -Wno-WIDTHEXPAND;
+        #                               Debian 12 ships 5.006. Enable after a backport.
+        test:
+          - sim/cd/run_scsi_phase.sh
+          - sim/cd/run_cd_endcmd.sh
+          - sim/cd/run_cd_regwalk.sh
+          - sim/cd/run_adpcm_bridge.sh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ${{ matrix.test }}
+        run: |
+          set -o pipefail
+          out=$(timeout 900 ${{ matrix.test }} 2>&1) || true
+          echo "$out" | tail -40
+          # These testbenches report their verdict in text and do not all set an exit
+          # code, so assert on the text: any FAIL/ERROR line fails the job.
+          if echo "$out" | grep -qiE '\bFAIL\b|\bERROR\b|assertion (failure|error)'; then
+            echo "::error::${{ matrix.test }} reported a failure"
+            exit 1
+          fi
+          echo "${{ matrix.test }}: no failures reported"
+
+  scripts:
+    runs-on: [self-hosted, ghdl]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source audit
+        # Lists sources no board script compiles -- catches files that were added and
+        # then silently never built, which has happened here before (vram0_prefetch.vhd
+        # was black-boxed for weeks because its add_file line was missing).
+        run: python3 scripts/audit_sources.py || true

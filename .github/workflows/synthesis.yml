@@ -1,0 +1,116 @@
+name: synthesis
+
+# Real gw_sh synthesis + place-and-route for all three boards, with a hard gate on
+# timing violations.
+#
+# WHY SELF-HOSTED: Gowin EDA is proprietary and cannot be redistributed into a hosted
+# runner. The open-source route (Yosys + nextpnr + Apicula) is not a substitute either --
+# GW5A support is weak, these sources are VHDL, and the timing margins here are razor
+# thin (+0.105% on Console 60K), so a different place-and-route would not reproduce the
+# bitstream that was actually validated on hardware.
+#
+# Runs on SER6MAX (Ryzen 9 6900HX), where Gowin Education lives at ~/gowin-edu.
+# Education edition needs no licence file, which is what makes this portable at all.
+#
+# SECURITY: this executes on a machine on the author's LAN. Keep it to this repository's
+# own branches -- never enable it for pull requests from forks.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+  schedule:
+    # Nightly, so a slow drift in timing margin is caught even without a push.
+    - cron: '0 2 * * *'
+
+jobs:
+  build:
+    runs-on: [self-hosted, gowin]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: console60k
+            tcl: build_console60k_cd.tcl
+            top: pcetang_console60k_cd
+          - board: primer25k
+            tcl: build_primer25k_cd.tcl
+            top: pcetang_primer25k_cd
+          - board: nano20k
+            tcl: build_nano20k_cd.tcl
+            top: pcetang_nano20k_cd
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Synthesise ${{ matrix.board }}
+        run: |
+          set -o pipefail
+          # A stale netlist is a real hazard here: rebuilding after only a shared
+          # (non-top-level) file changed can silently reuse the previous synthesis.
+          rm -rf impl/gwsynthesis impl/pnr
+          LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libfreetype.so.6 \
+          LD_LIBRARY_PATH=$HOME/gowin-edu/IDE/lib \
+          LIBGL_ALWAYS_SOFTWARE=1 \
+          xvfb-run -a -s "-screen 0 1024x768x24" \
+          $HOME/gowin-edu/IDE/bin/gw_sh ${{ matrix.tcl }} 2>&1 | tee gw_sh_${{ matrix.board }}.log
+
+      - name: Gate on timing and report resources
+        run: |
+          python3 - <<'PY'
+          import re, html, sys, glob, os
+          board = "${{ matrix.board }}"
+          top   = "${{ matrix.top }}"
+
+          bit = f"impl/pnr/{top}.bin"
+          if not os.path.exists(bit):
+              print(f"FAIL: no bitstream at {bit}"); sys.exit(1)
+
+          # Timing lives in the HTML timing report; flatten the tags and read the numbers.
+          tr = f"impl/pnr/{top}_tr_content.html"
+          if not os.path.exists(tr):
+              print(f"FAIL: no timing report at {tr}"); sys.exit(1)
+          t = html.unescape(re.sub('<[^>]+>', ' ', open(tr, errors='replace').read()))
+          t = re.sub(r'\s+', ' ', t)
+
+          setup = re.search(r'Numbers of Setup Violated Endpoints (\d+)', t)
+          hold  = re.search(r'Numbers of Hold Violated Endpoints (\d+)', t)
+          if not setup or not hold:
+              print("FAIL: could not parse violation counts"); sys.exit(1)
+          s, h = int(setup.group(1)), int(hold.group(1))
+          print(f"{board}: setup violations={s} hold violations={h}")
+
+          # Fmax vs constraint, per clock -- the margin is what actually drifts.
+          for m in re.finditer(r'(\w+) ([\d.]+)\(MHz\) ([\d.]+)\(MHz\)', t):
+              clk, req, act = m.group(1), float(m.group(2)), float(m.group(3))
+              print(f"  {clk}: constraint {req} MHz, actual {act} MHz ({(act/req-1)*100:+.3f}%)")
+
+          rpt = f"impl/pnr/{top}.rpt.txt"
+          if os.path.exists(rpt):
+              for line in open(rpt, errors='replace'):
+                  if re.match(r'\s+(Logic|Register|BSRAM|DSP)\s+\|', line):
+                      print("  " + line.strip())
+
+          if s or h:
+              print(f"FAIL: {board} does not close timing"); sys.exit(1)
+          print(f"PASS: {board} closes timing, bitstream {os.path.getsize(bit)} bytes")
+          PY
+
+      - name: Checksum
+        run: md5sum impl/pnr/${{ matrix.top }}.bin impl/pnr/${{ matrix.top }}.fs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bitstream-${{ matrix.board }}
+          path: |
+            impl/pnr/${{ matrix.top }}.bin
+            impl/pnr/${{ matrix.top }}.fs
+            impl/pnr/${{ matrix.top }}.rpt.txt
+            gw_sh_${{ matrix.board }}.log
+          if-no-files-found: error
+
+      - name: Clean the workspace
+        if: always()
+        # Each run is ~2 GB of intermediates; three boards nightly fills a disk fast.
+        run: rm -rf impl/gwsynthesis impl/pnr
