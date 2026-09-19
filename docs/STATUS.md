@@ -181,8 +181,20 @@ Lesson worth keeping: a clean sim result bounds what the sim covered and nothing
   bitstream: unchanged. Still the CD interrupt path.
 - **1943 Kai**: occasional slowdowns and unreliable bonus pickup (possible VDC sprite
   collision). Present since day one, NOT a regression -- confirmed by the user.
-- **HDMI**: lock is imperfect for the first second or two on every title, and Parodius shows
-  rolling white/black lines once stable (likely the background-colour path).
+- **HDMI: four separate defects seen on real hardware, all still open.** Collected here so
+  they are not lost; none blocks play, all are visible.
+  1. **Lock is imperfect for the first second or two on EVERY title.** Reported across
+     Bomberman '94, Parodius, PC Genjin 3 and 1943 Kai on 2026-09-19 -- worst on the first
+     three, "less visible" on 1943 Kai. Probably the vsync servo re-acquiring, but it has
+     never been instrumented.
+  2. **Parodius Da! shows rolling white/black lines once stable.** Only title seen doing it
+     so far; likely the background-colour path rather than the scandoubler, since the other
+     three are clean after lock.
+  3. **~2.7% residual torn output lines** (down from 17.2% via the three line buffers).
+     Measured in `sim/hdmi`, confirmed by eye: "I can barely see any corruption."
+  4. **Low-level shimmer, believed inherent.** The exact lock needs 755.16 output lines per
+     source frame, so the servo dithers between 755 and 756. A PLL search for an exact ratio
+     was exhausted; see the HDMI notes in session memory.
 
 Six mechanisms were eliminated with measurements before the real cause was found -- VRAM1
 on SDRAM, ROM size/mapping/headers, the RTL itself (donor-identical and it simulates
