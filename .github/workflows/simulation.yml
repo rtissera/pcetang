@@ -23,25 +23,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Analyse every source each board compiles
+      - name: Analyse every VHDL source the three boards compile
         run: |
-          set -o pipefail
+          # The UNION of all three add_file lists, de-duplicated, keeping first
+          # occurrence. Deliberately not per-board:
+          #
+          #   - console60k legitimately omits vram0_prefetch.vhd (it builds with
+          #     EXT_VRAM0 => 0 so the generate is off, and gw_sh tolerates the missing
+          #     entity). GHDL's analysis is stricter and wants it regardless, so a
+          #     per-board pass reports a failure that is not real.
+          #   - nano20k is listed first because its list is the most complete, which
+          #     makes the merged order a valid bottom-up analysis order.
+          #
+          # Verilog (.v/.sv) is excluded: GHDL cannot read it, gw_sh handles those.
+          work=/tmp/elab_union
+          rm -rf "$work"; mkdir -p "$work"
+          for tcl in build_nano20k_cd.tcl build_primer25k_cd.tcl build_console60k_cd.tcl; do
+            grep -E '^\s*add_file\s+' "$tcl" | awk '{print $2}'
+          done | awk '!seen[$0]++' | grep '\.vhd$' > /tmp/elab_list.txt
+          echo "analysing $(wc -l < /tmp/elab_list.txt) VHDL files"
+
           rc=0
-          for tcl in build_console60k_cd.tcl build_primer25k_cd.tcl build_nano20k_cd.tcl; do
-            board="${tcl%.tcl}"; work="/tmp/elab_${board}"
-            rm -rf "$work"; mkdir -p "$work"
-            echo "=== $tcl ==="
-            # add_file lines in the board script ARE the file list, in dependency order,
-            # so this cannot drift from what actually gets built.
-            grep -E '^\s*add_file\s+' "$tcl" | awk '{print $2}' | while read -r f; do
-              case "$f" in
-                *.vhd) ghdl -a --std=08 -fsynopsys -frelaxed --workdir="$work" \
-                         -Wno-hide -Wno-shared "$f" || exit 1 ;;
-                *) : ;;   # .v/.sv are Verilog; GHDL cannot read them, gw_sh handles those
-              esac
-            done || rc=1
-            echo "  $tcl: $([ $rc -eq 0 ] && echo OK || echo FAILED)"
-          done
+          while read -r f; do
+            if ! ghdl -a --std=08 -fsynopsys -frelaxed --workdir="$work" \
+                      -Wno-hide -Wno-shared "$f"; then
+              echo "::error file=$f::GHDL analysis failed"
+              rc=1
+            fi
+          done < /tmp/elab_list.txt
+          [ $rc -eq 0 ] && echo "all sources analyse cleanly"
           exit $rc
 
   testbenches:
