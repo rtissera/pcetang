@@ -19,6 +19,11 @@ jobs:
     # Cheap and broad: compiles every VHDL source the three boards use, catching syntax
     # errors, broken port maps and missing files in seconds, without any test assets.
     runs-on: [self-hosted, ghdl]
+    # SECURITY: these run on a self-hosted runner on the author's LAN. Allow pushes,
+    # dispatches and schedules, and PRs raised from a branch INSIDE this repository --
+    # but never a pull request from a fork, which would execute a stranger's code on
+    # that machine. This matters the moment the repository becomes public.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +61,11 @@ jobs:
 
   testbenches:
     runs-on: [self-hosted, ghdl]
+    # SECURITY: these run on a self-hosted runner on the author's LAN. Allow pushes,
+    # dispatches and schedules, and PRs raised from a branch INSIDE this repository --
+    # but never a pull request from a fork, which would execute a stranger's code on
+    # that machine. This matters the moment the repository becomes public.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -96,6 +106,11 @@ jobs:
 
   scripts:
     runs-on: [self-hosted, ghdl]
+    # SECURITY: these run on a self-hosted runner on the author's LAN. Allow pushes,
+    # dispatches and schedules, and PRs raised from a branch INSIDE this repository --
+    # but never a pull request from a fork, which would execute a stranger's code on
+    # that machine. This matters the moment the repository becomes public.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

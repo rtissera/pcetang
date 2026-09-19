@@ -26,6 +26,11 @@ on:
 jobs:
   build:
     runs-on: [self-hosted, gowin]
+    # SECURITY: these run on a self-hosted runner on the author's LAN. Allow pushes,
+    # dispatches and schedules, and PRs raised from a branch INSIDE this repository --
+    # but never a pull request from a fork, which would execute a stranger's code on
+    # that machine. This matters the moment the repository becomes public.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 180
     strategy:
       fail-fast: false
