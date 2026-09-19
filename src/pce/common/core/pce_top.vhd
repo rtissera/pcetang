@@ -523,6 +523,9 @@ signal VDC0_GRID	: std_logic_vector(1 downto 0);
 signal CPU_PRE_RD	: std_logic;
 signal CPU_PRE_WR	: std_logic;
 signal CD_RAM_CS_N: std_logic;
+-- PCE PORT (2026-09-19), DELIBERATE DEVIATION FROM THE DONOR -- see the comment at the
+-- CPU_DI mux below for the full story and the measurements.
+signal CD_RAM_CS_N_G : std_logic;
 signal CD_BRAM_EN	: std_logic;
 
 signal BORDER		: std_logic;
@@ -1116,7 +1119,7 @@ CPU_ROM_SEL_N <= CPU_A(20);
 -- CPU data bus
 CPU_DI <= RAM_DO         when CPU_RAM_SEL_N  = '0'
 			else CD_DO      when CD_SEL_N       = '0'
-			else CD_RAM_DI  when CD_RAM_CS_N    = '0' or AC_RAM_CS_N = '0'
+			else CD_RAM_DI  when CD_RAM_CS_N_G  = '0' or AC_RAM_CS_N = '0'
 			else AC_DO      when AC_SEL_N       = '0'
 			else BRM_DO     when CPU_BRM_SEL_N  = '0'
 			else PRAM_DO    when CPU_PRAM_SEL_N = '0'
@@ -1369,10 +1372,53 @@ begin
 	ADPCM_RAM_SLOT_CNT <= (others => '0');
 end generate;
 
+-- PCE PORT (2026-09-19): CD-RAM only answers when a disc is actually mounted.
+--
+-- THE BUG (measured, sim/boot with 1941 - Counter Attack, a 1MB SuperGrafx HuCard):
+-- cd.vhd decodes physical banks $68-$87 as Super CD-ROM RAM
+--     RAM_SEL  <= '1' when EXT_A(20 downto 13) >= x"68" and <= x"87"
+--     RAM_CS_N <= not (RAM_SEL and EN)
+-- and pce_top instantiates that CD with EN => '1', unconditionally. CD_RAM_CS_N therefore
+-- goes low for banks $68-$87 whether or not a disc is present, and CD-RAM outranks ROM in
+-- the CPU_DI mux below. A 1MB HuCard spans banks $00-$7F, so its TOP 192KB ($68-$7F) was
+-- read from uninitialised CD-RAM instead of the cartridge. Measured at the failing
+-- instruction: 59 of 59 reads in $68-$7F returned FF to the CPU while ROM_A was correct,
+-- ROM_DO held the right byte and CPU_ROM_SEL_N was '0' -- the fetch worked and the mux
+-- threw it away. 1941 then executed FF as opcodes, wrote 0x7F to the VDC address register,
+-- abandoned VDC1 and never uploaded its palette: a black screen.
+--
+-- NOT a SuperGrafx bug. Anything over 832KB is affected -- Street Fighter II' (2560K),
+-- Bomberman '94, Parodius Da!, Salamander, PC Genjin 3, Fire Pro Wrestling 3 and the 1MB
+-- SGX titles. 512K cards never reach bank $68, which is why they always worked.
+--
+-- WHY REAL HARDWARE DOESN'T HAVE THIS: the two mappings are mutually exclusive. Mednafen's
+-- huc.cpp maps banks $00-$7F to the cartridge on the HuCard path (PCE_IsCD = 0) and maps
+-- NO CD-RAM at all; on the CD path (PCE_IsCD = 1) the "HuCard" is the System Card, which is
+-- only 256KB at $00-$3F, and CD-RAM then owns $68-$87. A 1MB HuCard and CD-RAM are never
+-- live together. Our always-on CD unit was a state the console cannot enter.
+--
+-- INHERITED FROM THE DONOR, not introduced here: upstream TurboGrafx16_MiSTer's
+-- rtl/pce_top.vhd has the same EN => '1' with the same mux, so this is a real MiSTer bug
+-- and worth reporting there. That makes this line a deliberate divergence -- do not
+-- "restore donor behaviour" without reading the above.
+--
+-- WHY GATE HERE RATHER THAN EN => CD_EN ON THE CD INSTANCE: EN gates thirteen places
+-- inside cd.vhd -- the $1800 register decode, BRAM_EN, the ADPCM reset and the SCSI/ADPCM/
+-- CDDA state machines. Gating only the RAM claim keeps the blast radius at the three
+-- consumers below, and when CD_EN = '1' this expression reduces to CD_RAM_CS_N exactly, so
+-- a mounted-disc build is bit-identical to before. The CD path, which works today, cannot
+-- regress by construction.
+--
+-- CD_EN is cd_mounted_i on Console 60K, which lives in iosys and is NOT cleared by
+-- core_resetn, so it is stable and settled long before the CPU's first fetch.
+CD_RAM_CS_N_G <= CD_RAM_CS_N or not CD_EN;
+
 CD_RAM_A  <= '0' & AC_RAM_A when AC_RAM_CS_N = '0' else "1000" & CPU_A(17 downto 0);
 CD_RAM_DO <= CPU_DO;
-CD_RAM_RD <= CPU_PRE_RD and not (CD_RAM_CS_N and AC_RAM_CS_N);
-CD_RAM_WR <= CPU_PRE_WR and not (CD_RAM_CS_N and AC_RAM_CS_N);
+-- Gated too, and the WRITE matters as much as the read: without it a big HuCard writing
+-- into its own bank $68-$7F range (an SF2'-style mapper write, say) would land in CD-RAM.
+CD_RAM_RD <= CPU_PRE_RD and not (CD_RAM_CS_N_G and AC_RAM_CS_N);
+CD_RAM_WR <= CPU_PRE_WR and not (CD_RAM_CS_N_G and AC_RAM_CS_N);
 
 gen_ac : if AC_BUILD /= 0 generate
 AC : ARCADE_CARD

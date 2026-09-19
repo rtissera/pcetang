@@ -57,7 +57,25 @@ rm -f "$WORK"/*.o "$WORK"/*.cf "$WORK"/tb_pce_boot 2>/dev/null || true
 
 GHDL_FLAGS=(--std=08 -fsynopsys -frelaxed --workdir="$WORK" -Wno-hide -Wno-shared)
 
-a() { ghdl -a "${GHDL_FLAGS[@]}" "$@"; }
+# Backend choice must happen BEFORE analysis: the llvm backend links real .o files, so the
+# ANALYSIS pass has to be done by the same binary that elaborates. Analysing with mcode and
+# then elaborating with ghdl-llvm fails with "cannot find <unit>.o".
+# DEFAULT IS MCODE, and llvm is opt-in (GHDL_BACKEND=llvm) -- deliberately, see below.
+#
+# llvm is 8.6x faster and the elaboration side now works (ROM_SZ_G was made an integer for
+# it), but the run then dies immediately with
+#     error: NULL access dereferenced
+#     in process .tb_pce_boot(sim).probe
+# which mcode does not hit. That is an unresolved access-type (line) problem in this
+# testbench's own probe process, NOT a problem with ghdl-llvm itself -- sim/cd's
+# run_cd_boot_llvm.sh has used the compiled backend happily for a long time. Until it is
+# found, defaulting to llvm would silently break every boot sim, so the fast path stays
+# opt-in. Worth fixing: it turns a 30-minute 400 ms run into about 4 minutes.
+BACKEND="${GHDL_BACKEND:-mcode}"
+if [ "$BACKEND" = "llvm" ]; then G="${GHDL_BIN:-ghdl-llvm}"; else G="${GHDL_BIN:-ghdl}"; fi
+echo "run.sh: backend=$BACKEND ($G)" >&2
+
+a() { "$G" -a "${GHDL_FLAGS[@]}" "$@"; }
 
 cd "$ROOT"
 
@@ -97,19 +115,50 @@ a src/pce/tg16-mister-rtl/cd/cd.vhd
 a src/pce/common/core/pce_top.vhd
 a sim/boot/tb_pce_boot.vhd
 
-# This GHDL is the mcode backend: -e produces no binary, -r elaborates and runs.
-ghdl -r "${GHDL_FLAGS[@]}" tb_pce_boot \
-	-gROM_FILE="$ROM" \
-	-gRUN_US="$RUN_US" \
-	-gVERBOSE="$VERBOSE" \
-	-gSGX_G="'$SGX'" \
-	-gCD_EN_G="'$CD_EN'" \
-	-gTRACE_N="$TRACE_N" \
-	-gTRACE_SKIP="$TRACE_SKIP" \
-	-gROM_SZ_G="X\"$ROM_SZ\"" \
-	-gVGOLD_FILE="${VGOLD_FILE:-}" \
-	-gROM_LAT="$ROM_LAT" \
-	-gDUMP_AFTER_VDC="$DUMP_AFTER_VDC" \
-	-gAC_BUILD_G="$AC_BUILD" \
-	-gNO_CD_G="$NO_CD" \
+# ghdl rejects an empty -g value outright ("missing value in generic override option"),
+# so this generic is only passed when the caller actually asked for a trace.
+VGOLD_ARGS=()
+if [ -n "${VGOLD_FILE:-}" ]; then VGOLD_ARGS=(-gVGOLD_FILE="$VGOLD_FILE"); fi
+
+# BACKEND (2026-09-19). sim/cd/run_cd_boot_llvm.sh has used ghdl-llvm for a long time
+# because it is 8.6x faster than mcode (3.5 s vs 30.4 s of wall clock per simulated ms);
+# this script never got the same treatment, so every long boot run here cost half an hour
+# for no reason. Now it prefers ghdl-llvm when present and falls back to mcode.
+#
+# The two backends are driven differently: mcode's -r elaborates AND runs, while llvm needs
+# an explicit -e to produce a binary which is then executed. llvm also needs
+# --max-stack-alloc=0 plus `ulimit -s unlimited`, because a compiled backend caps stack
+# objects at 128 kB and this testbench's ROM image alone is 4 MB.
+#
+# Set GHDL_BACKEND=mcode to force the old path (useful if a result ever needs comparing
+# across backends), or GHDL_BIN to point at a specific binary.
+GEN_ARGS=(
+	-gROM_FILE="$ROM"
+	-gRUN_US="$RUN_US"
+	-gVERBOSE="$VERBOSE"
+	-gSGX_G="'$SGX'"
+	-gCD_EN_G="'$CD_EN'"
+	-gTRACE_N="$TRACE_N"
+	-gTRACE_SKIP="$TRACE_SKIP"
+	-gROM_SZ_G=$((16#$ROM_SZ))
+	"${VGOLD_ARGS[@]}"
+	-gROM_LAT="$ROM_LAT"
+	-gDUMP_AFTER_VDC="$DUMP_AFTER_VDC"
+	-gAC_BUILD_G="$AC_BUILD"
+	-gNO_CD_G="$NO_CD"
+)
+
+if [ "$BACKEND" = "llvm" ]; then
+	# Generics are passed to the produced BINARY (ghdl -e does not accept -g). That
+	# restricts them to scalar types, which is why tb_pce_boot's ROM_SZ_G is an integer
+	# rather than the 12-bit vector pce_top takes -- see its comment.
+	"$G" -e "${GHDL_FLAGS[@]}" -o "$WORK/tb_pce_boot" tb_pce_boot
+	ulimit -s unlimited
+	"$WORK/tb_pce_boot" "${GEN_ARGS[@]}" --max-stack-alloc=0 --ieee-asserts=disable
+	exit $?
+fi
+
+# mcode: -e produces no binary, -r elaborates and runs.
+"$G" -r "${GHDL_FLAGS[@]}" tb_pce_boot \
+	"${GEN_ARGS[@]}" \
 	--ieee-asserts=disable

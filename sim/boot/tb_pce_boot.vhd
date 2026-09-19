@@ -26,9 +26,14 @@ use std.textio.all;
 entity tb_pce_boot is
 	generic (
 		ROM_FILE   : string  := "rom.bin";
-		-- pce_top's ROM_SZ bucket. X"080" = 512K, matching a 524288-byte HuCard --
-		-- the same value the board's own rom_sz_r traced as on real hardware.
-		ROM_SZ_G   : std_logic_vector(11 downto 0) := X"080";
+		-- pce_top's ROM_SZ bucket, as a plain INTEGER (0x080 = 128 = 512K, matching a
+		-- 524288-byte HuCard -- the same value the board's own rom_sz_r traced on real
+		-- hardware). Integer and not std_logic_vector on purpose: ghdl's compiled (llvm)
+		-- backend only overrides SCALAR generics at run time and rejects a bit-vector with
+		-- "unhandled type for generic override of 'rom_sz_g'", while `-e` does not accept
+		-- -g at all. A scalar works identically on both backends, and run.sh is 8.6x faster
+		-- on llvm. Converted to the 12-bit vector pce_top wants at the port map below.
+		ROM_SZ_G   : integer := 16#080#;
 		SGX_G      : std_logic := '1';
 		CD_EN_G    : std_logic := '0';
 		-- Simulated wall-clock to run for, in microseconds. One PCE frame is ~16.7 ms.
@@ -250,7 +255,7 @@ begin
 		ROM_RDY   => rom_rdy,
 		ROM_A     => rom_a,
 		ROM_DO    => rom_do,
-		ROM_SZ    => ROM_SZ_G,
+		ROM_SZ    => std_logic_vector(to_unsigned(ROM_SZ_G, 12)),
 		ROM_POP   => '0',
 		ROM_CLKEN => open,
 
@@ -302,6 +307,7 @@ begin
 		alias cpu_wr_n    is << signal dut.CPU_WR_N       : std_logic >>;
 		alias cpu_rd_n    is << signal dut.CPU_RD_N       : std_logic >>;
 		alias cpu_ce      is << signal dut.CPU_CE         : std_logic >>;
+		alias rom_sel_n   is << signal dut.CPU_ROM_SEL_N  : std_logic >>;
 		alias vdc0_sel_n  is << signal dut.CPU_VDC0_SEL_N : std_logic >>;
 		alias vdc1_sel_n  is << signal dut.CPU_VDC1_SEL_N : std_logic >>;
 		alias vpc_sel_n   is << signal dut.CPU_VPC_SEL_N  : std_logic >>;
@@ -505,6 +511,17 @@ begin
 						else
 							write(l, hex(cpu_di));
 						end if;
+						-- ROM-side view, added 2026-09-19: every read at or above
+						-- 0x80000 came back FF while every read below it was correct,
+						-- and reasoning alone could not say whether ROM_A was wrong,
+						-- the ROM model returned FF, or the CPU_DI mux never selected
+						-- ROM at all. These three fields separate those cases.
+						write(l, string'("  rom_a="));
+						write(l, hex(rom_a));
+						write(l, string'(" rom_do="));
+						write(l, hex(rom_do));
+						write(l, string'(" romseln="));
+						write(l, std_logic'image(rom_sel_n));
 						writeline(output, l);
 					end if;
 				end if;
