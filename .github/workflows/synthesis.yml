@@ -50,10 +50,18 @@ jobs:
           # A stale netlist is a real hazard here: rebuilding after only a shared
           # (non-top-level) file changed can silently reuse the previous synthesis.
           rm -rf impl/gwsynthesis impl/pnr
+          # gw_sh unconditionally initialises Qt even for a pure Tcl run. On a headless
+          # box its bundled xcb plugin aborts with "Could not load the Qt platform plugin
+          # xcb". The dev machine papers over this with xvfb-run; QT_QPA_PLATFORM=offscreen
+          # is the better fix -- no X server at all, and one less moving part.
+          # LD_PRELOAD: system fontconfig needs a newer libfreetype symbol than Gowin's
+          # bundled copy provides. LD_LIBRARY_PATH: a bundled lib pulls libQt5DBus via a
+          # transitive dep whose rpath misses IDE/lib, so it would grab the system Qt and
+          # die on a version mismatch.
+          QT_QPA_PLATFORM=offscreen \
           LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libfreetype.so.6 \
           LD_LIBRARY_PATH=$HOME/gowin-edu/IDE/lib \
           LIBGL_ALWAYS_SOFTWARE=1 \
-          xvfb-run -a -s "-screen 0 1024x768x24" \
           $HOME/gowin-edu/IDE/bin/gw_sh ${{ matrix.tcl }} 2>&1 | tee gw_sh_${{ matrix.board }}.log
 
       - name: Gate on timing and report resources
