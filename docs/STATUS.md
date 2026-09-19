@@ -49,6 +49,13 @@ serves matches the reference in both LBA and data, and the boot command sequence
 command-for-command — but games still died with a dark screen until the CD-RAM bridge fix
 landed on 2026-09-16. They now boot and play.
 
+**A 1 MB HuCard's top 192 KB used to read as blank (FIXED 2026-09-19).** CD-RAM claimed
+banks `$68-$87` with no disc mounted and outranked ROM in the CPU data mux, so ~21 plain
+PC Engine titles over 832 KB -- Street Fighter II', Bomberman '94, Parodius, Salamander,
+PC Genjin 3 -- plus the 1 MB SuperGrafx cards executed blank memory. Inherited from MiSTer.
+See the root-cause section below. **Fixed in simulation and in a clean build; not yet
+confirmed on hardware.**
+
 **SuperGrafx runs for the first time (2026-09-18).** With `LITE => 0` the Console 60K
 build gains the second VDC and the HuC6202 priority mixer, and the BL616 firmware now
 accepts `.sgx` ROMs. Three of four titles boot -- Battle Ace, Aldynes and Daimakaimura --
@@ -75,7 +82,8 @@ Arcade Card RAM or registers.
 | ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | not tested | not tested |
 | CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
 | Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
-| SuperGrafx | **on — 3 of 4 boot**, rendering defects | off (`LITE => 1`) | off (no room) |
+| SuperGrafx | **on — 3 of 4 boot**, 2 still render wrong | off (`LITE => 1`) | off (no room) |
+| **HuCard > 832 KB** | **FIXED 2026-09-19** (was: top 192 KB read as FF) | same fix | same fix |
 
 Exact generic maps, so this cannot drift from the source:
 
@@ -100,34 +108,64 @@ stays 1 and `SGX` stays '0'.
 address decode -- pages $F9-$FB were separate RAM instead of mirroring $F8. Low risk, but
 it is why some earlier builds differed subtly.)
 
-## SuperGrafx: what is ruled out (2026-09-18)
+## ROOT CAUSE FOUND: CD-RAM shadowed every HuCard over 832 KB (2026-09-19)
 
-Symptoms are stable across two different bitstreams (SGX alone, and SGX + Arcade Card),
-which already argues against anything marginal. Eliminated, each with a measurement, not
-an argument:
+This section previously read "SuperGrafx: what is ruled out" and framed these as
+SuperGrafx defects. **That framing was wrong.** The SuperGrafx titles were simply the ones
+being tested, and they happen to be 1 MB.
 
-- **VRAM1 is not on SDRAM.** This board is `EXT_VRAM0 => 0` and never sets `EXT_VRAM1`,
-  so both VDCs' VRAM is on-chip BSRAM. The "stale byte" class of bug cannot apply.
-- **ROM size, mapping and headers are correct.** The `.sgx` files are exact powers of two
-  (no copier headers) and the `rom_sz` buckets resolve correctly for 512K and 1MB.
-- **The RTL is donor code and it simulates correctly.** `huc6202.vhd` is byte-identical to
-  MiSTer; `huc6260.vhd` identical bar a debug tap; `pce_top.vhd`'s SGX decode identical;
-  the CPU identical. All four games boot in `sim/boot` and program both VDCs -- 1941
-  writes VDC1 15392 times in 60 ms, while 1943 Kai (a plain HuCard) writes it zero times,
-  which confirms the SGX address decode.
-- **No cross-instance BSRAM merge.** Synthesis reports VDC0 and VDC1 as twins (2228 vs
-  2208 registers, 4965 vs 4961 LUTs), each with its own SAT and both sprite line buffers.
-  The single `DI0019` merge in the log is a reset-less free-running counter, which is safe.
-- **Not the unsupported cross-port RAM collision.** Gowin UG285 leaves same-address
-  cross-port read+write undefined, and the sim stubs paper over it -- so it was counted:
-  Battle Ace (broken) 0 collisions, 1943 Kai (working) 2. Backwards from the hypothesis.
-- **Not timing.** Full PnR on this exact config: 0 setup / 0 hold violated endpoints, and
-  the 25 worst setup paths are all the known CPU-microcode-to-bridge path, with no VDC1,
-  VPC or sprite path among them.
+`cd.vhd` decodes physical banks `$68-$87` as Super CD-ROM RAM:
 
-The cause is not known. The next step is a hardware probe that splits the path: count CPU
-writes reaching `CPU_VDC1_SEL_N`, non-transparent `VDC1_COLNO` pixels, and VPC selection
-of VDC1 -- which separates "never written" from "renders nothing" from "mixer drops it".
+    RAM_SEL  <= '1' when EXT_A(20 downto 13) >= x"68" and <= x"87"
+    RAM_CS_N <= not (RAM_SEL and EN)
+
+and `pce_top` instantiated that CD with `EN => '1'`, **unconditionally** -- so CD-RAM
+claimed those banks whether or not a disc was mounted, and CD-RAM outranks ROM in the
+`CPU_DI` mux. A 1 MB HuCard spans banks `$00-$7F`, so its **top 192 KB was read from
+uninitialised CD-RAM instead of the cartridge**.
+
+Measured at the failing instruction, 59 of 59 reads in `$68-$7F`:
+
+    BUS 1378913 RD 0F6000 = FF  rom_a=0F6000 rom_do=4C romseln='0'
+
+address correct, data correct (`4C B1 43` = `JMP $43B1`), ROM selected -- and the CPU still
+got `FF`. 1941 then executed `FF` as opcodes, wrote `0x7F` to the VDC address register,
+abandoned VDC1 and never uploaded its palette: a black screen.
+
+**Scope: ~21 plain PC Engine HuCards, not just SuperGrafx** -- Street Fighter II' (2560K),
+Bomberman '94, Parodius Da!, Salamander, PC Genjin 3, Fire Pro Wrestling 3 and more.
+Anything over 832 KB. 512 K cards never reach bank `$68`, which is why they always worked.
+
+**Inherited from the donor.** Upstream TurboGrafx16_MiSTer's `rtl/pce_top.vhd` has the same
+`EN => '1'` with the same mux. Real hardware cannot hit it because the two mappings are
+mutually exclusive: with a disc running, the "HuCard" is the 256 KB System Card at
+`$00-$3F`.
+
+**Fix** (branch `fix/cdram-shadows-hucard`, commit `e3152fd`): one gated signal,
+`CD_RAM_CS_N_G <= CD_RAM_CS_N or not CD_EN`, feeding the `CPU_DI` mux, `CD_RAM_RD` and
+`CD_RAM_WR`. When `CD_EN='1'` it reduces to `CD_RAM_CS_N` exactly, so a mounted-disc build
+cannot regress by construction. Verified: 1941's palette writes go 1 -> 1029 (exactly the
+reference), blank-bank reads 59/59 -> 0/66, CD boot regression byte-identical, all 18
+`cd_bridge` checks pass, and the build gains margin (+0.105% vs +0.07%) while shrinking by
+148 LUTs. **NOT YET TESTED ON HARDWARE.**
+
+### Still open, and NOT explained by the above
+- **Battle Ace: missing sprites.** 512 K, never reaches bank `$68`, so the fix changes
+  nothing -- its traces before and after are byte-identical. Against an instrumented
+  beetle-supergrafx reference it diverges for real at write #135995 (the reference makes
+  one more VWR write that we skip) and never realigns at any constant offset. Best next
+  target. Caveat: that point is beyond MAME's reach, so it rests on one reference.
+- **Aldynes: graphic corruption.** The core is **correct in simulation** -- our trace equals
+  the reference plus 18 writes inserted once (a known one-frame startup phase offset), then
+  matches for all 18059 remaining writes, 100%. Not reproduced in sim at all; needs hardware.
+- **Daimakaimura: untested.**
+
+Six mechanisms were eliminated with measurements before the real cause was found -- VRAM1
+on SDRAM, ROM size/mapping/headers, the RTL itself (donor-identical and it simulates
+correctly), cross-instance BSRAM merge (VDC0/VDC1 synthesize as twins), the unsupported
+cross-port RAM collision (counted: broken game 0, working game 2), and timing (0 setup /
+0 hold, worst paths nowhere near the video logic). Kept here because they are all still
+true and stop the next person re-walking them.
 
 ## Known debt: Nano 20K core clock (2026-09-17)
 
@@ -277,7 +315,10 @@ Added 2026-09-18, ahead of the older list below:
     DATA IN with bytes offered and never consumed. None is an Arcade Card RAM or register
     fault. Next: compare `$1802` masking, the transfer-done flag (`cd.vhd` sets `CD_DTD`
     at the status phase) and the ADPCM end/half interrupts against Mednafen's `pcecd.c`.
-0b. **SuperGrafx rendering defects** — see the dedicated section above.
+0b. **SuperGrafx rendering defects** — Battle Ace's missing sprites (a real divergence from the
+    reference at write #135995) and Aldynes' corruption (core is correct in sim, so this
+    needs hardware). 1941's black screen is FIXED — it was the CD-RAM shadow, not an SGX
+    bug. See the root-cause section above.
 0c. **HDMI residual tearing ~2.7%** (down from 17.2% via three line buffers) plus a
     low-level shimmer that is inherent: the exact lock needs 755.16 output lines per
     frame, so the servo dithers 755/756. PLL search for an exact ratio was exhausted.

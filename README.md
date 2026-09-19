@@ -76,15 +76,32 @@ of realtime.
 Arcade Card RAM or register fault — all three sit waiting on the CD unit, which points at
 the CD interrupt path.
 
-**SuperGrafx renders incorrectly.** Battle Ace plays but loses sprites; Aldynes and
-Daimakaimura show graphic corruption; 1941 Counter Attack stays black. Six candidate
-mechanisms have been eliminated with measurements — the VDC RTL is donor code, it
-simulates correctly, it synthesises with both VDCs fully intact, and the design closes
-timing with the critical path nowhere near the video logic. The cause is not yet known.
+**SuperGrafx renders incorrectly.** Battle Ace plays but loses sprites, and Aldynes and
+Daimakaimura show graphic corruption. 1941 Counter Attack used to stay black; that turned
+out to be a different bug entirely (see below) and is fixed. For the remaining two the VDC
+RTL is donor code, it simulates correctly against an instrumented reference emulator, it
+synthesises with both VDCs fully intact, and the design closes timing with the critical
+path nowhere near the video logic. The cause is not yet known.
 
 **Video is not perfect.** The scandoubler carries about 2.7% residual line tearing (down
 from 17.2%) and a low-level shimmer that is inherent to the 755.16-output-lines-per-frame
 ratio; the servo dithers between 755 and 756.
+
+### Fixed 2026-09-19: CD-RAM shadowed every HuCard over 832 KB
+
+`cd.vhd` decodes physical banks `$68-$87` as Super CD-ROM RAM, and `pce_top` enabled that
+decode unconditionally — so with no disc mounted, CD-RAM still claimed those banks and
+outranked the cartridge in the CPU data mux. **Any HuCard larger than 832 KB read its top
+192 KB as blank**, executed it, and crashed. That is roughly 21 plain PC Engine titles —
+Street Fighter II', Bomberman '94, Parodius Da!, Salamander, PC Genjin 3, Fire Pro
+Wrestling 3 — plus the 1 MB SuperGrafx cards. Smaller cards never reach bank `$68`, which
+is why they always worked.
+
+The bug is inherited from the MiSTer core this is ported from, and real hardware cannot hit
+it: with a disc running, the "HuCard" is the 256 KB System Card, so a big cartridge and
+CD-RAM are never live at the same time. Fixed here by gating the CD-RAM claim on whether a
+disc is actually mounted. **Verified in simulation against a reference emulator and in a
+clean synthesis run; not yet confirmed on hardware.**
 
 ### A claim that was wrong, kept here on purpose
 
