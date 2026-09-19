@@ -198,7 +198,11 @@ localparam bit ASPECT_4_3 = 1'b1;
 reg  [10:0] x_start = 11'd0;
 reg  [10:0] x_stop  = 11'(SCREEN_WIDTH);
 reg  [10:0] act_w   = 11'(SCREEN_WIDTH);   // Bresenham denominator
-reg  [10:0] act_h   = 11'd695;             // measured, seeded with the 242-line value
+// Seeded with the 242-active-line value for the configured mode: 242 x 2.871 = 695 at
+// 720p, 242 x 3 = 726 in exact-lock. Only a seed -- the real height is MEASURED each
+// frame -- but a seed from the wrong mode shows a visibly wrong aspect until the first
+// measurement lands.
+reg  [10:0] act_h   = (VIDEOID == 200) ? 11'd726 : 11'd695;
 
 // video_vbl is low over the source's active area (huc6260 clears VBL_FF at the first
 // active line). Cross it into clk_pixel and count output lines across that window.
@@ -287,7 +291,8 @@ reg [23:0] rgb;
 reg active;
 reg [LINE_ABITS-1:0] sx;                 // current source sample index within the line
 reg [10:0] xcnt;
-reg [9:0] out_line_pair;                 // output line / 2 -- which real source line
+reg [1:0] osd_div = 2'd0;                // mod-3 divider for VIDEOID 200, see below
+reg [9:0] out_line_pair;                 // output line / 2 (or / 3) -- which real source line
 reg [1:0] line_idx_rd;
 reg [1:0] pend_idx;                      // completed line waiting for an output-line boundary
 reg [LINE_ABITS-1:0] pend_width;
@@ -344,11 +349,18 @@ always @(posedge clk_pixel) begin
 			cur_line_width <= pend_width;
 			pend_valid     <= 1'b0;
 		end
-		if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;   // OSD row counter only
+		// OSD row counter only. The divisor must match the line-repeat ratio or the
+		// overlay ends up a different scale from the picture: /2 for the 2.871-ratio
+		// 720p mode (it repeats 2 or 3 times, 2 on average), /3 for the exact-lock mode
+		// where every source line is shown exactly 3 times.
+		if (VIDEOID == 200) begin
+			if (osd_div == 2'd2) begin osd_div <= 2'd0; out_line_pair <= out_line_pair + 1'b1; end
+			else                        osd_div <= osd_div + 2'd1;
+		end else if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;
 	end
 
 	if (cx == 0) begin sx <= 0; xcnt <= 0; end
-	if (cy == 0) begin out_line_pair <= 0; end
+	if (cy == 0) begin out_line_pair <= 0; osd_div <= 2'd0; end
 end
 
 // 9-bit RGB (3/3/3) -> 24-bit, bit-replication expansion (r3,r3,r3[2:1]), not a
@@ -662,6 +674,16 @@ end
 
 assign dbg_out_frame_tog = out_frame_tog;
 assign dbg_vs_cy         = vs_cy_snap;
+// EXACT LOCK (2026-09-20). In VIDEOID 200 the pixel clock and H/V totals make one source
+// line exactly two output lines and V_total exactly 263x2, so the source and the raster
+// share a rational ratio and there is no beat left for a servo to chase. Feeding
+// vtotal_extra in that mode would only ADD jitter to an already-locked frame.
+//
+// The servo is left computing and still reported on dbg_vtotal_extra, so a hardware run
+// can compare what it WOULD have done against a frame that no longer needs it -- if the
+// reported value sits still, the lock is real. Only its effect on the raster is removed.
+wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
+
 assign dbg_vtotal_extra  = vtotal_extra;   // the APPLIED value, not an idle computation
 
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
@@ -677,7 +699,7 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
         .reset(0),
-        .vtotal_extra(vtotal_extra),
+        .vtotal_extra(vtotal_extra_eff),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
         .tmds_clock(tmdsClk),
