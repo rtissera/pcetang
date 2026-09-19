@@ -53,8 +53,8 @@ landed on 2026-09-16. They now boot and play.
 banks `$68-$87` with no disc mounted and outranked ROM in the CPU data mux, so ~21 plain
 PC Engine titles over 832 KB -- Street Fighter II', Bomberman '94, Parodius, Salamander,
 PC Genjin 3 -- plus the 1 MB SuperGrafx cards executed blank memory. Inherited from MiSTer.
-See the root-cause section below. **Fixed in simulation and in a clean build; not yet
-confirmed on hardware.**
+See the root-cause section below. **Confirmed on hardware 2026-09-19**: Bomberman '94, Parodius Da! and PC Genjin 3 all boot
+and play, as do all four SuperGrafx titles.
 
 **SuperGrafx runs for the first time (2026-09-18).** With `LITE => 0` the Console 60K
 build gains the second VDC and the HuC6202 priority mixer, and the BL616 firmware now
@@ -82,8 +82,8 @@ Arcade Card RAM or registers.
 | ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | not tested | not tested |
 | CD-ROM² | compiled in, **runs games** | compiled in, **never tested** | compiled in, **never tested** |
 | Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
-| SuperGrafx | **on — 3 of 4 boot**, 2 still render wrong | off (`LITE => 1`) | off (no room) |
-| **HuCard > 832 KB** | **FIXED 2026-09-19** (was: top 192 KB read as FF) | same fix | same fix |
+| SuperGrafx | **on — all 4 tested boot and play** | off (`LITE => 1`) | off (no room) |
+| **HuCard > 832 KB** | **FIXED + HW-CONFIRMED 2026-09-19** | same fix, untested | same fix, untested |
 
 Exact generic maps, so this cannot drift from the source:
 
@@ -149,16 +149,40 @@ reference), blank-bank reads 59/59 -> 0/66, CD boot regression byte-identical, a
 `cd_bridge` checks pass, and the build gains margin (+0.105% vs +0.07%) while shrinking by
 148 LUTs. **NOT YET TESTED ON HARDWARE.**
 
-### Still open, and NOT explained by the above
-- **Battle Ace: missing sprites.** 512 K, never reaches bank `$68`, so the fix changes
-  nothing -- its traces before and after are byte-identical. Against an instrumented
-  beetle-supergrafx reference it diverges for real at write #135995 (the reference makes
-  one more VWR write that we skip) and never realigns at any constant offset. Best next
-  target. Caveat: that point is beyond MAME's reach, so it rests on one reference.
-- **Aldynes: graphic corruption.** The core is **correct in simulation** -- our trace equals
-  the reference plus 18 writes inserted once (a known one-frame startup phase offset), then
-  matches for all 18059 remaining writes, 100%. Not reproduced in sim at all; needs hardware.
-- **Daimakaimura: untested.**
+### CONFIRMED ON HARDWARE 2026-09-19 -- and it was ALL FOUR SuperGrafx symptoms
+
+An earlier version of this section said the fix did NOT explain Battle Ace's missing
+sprites or Aldynes' corruption, citing sim evidence: Battle Ace's video traces were
+byte-identical before and after, and Aldynes matched the beetle reference 100%. **Hardware
+disproved that.** Every symptom was this one bug:
+
+| game | before | after the fix |
+|---|---|---|
+| 1941 Counter Attack (1 MB SGX) | black screen | **boots and plays** |
+| Aldynes (1 MB SGX) | graphic corruption | **boots and plays, clean** |
+| Daimakaimura (1 MB SGX) | graphic corruption | **boots and plays, clean** |
+| Battle Ace (512 K SGX) | missing sprites | **boots and plays, sprites visible** |
+| Bomberman '94, Parodius Da!, PC Genjin 3 (1 MB plain PCE) | untested/broken | **boot and play** |
+| 1943 Kai (512 K) | worked | unchanged |
+| Rondo, R-Type Complete CD | worked | unchanged, CD-DA + ADPCM fine |
+
+**Why the simulation misled:** each boot sim ran ~300 ms on one code path. Aldynes touched
+ROM banks `00-58`, Battle Ace `00-13` -- neither reached `$68` in that window, so the traces
+really were identical *over the window observed*. That is a statement about the sim's
+coverage, not about the game. Both clearly reach high banks later, in gameplay code no boot
+sim was going to see. Battle Ace is 512 K and its ROM aliases, but the CPU still ADDRESSES
+banks above `$68` through the MPRs, and CD-RAM was stealing those cycles.
+
+Lesson worth keeping: a clean sim result bounds what the sim covered and nothing more.
+
+### Still open, and NOT fixed by this
+- **Arcade Card games**: Sapphire reaches "NOW LOADING" then black-screens; Garou Densetsu 2
+  and World Heroes 2 black-screen after the system card. Re-tested 2026-09-19 on the fixed
+  bitstream: unchanged. Still the CD interrupt path.
+- **1943 Kai**: occasional slowdowns and unreliable bonus pickup (possible VDC sprite
+  collision). Present since day one, NOT a regression -- confirmed by the user.
+- **HDMI**: lock is imperfect for the first second or two on every title, and Parodius shows
+  rolling white/black lines once stable (likely the background-colour path).
 
 Six mechanisms were eliminated with measurements before the real cause was found -- VRAM1
 on SDRAM, ROM size/mapping/headers, the RTL itself (donor-identical and it simulates
@@ -315,10 +339,9 @@ Added 2026-09-18, ahead of the older list below:
     DATA IN with bytes offered and never consumed. None is an Arcade Card RAM or register
     fault. Next: compare `$1802` masking, the transfer-done flag (`cd.vhd` sets `CD_DTD`
     at the status phase) and the ADPCM end/half interrupts against Mednafen's `pcecd.c`.
-0b. **SuperGrafx rendering defects** — Battle Ace's missing sprites (a real divergence from the
-    reference at write #135995) and Aldynes' corruption (core is correct in sim, so this
-    needs hardware). 1941's black screen is FIXED — it was the CD-RAM shadow, not an SGX
-    bug. See the root-cause section above.
+0b. **SuperGrafx: RESOLVED 2026-09-19.** All four titles boot and play on hardware. Every
+    symptom -- 1941's black screen, Aldynes/Daimakaimura corruption, Battle Ace's missing
+    sprites -- was the CD-RAM shadow, not an SGX bug. See the root-cause section above.
 0c. **HDMI residual tearing ~2.7%** (down from 17.2% via three line buffers) plus a
     low-level shimmer that is inherent: the exact lock needs 755.16 output lines per
     frame, so the servo dithers 755/756. PLL search for an exact ratio was exhausted.

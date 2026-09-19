@@ -7,8 +7,8 @@ on-screen display).
 **HuCard and CD-ROM² games boot and play on Tang Console 60K** — 720p60 HDMI with a
 correct 4:3 aspect, PSG audio, two controllers and an in-game OSD. CD games run from real
 CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
-Prince of Persia, Rondo of Blood and Bonk III are playable. SuperGrafx games load and
-three of four boot, with rendering defects. Arcade Card titles do not run yet.
+Prince of Persia, Rondo of Blood and Bonk III are playable. **SuperGrafx works** — all four
+titles tested boot and play. Arcade Card titles do not run yet.
 
 Primer 25K and Nano 20K build clean but have **never run a game** — don't buy hardware on
 the strength of this table.
@@ -37,7 +37,7 @@ UART. GPL-3.0 throughout — see
 | Video / audio / controllers on real hardware | yes | not tested | not tested |
 | CD-ROM²: system card boots off a CHD | **yes** | not tested | not tested |
 | **CD game playable, with CD-DA and ADPCM** | **yes** | not tested | not tested |
-| SuperGrafx | **3 of 4 boot**, rendering defects | compiled out | no room |
+| SuperGrafx | **all 4 tested boot and play** | compiled out | no room |
 | Arcade Card | compiled in, **games stall** | no room | no room |
 
 "Not tested" on Primer 25K and Nano 20K means exactly that: those bitstreams have never
@@ -71,17 +71,16 @@ of realtime.
 
 ### What does not
 
-**Arcade Card games do not run.** Sapphire reaches "NOW LOADING" and stops; Garou Densetsu
-2 and World Heroes 2 black-screen after the system card. None of the three looks like an
-Arcade Card RAM or register fault — all three sit waiting on the CD unit, which points at
-the CD interrupt path.
+**Arcade Card games do not run.** Sapphire reaches "NOW LOADING" then black-screens; Garou
+Densetsu 2 and World Heroes 2 black-screen after the system card. None of the three looks
+like an Arcade Card RAM or register fault — all three sit waiting on the CD unit, which
+points at the CD interrupt path. Unaffected by the CD-RAM fix, and still open.
 
-**SuperGrafx renders incorrectly.** Battle Ace plays but loses sprites, and Aldynes and
-Daimakaimura show graphic corruption. 1941 Counter Attack used to stay black; that turned
-out to be a different bug entirely (see below) and is fixed. For the remaining two the VDC
-RTL is donor code, it simulates correctly against an instrumented reference emulator, it
-synthesises with both VDCs fully intact, and the design closes timing with the critical
-path nowhere near the video logic. The cause is not yet known.
+**SuperGrafx works.** All four titles tested — 1941 Counter Attack, Aldynes, Daimakaimura
+and Battle Ace — boot and play on real hardware. Every one of them was broken until
+2026-09-19, and every one was the same bug: CD-RAM shadowing the top of a large HuCard (see
+below). 1941 was a black screen, Aldynes and Daimakaimura showed graphic corruption, and
+Battle Ace was missing its sprites.
 
 **Video is not perfect.** The scandoubler carries about 2.7% residual line tearing (down
 from 17.2%) and a low-level shimmer that is inherent to the 755.16-output-lines-per-frame
@@ -100,8 +99,11 @@ is why they always worked.
 The bug is inherited from the MiSTer core this is ported from, and real hardware cannot hit
 it: with a disc running, the "HuCard" is the 256 KB System Card, so a big cartridge and
 CD-RAM are never live at the same time. Fixed here by gating the CD-RAM claim on whether a
-disc is actually mounted. **Verified in simulation against a reference emulator and in a
-clean synthesis run; not yet confirmed on hardware.**
+disc is actually mounted.
+
+**Confirmed on hardware 2026-09-19.** Bomberman '94, Parodius Da! and PC Genjin 3 — all
+1 MB plain PC Engine cards — boot and play. So do all four SuperGrafx titles. CD games
+(Rondo, R-Type Complete CD) are unaffected, still playing with CD-DA and ADPCM.
 
 ### A claim that was wrong, kept here on purpose
 
