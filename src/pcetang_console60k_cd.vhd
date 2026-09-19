@@ -161,11 +161,13 @@ architecture rtl of pcetang_console60k_cd is
 
    component console60k_pll is
       port (
-         clkin     : in  std_logic;
-         reset     : in  std_logic;
-         clk_pce   : out std_logic;
-         clk_sdram : out std_logic;
-         lock      : out std_logic
+         clkin        : in  std_logic;
+         reset        : in  std_logic;
+         clk_pce      : out std_logic;
+         clk_sdram    : out std_logic;
+         clk_pixel    : out std_logic;
+         clk_5x_pixel : out std_logic;
+         lock         : out std_logic
       );
    end component;
 
@@ -1459,13 +1461,22 @@ begin
 
    reset_n <= key_reset_n and pll_lock and hdmi_pll_lock;
 
+   -- EXACT VIDEO LOCK (2026-09-20, branch fix/hdmi-exact-lock). The HDMI clocks now come
+   -- off the SAME 1200 MHz VCO as clk_pce (two of PLLA's five spare taps) instead of a
+   -- second PLL with an unrelated VCO. That is what makes one source line exactly three
+   -- output lines; see console60k_pll.vhd and hdmi.sv case 200.
+   --
+   -- TO REVERT to the shipping 720p path: put hdmi_pll back, drop clk_pixel/clk_5x_pixel
+   -- from this port map, and set VIDEOID/CLKFRQ/SCREEN_* below back to 4/74375/1280/720.
+   -- pcetang_console60k_hdmi_pll_720p.vhd is deliberately left in the build for exactly
+   -- that, because 1274x789 is non-standard and only real sinks can approve it.
    pll: console60k_pll
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
-             clk_sdram => clk_sdram, lock => pll_lock);
+             clk_sdram => clk_sdram, clk_pixel => clk_pixel,
+             clk_5x_pixel => clk_5x_pixel, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll_720p
-   port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
-             clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
+   -- One PLL now supplies both domains, so there is no second lock to wait on.
+   hdmi_pll_lock <= '1';
 
    -- Same init-hold shape as pcetang_console60k.vhd's sdram_init process.
    process (clk_pce)
@@ -4029,10 +4040,10 @@ begin
    -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
    generic map (
-      VIDEOID       => 4,        -- CEA-861 1280x720p60
-      CLKFRQ        => 74375,    -- kHz, matches the real 720p PLL's actual clk_pixel
-      SCREEN_WIDTH  => 1280,
-      SCREEN_HEIGHT => 720
+      VIDEOID       => 200,      -- custom "PCE exact lock", 1274x789 @ 60 MHz
+      CLKFRQ        => 60000,    -- kHz, matches clk_pixel (1200/20) exactly
+      SCREEN_WIDTH  => 968,      -- 726 * 4/3, the 4:3 window inside the 1274-pixel line
+      SCREEN_HEIGHT => 726       -- 242 active source lines x 3
    )
    port map (
       clk => clk_pce, resetn => reset_n,

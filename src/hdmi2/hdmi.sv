@@ -169,6 +169,55 @@ generate
             assign vsync_pulse_size = 5;
             assign invert = 0;
         end
+        // PCE PORT (2026-09-20): custom mode 200 -- "PCE exact lock".
+        //
+        // Not a CEA-861 code, deliberately. Every standard mode has a pixel clock that is
+        // irrational against the PC Engine's line rate, which forces the line doubler into
+        // a 2-or-3 output lines per source line pattern that crawls -- the line-by-line
+        // shimmer. This mode exists so one source line is EXACTLY two output lines:
+        //
+        //   source line = 2730 core dots / 42.857 MHz = 63.700 us
+        //   output line = 1274 pixels    / 60 MHz     = 21.233 us   (ratio exactly 3)
+        //   V_total     = 789 = 263 x 3               -> frame rate locks on both sides
+        //
+        // x3 rather than x2 on purpose. Exact lock quantises the output line rate to
+        // N x 15.699 kHz: N=2 lands on 31.40 kHz (480p class, which some sinks on this
+        // board reject with "no signal") and N=3 on 47.10 kHz, beside real 720p60's
+        // 45.00 kHz. Real 720p cannot itself be locked -- 1650/74.25 MHz gives 2.8665
+        // output lines per source line, and the core clock that would fix it (43.18 MHz)
+        // is above this board's measured Fmax of 43.056.
+        //
+        // Both clocks come off the core's own 1200 MHz VCO (see console60k_pll.vhd), so
+        // this is a rational lock, not a servo chasing a beat. The VTOTAL servo in
+        // pce2hdmi_sd.sv is redundant here and is disabled for this mode.
+        //
+        // Active window: 726 of 789 lines (242 active source lines tripled, the RVBL=0
+        // case -- within 6 lines of real 720p's 720) and 968 of 1274 pixels. The 4:3 mapping is not done here -- pce2hdmi_sd.sv
+        // MEASURES the real active height and derives width = height * 4/3 inside this
+        // rectangle, so both PCE line counts (242 and 231) stay correct.
+        //
+        // 1274x789 is non-standard, so display acceptance is a HARDWARE question and the
+        // AVI InfoFrame advertises VIC 0 ("no applicable CEA code, use the timing as
+        // received") rather than a truncated fake -- see the note in
+        // auxiliary_video_information_info_frame.sv. PC monitors are usually tolerant of
+        // arbitrary timings in range; TVs and cheap capture sticks are stricter. If a sink
+        // objects, reverting is one generic in the board top (VIDEOID back to 4) since the
+        // 720p PLL stays in the build. This is why standard 720p remains the DEFAULT and
+        // this mode is opt-in.
+        200:
+        begin
+            assign frame_width = 1274;
+            assign frame_height_base = 789;
+            assign screen_width = 968;
+            assign screen_height = 726;
+            // Sync shape follows 720p (mode 4) rather than 480p, to match the class of
+            // timing this mode sits in; scaled to the shorter line.
+            assign hsync_pulse_start = 85;
+            assign hsync_pulse_size = 31;
+            assign vsync_pulse_start = 5;
+            assign vsync_pulse_size = 5;
+            assign invert = 0;
+        end
         16, 34:
         begin
             assign frame_width = 2200;
@@ -232,7 +281,11 @@ always_comb begin
         vsync <= invert ^ (cy >= screen_height + vsync_pulse_start && cy < screen_height + vsync_pulse_start + vsync_pulse_size);
 end
 
-localparam real VIDEO_RATE = (VIDEO_ID_CODE == 1 ? 25.2E6
+// PCE PORT: mode 200 runs at 1200/20 = 60 MHz. VIDEO_RATE feeds the audio clock
+// regeneration (CTS/N); getting it wrong silently detunes HDMI audio, which matters here
+// because CD-DA is half the point of this core.
+localparam real VIDEO_RATE = (VIDEO_ID_CODE == 200 ? 60.0E6
+    : VIDEO_ID_CODE == 1 ? 25.2E6
     : VIDEO_ID_CODE == 2 || VIDEO_ID_CODE == 3 ? 27.027E6
     : VIDEO_ID_CODE == 4 ? 74.25E6
     : VIDEO_ID_CODE == 16 ? 148.5E6

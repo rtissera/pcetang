@@ -52,6 +52,11 @@ entity console60k_pll is
       reset   : in  std_logic;    -- active-high reset input
       clk_pce   : out std_logic;    -- 42.857 MHz -- PCE/SGX/TG16 core master clock
       clk_sdram : out std_logic;    -- 120 MHz -- Primer 25K's sdram.sv only, see above
+      -- HDMI clocks, taken from the SAME 1200 MHz VCO as clk_pce so the video raster is
+      -- rationally locked to the core instead of beating against it. See the "exact
+      -- lock" note below.
+      clk_pixel    : out std_logic; -- 1200/20 = 60 MHz
+      clk_5x_pixel : out std_logic; -- 1200/4  = 300 MHz (exactly 5x clk_pixel)
       lock      : out std_logic
    );
 end entity;
@@ -218,15 +223,47 @@ begin
          -- the 80 MHz this board was already running.
          -- Refresh stays in spec: 511 cycles @85.714 MHz = 5.96 us vs 7.8 us/row.
          ODIV1_SEL  => 14,    -- 1200/14 = 85.714 MHz (clk_sdram) = EXACTLY 2x clk_pce
+         -- EXACT VIDEO LOCK (2026-09-20). The HDMI clocks come off this same 1200 MHz
+         -- VCO, on two of PLLA's five spare taps, instead of from a second PLL with an
+         -- unrelated VCO. That is what makes the raster rationally locked to the core:
+         --
+         --   source line = 2730 core dots / 42.857 MHz  = 63.70 us
+         --   output line = 1274 pixels    / 60 MHz      = 21.233 us
+         --   ratio                                      = EXACTLY 3.000
+         --
+         -- The old path ran the pixel clock from its own 743.75 MHz VCO at 74.375 MHz
+         -- with H_total 1650, giving 2.871 output lines per source line -- a non-integer
+         -- ratio, so the line doubler had to show each source line for 2 or 3 output
+         -- lines in a pattern that crawls. That crawl IS the line-by-line shimmer, and no
+         -- amount of VTOTAL servoing could remove it because the error is generated per
+         -- LINE, not per frame.
+         --
+         -- WHY x3 AND NOT x2. Exact lock forces the output line rate to N x 15.699 kHz:
+         -- N=2 gives 31.40 kHz, which is 480p class -- and this board's own history is
+         -- that some real HDMI sinks reject 480p60 outright with "no signal" (see the
+         -- comment above the 720p PLL in pcetang_console60k_cd.vhd). N=3 gives 47.10 kHz,
+         -- next to real 720p60's 45.00 kHz, which those same sinks accept.
+         --
+         -- D=20 is the only workable divider: clk_pixel must be 1200/D with D divisible
+         -- by 5 (so the 5x tap is an integer ODIV) and 76440/(D*3) a whole H_total.
+         -- D=5 and D=10 need 240/600 MHz TMDS; D=40 gives a 637-pixel line, too narrow
+         -- for the 4:3 window. So this is the unique solution, not a preference.
+         --
+         -- 300 MHz TMDS is LOWER than the 371.875 MHz the 720p PLL runs at, so the
+         -- serializer's timing gets easier, not harder. Core clock untouched.
+         ODIV2_SEL  => 20,    -- 1200/20 = 60 MHz (clk_pixel)
+         ODIV3_SEL  => 4,     -- 1200/4  = 300 MHz (clk_5x_pixel), exact 5x
          CLKOUT0_EN => "TRUE",
-         CLKOUT1_EN => "TRUE"
+         CLKOUT1_EN => "TRUE",
+         CLKOUT2_EN => "TRUE",
+         CLKOUT3_EN => "TRUE"
       )
       port map (
          LOCK     => lock,
          CLKOUT0  => clk_pce,
          CLKOUT1  => clk_sdram,
-         CLKOUT2  => open,
-         CLKOUT3  => open,
+         CLKOUT2  => clk_pixel,
+         CLKOUT3  => clk_5x_pixel,
          CLKOUT4  => open,
          CLKOUT5  => open,
          CLKOUT6  => open,

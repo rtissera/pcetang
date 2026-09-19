@@ -42,7 +42,15 @@ assign packet_bytes[0] = 8'd1 + ~(header[23:16] + header[15:8] + header[7:0] + p
 assign packet_bytes[1] = {1'b0, VIDEO_FORMAT, ACTIVE_FORMAT_INFO_PRESENT, BAR_INFO, SCAN_INFO};
 assign packet_bytes[2] = {COLORIMETRY, PICTURE_ASPECT_RATIO, ACTIVE_FORMAT_ASPECT_RATIO};
 assign packet_bytes[3] = {IT_CONTENT, EXTENDED_COLORIMETRY, RGB_QUANTIZATION_RANGE, NON_UNIFORM_PICTURE_SCALING};
-assign packet_bytes[4] = {1'b0, 7'(VIDEO_ID_CODE)};
+// PCE PORT (2026-09-20): codes above 127 are this port's private custom modes -- see
+// hdmi.sv case 200, the exact-lock timing. The VIC field is only 7 bits and just 1..127
+// are defined, so advertising 200 would TRUNCATE to 72, a real and completely unrelated
+// code (1920x1080p24, 64:27). A sink told "1080p24" while receiving 480p-shaped timing is
+// far more likely to refuse or mis-scale than one told nothing.
+//
+// VIC 0 is the legal "no applicable CEA-861 code" value: the sink is expected to use the
+// timing exactly as received. That is precisely what a custom mode wants.
+assign packet_bytes[4] = {1'b0, (VIDEO_ID_CODE > 127) ? 7'd0 : 7'(VIDEO_ID_CODE)};
 assign packet_bytes[5] = {YCC_QUANTIZATION_RANGE, CONTENT_TYPE, PIXEL_REPETITION};
 
 genvar i;
