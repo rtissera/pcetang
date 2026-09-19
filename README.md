@@ -155,8 +155,9 @@ HuCard, no disc. The two repositories are one system and have to be built togeth
 
 ## How this was built
 
-Development was AI-assisted (Claude, under my direction) — the commit trailers record it
-per commit, and they are staying there.
+Development was AI-assisted (Claude, under my direction). Saying so here rather than
+burying it: the interesting question about a project like this is not whether a model was
+involved, it is whether the claims hold up.
 
 What matters more than that is how claims in this repo are checked, because "it should
 work" has been wrong here repeatedly. The working rule is that nothing is claimed until
