@@ -27,11 +27,15 @@ create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock c
 # clk_pixel: 73.750 MHz (FVCO 1475 MHz / ODIV0 20), -0.67% vs the nominal 74.25 CEA-861
 # 1280x720p60 spec -- see pcetang_console60k_hdmi_pll_720p.vhd's header for the real
 # PLLA-parameter derivation. Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV0_SEL=20).
-create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 80 -multiply_by 119 [get_nets {clk_pixel}]
+# TEST BUILD (branch test/hdmi-480p): the 480p PLL, FVCO 1350 = 50 x 27, ODIV0 50.
+# 50 * 27/50 = 27.000 MHz (nominal 27.027, -0.1%).
+create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 50 -multiply_by 27 [get_nets {clk_pixel}]
 
 # clk_5x_pixel: 368.750 MHz (FVCO 1475 MHz / ODIV1 4), same -0.67%, exact 5x preserved.
 # Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV1_SEL=4).
-create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 16 -multiply_by 119 [get_nets {clk_5x_pixel}]
+# clk_5x_pixel: 1350 / ODIV1 10 = 135.000 MHz = 50 * 27/10. Exact 5x, and far below the
+# 371.875 MHz the 720p path runs at.
+create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 10 -multiply_by 27 [get_nets {clk_5x_pixel}]
 
 # 2026-09-07: the four `set_multicycle_path -setup 3 / -hold 2` lines that used to sit
 # here are DELETED, not relaxed. They claimed the receiver samples only every 3rd cycle

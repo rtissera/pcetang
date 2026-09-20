@@ -183,6 +183,18 @@ architecture rtl of pcetang_console60k_cd is
       );
    end component;
 
+   -- TEST BUILD (branch test/hdmi-480p): the 480p PLL, already compiled by
+   -- build_console60k_cd.tcl but never declared here. 27.000 MHz pixel / 135 MHz 5x.
+   component pcetang_console60k_hdmi_pll_480p is
+      port (
+         clkin        : in  std_logic;
+         reset        : in  std_logic;
+         clk_pixel    : out std_logic;
+         clk_5x_pixel : out std_logic;
+         lock         : out std_logic
+      );
+   end component;
+
    component sdram is
       port (
          clk        : in    std_logic;
@@ -1463,7 +1475,7 @@ begin
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll_720p
+   hdmi_pll: pcetang_console60k_hdmi_pll_480p
    port map (clkin => clk, reset => not key_reset_n, clk_pixel => clk_pixel,
              clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
 
@@ -4029,10 +4041,25 @@ begin
    -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
    generic map (
-      VIDEOID       => 4,        -- CEA-861 1280x720p60
-      CLKFRQ        => 74375,    -- kHz, matches the real 720p PLL's actual clk_pixel
-      SCREEN_WIDTH  => 1280,
-      SCREEN_HEIGHT => 720
+      -- TEST BUILD (2026-09-20, branch test/hdmi-480p): standard CEA-861 480p60.
+      --
+      -- Not a custom mode -- VIC 2, which every HDMI sink claims to support. The point is
+      -- the line ratio. 480p's line rate against the PC Engine's is
+      --   27.000 MHz / 858 = 31468 Hz,  PCE line = 15699 Hz  ->  ratio 2.0045
+      -- i.e. 0.23% off a perfect 2x, against 720p's 2.8664 which is 13% off. The doubler
+      -- therefore needs about ONE 3-line correction per frame here, versus roughly 35 at
+      -- 720p -- the crawl should be close to invisible without any non-standard timing.
+      --
+      -- 242 active source lines doubled is 484 against 480 shown, so ~4 lines are lost.
+      -- They are overscan on a real PC Engine and should not be visible.
+      --
+      -- This board last ran 480p a long time ago on a cheap portable monitor that rejected
+      -- it; that is weak evidence and predates several real fixes in this path, so it is
+      -- worth retesting properly.
+      VIDEOID       => 2,        -- CEA-861 720x480p60
+      CLKFRQ        => 27000,    -- kHz, the 480p PLL's actual clk_pixel (27.000, -0.1%)
+      SCREEN_WIDTH  => 720,
+      SCREEN_HEIGHT => 480
    )
    port map (
       clk => clk_pce, resetn => reset_n,
