@@ -9,18 +9,12 @@ module auxiliary_video_information_info_frame
     parameter bit [1:0] BAR_INFO = 2'b00, // Not valid
     parameter bit [1:0] SCAN_INFO = 2'b00, // No data
     parameter bit [1:0] COLORIMETRY = 2'b00, // No data
-    // PCE PORT (2026-09-21): 4:3, was 2'b00 "No Data".
-    //
-    // hdmi.sv never overrides this, so every mode this core has ever emitted has told the
-    // sink NOTHING about picture aspect -- leaving it to guess from the VIC or stretch to
-    // panel, which is undefined behaviour and differs per display. Measured on an iiyama
-    // PC monitor at 720x480: picture pillarboxed and the shape visibly wrong.
-    //
-    // All PC Engine content is 4:3, in every mode this core emits, so declare it.
-    // NOTE the TV convention that makes this confusing: CEA VIC 2 is 720x480 displayed as
-    // 4:3, i.e. NON-SQUARE pixels (0.889 wide) -- the DVD convention, not VGA's square
-    // 640x480. A full-frame 4:3 picture therefore occupies the whole 720x480.
-    parameter bit [1:0] PICTURE_ASPECT_RATIO = 2'b01, // 4:3
+    // Baseline value, deliberately. Declaring 4:3 here is very likely CORRECT -- hdmi.sv
+    // never overrides it, so every mode has been telling sinks "No Data" and letting them
+    // guess -- but it was changed in the same build as three other things and the result
+    // was worse, so it is reverted to isolate the one variable under test. Re-apply it on
+    // its own once a stable baseline is measured.
+    parameter bit [1:0] PICTURE_ASPECT_RATIO = 2'b00, // No data
     parameter bit [3:0] ACTIVE_FORMAT_ASPECT_RATIO = 4'b1000, // Not valid unless ACTIVE_FORMAT_INFO_PRESENT = 1'b1, then Same as picture aspect ratio
     parameter bit IT_CONTENT = 1'b0, //  The IT content bit indicates when picture content is composed according to common IT practice (i.e. without regard to Nyquist criterion) and is unsuitable for analog reconstruction or filtering. When the IT content bit is set to 1, downstream processors should pass pixel data unfiltered and without analog reconstruction.
     parameter bit [2:0] EXTENDED_COLORIMETRY = 3'b000, // Not valid unless COLORIMETRY = 2'b11. The extended colorimetry bits, EC2, EC1, and EC0, describe optional colorimetry encoding that may be applicable to some implementations and are always present, whether their information is valid or not (see CEA 861-D Section 7.5.5).

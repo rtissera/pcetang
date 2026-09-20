@@ -580,16 +580,11 @@ end
 reg tog_meta, tog_sync, tog_prev;
 reg [9:0] vs_cy;
 reg       vs_seen   = 1'b0;
-// Seeded PER MODE (2026-09-21), so the sink sees one clean lock instead of
-// lock -> roll -> unlock -> relock. The servo starts wherever this says and walks to its
-// target one line per frame; starting far away moves the frame RATE while a display is
-// trying to lock to it, which is exactly the boot roll seen on hardware.
-//   VIDEOID 2   base 525, target VTOTAL ~527.4 (27 MHz / 858 / 59.69 Hz) -> extra ~2.4
-//   VIDEOID 200 base 787, exact lock is 789                              -> extra 2
-//   VIDEOID 4   base 750, the +2.28 lines/frame the 720p PLL was tuned for -> 5
-// Seeded at 3 rather than 2 for 480p so it does not sit on the VT_LO clamp while settling.
-reg [7:0] vtotal_extra = (VIDEOID == 2)   ? 8'd3 :
-                         (VIDEOID == 200) ? 8'd2 : 8'd5;   // applied value, slew limited
+// Baseline seed, deliberately. Seeding per mode is probably right -- starting far from
+// target moves the frame RATE while a display is trying to lock -- but it went in with
+// three other changes and the result was worse, so it is reverted to isolate the single
+// variable under test (N_LINE_BUF). Re-apply on its own afterwards.
+reg [7:0] vtotal_extra = 8'd5;                        // applied value, slew limited
 reg signed [23:0] vt_i = 24'sd1321;                   // 16.8 fixed point, seeded 5.16
 reg [7:0] vt_frac = 8'd0;                             // sigma-delta accumulator
 reg out_frame_tog = 1'b0;
