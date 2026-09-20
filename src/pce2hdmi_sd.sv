@@ -199,15 +199,21 @@ end
 // This changes only WHERE pixels are drawn. cx/cy, frame_height, the VTOTAL servo, the
 // packet sequencers and the audio path are all untouched, so HDMI lock cannot regress.
 // Set ASPECT_4_3 to 0 to get the previous full-width stretch back.
-// OFF for VIDEOID 2, ON otherwise (2026-09-21).
+// ON in every mode. It was briefly turned OFF for VIDEOID 2 on the argument that CEA
+// 720x480 has non-square pixels (0.889) so the full frame is already 4:3 -- which is true
+// as far as it goes, and still produced a WORSE picture on hardware.
 //
-// This windowing assumes SQUARE output pixels: it computes width = height * 4/3, which is
-// right for 1280x720 and for the custom mode. It is WRONG for CEA 720x480, where the
-// pixels are 0.889 wide because the frame is displayed as 4:3. There the true 4:3 width is
-// height * 1.5, and 720/480 IS exactly 1.5 -- so the full frame already is 4:3 and any
-// windowing makes the picture both narrower and the wrong shape. Confirmed on hardware:
-// pillarboxed with visibly wrong geometry at 480p.
-localparam bit ASPECT_4_3 = (VIDEOID == 2) ? 1'b0 : 1'b1;
+// The reason is that this flag gates more than width. v_active used to be
+// `(ASPECT_4_3 && aspect_valid) ? vact_sr[2] : 1'b1`, so switching it off also disabled
+// the VERTICAL clip to the source's active area, leaving the picture's height and
+// position at the mercy of frame phase. Measured: 6 blank frames in 60, picture box
+// jittering +/-128px, oscillating between a perfect full-frame image and nothing --
+// against a stable if slightly-off picture with it on.
+//
+// v_active is now independent (see below), so this is purely about width again. Left ON
+// because the stable behaviour is the one we have evidence for; revisit the 480p width
+// question separately, with the InfoFrame now actually declaring 4:3.
+localparam bit ASPECT_4_3 = 1'b1;
 
 reg  [10:0] x_start = 11'd0;
 reg  [10:0] x_stop  = 11'(SCREEN_WIDTH);
@@ -234,7 +240,14 @@ reg  [2:0] vact_sr = 3'b0;
 localparam int ACT_H_MIN = 300;
 localparam int ACT_H_MAX = 780;
 reg  aspect_valid = 1'b0;
-wire v_active = (ASPECT_4_3 && aspect_valid) ? vact_sr[2] : 1'b1;
+// Vertical gating is NOT part of the 4:3 question and must not be tied to it.
+//
+// ASPECT_4_3 selects whether the WIDTH is windowed to 4:3. v_active clips output to the
+// source's ACTIVE AREA, which every mode needs -- without it the raster renders straight
+// through the source's vertical blanking, so the picture's height and position become
+// whatever the frame phase happens to be. Measured on hardware when these were conflated:
+// full width but only 60% height, black below, aspect 2.727 instead of 1.333.
+wire v_active = aspect_valid ? vact_sr[2] : 1'b1;
 
 // height * 4/3, rounded. 21845/16384 = 1.333313, so the error is under a tenth of a pixel.
 wire [26:0] w_mul  = {16'b0, act_h} * 27'd21845 + 27'd8192;
