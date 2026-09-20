@@ -754,7 +754,9 @@ assign dbg_vs_cy         = vs_cy_snap;
 wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
 
 // The raster reset is likewise mode-200 only; every other mode keeps the free-running
-// counters it has always had.
+// counters it has always had. It goes to hdmi.sv's `vreset`, NOT its `reset`: the wide
+// reset fans out to the 300 MHz serializer and cost 3 setup violations when it was tried
+// (clk_pce +0.250% -> +0.016%). See the port comment in hdmi.sv.
 wire       hdmi_reset       = (VIDEOID == 200) ? vreset : 1'b0;
 
 assign dbg_vtotal_extra  = vtotal_extra_eff;   // the APPLIED value, not an idle computation
@@ -771,7 +773,8 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_pixel(clk_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
-        .reset(hdmi_reset),
+        .reset(0),
+        .vreset(hdmi_reset),
         .vtotal_extra(vtotal_extra_eff),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
