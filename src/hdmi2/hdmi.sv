@@ -207,7 +207,13 @@ generate
         200:
         begin
             assign frame_width = 1274;
-            assign frame_height_base = 789;
+            // 787, not 789, ON PURPOSE. The exact-lock VTOTAL is 789 (= 263 x 3), but the
+            // phase servo's `extra` is clamped to [2,8] (VT_LO/VT_HI in pce2hdmi_sd.sv),
+            // so a base of 789 could only ever produce 791..797 -- never the exact value,
+            // which would break the very lock this mode exists for. With base 787 the
+            // servo's extra=2 IS 789, and it can range 789..795 to correct phase.
+            // Same pattern NeoTang uses (VTOTAL_BASE 750, servo brings it to 792).
+            assign frame_height_base = 787;
             assign screen_width = 968;
             assign screen_height = 726;
             // Sync shape follows 720p (mode 4) rather than 480p, to match the class of

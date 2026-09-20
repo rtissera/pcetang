@@ -674,15 +674,27 @@ end
 
 assign dbg_out_frame_tog = out_frame_tog;
 assign dbg_vs_cy         = vs_cy_snap;
-// EXACT LOCK (2026-09-20). In VIDEOID 200 the pixel clock and H/V totals make one source
-// line exactly two output lines and V_total exactly 263x2, so the source and the raster
-// share a rational ratio and there is no beat left for a servo to chase. Feeding
-// vtotal_extra in that mode would only ADD jitter to an already-locked frame.
+// THE SERVO STAYS LIVE IN EVERY MODE -- including the exact-lock one (2026-09-20).
 //
-// The servo is left computing and still reported on dbg_vtotal_extra, so a hardware run
-// can compare what it WOULD have done against a frame that no longer needs it -- if the
-// reported value sits still, the lock is real. Only its effect on the raster is removed.
-wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
+// It was briefly bypassed for VIDEOID 200 on the reasoning that an exact rate lock leaves
+// no beat to chase. That reasoning was WRONG and it produced a black screen on hardware.
+// The servo does two jobs:
+//
+//   RATE  -- redundant under exact lock, agreed.
+//   PHASE -- still essential. Nothing else aligns the SOURCE frame to the OUTPUT frame.
+//            v_active is driven by the source's own vblank, so if the source active area
+//            happens to land straddling output vblank there is little or no picture --
+//            and under an exact lock it NEVER DRIFTS OUT of that alignment. A bad phase
+//            is permanent. That is the failure that was seen: signal present, raster
+//            running, nothing drawn, OSD invisible (it is gated by the same v_active).
+//
+// NeoTang's neo2hdmi.sv says the same thing in its header: "The servo moves the phase by
+// varying VTOTAL, never by resetting the raster." It keeps its servo under an exact lock
+// for exactly this reason.
+//
+// hdmi.sv's mode-200 frame_height_base is 787 so that the servo's clamped extra=2 lands
+// on the exact 789; see the comment there.
+wire [7:0] vtotal_extra_eff = vtotal_extra;
 
 assign dbg_vtotal_extra  = vtotal_extra;   // the APPLIED value, not an idle computation
 
