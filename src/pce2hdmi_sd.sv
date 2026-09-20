@@ -226,6 +226,40 @@ localparam int ACT_H_MAX = 780;
 reg  aspect_valid = 1'b0;
 wire v_active = (ASPECT_4_3 && aspect_valid) ? vact_sr[2] : 1'b1;
 
+// ==================== Exact-lock phase: a one-shot raster reset ====================
+//
+// VIDEOID 200 only. Under the exact 3:1 lock the output frame and the source frame run
+// at rationally identical rates, so once their phase is right it NEVER drifts -- which is
+// what makes a servo both unnecessary and harmful here. Unnecessary because there is no
+// beat to chase; harmful because a PI loop against a zero rate error has no unique fixed
+// point, so the sigma-delta stage that approximates a fractional VTOTAL goes on
+// alternating between two integers indefinitely. That alternation shifts the picture one
+// line several times a second and is precisely the tremor measured on hardware 2026-09-20.
+//
+// The replacement is MiSTle-Dev/c64nano's: src/misc/video_analyzer.v watches the source's
+// own sync, raises `changed` when the line length or frame height differs from the last
+// frame, and emits a single `vreset` that slams the HDMI raster counters back to 0,0.
+// There is no servo anywhere in that design. Same idea here, with one simplification that
+// the PC Engine allows: huc6260's H_CNT is driven by the master clock and is 2730 cycles
+// per line in EVERY dot-clock mode (see this file's header), so source line length cannot
+// change and only the active height can -- 242 lines, or 231 in the shorter mode. act_h
+// already measures exactly that, so it is the whole change detector.
+//
+// WHY THIS IS SAFE WHERE THE EARLIER BYPASS WAS NOT. Zeroing vtotal_extra on its own was
+// tried and produced a black screen, because it removed the servo's RATE job (redundant)
+// and its PHASE job (essential) together, leaving nothing to align the source's active
+// area with the output's. A bad phase under an exact lock is permanent. This restores the
+// phase job by the more direct route, and fires the pulse at the exact output line where
+// drawing starts, so cy == 0 coincides with the first drawn line.
+//
+// FAIL-SAFE. The pulse is gated only on `phase_armed`, never on aspect_valid: if
+// video_vbl never toggles (core in reset, unexpected mode) then vact_sr never transitions,
+// no reset is ever issued, the raster free-runs and v_active falls back to 1 -- a
+// full-screen picture, the same behaviour as before this change. The one failure mode that
+// must stay unreachable is a blank screen with no way to the OSD.
+reg        phase_armed = 1'b1;              // fire once at power-up, then on any change
+reg        vreset      = 1'b0;              // single-cycle, clk_pixel domain
+
 // height * 4/3, rounded. 21845/16384 = 1.333313, so the error is under a tenth of a pixel.
 wire [26:0] w_mul  = {16'b0, act_h} * 27'd21845 + 27'd8192;
 wire [11:0] w_calc = w_mul[25:14];
@@ -248,8 +282,21 @@ always_ff @(posedge clk_pixel) begin
 		if (act_cnt >= 11'(ACT_H_MIN) && act_cnt <= 11'(ACT_H_MAX)) begin
 			act_h        <= act_cnt;
 			aspect_valid <= 1'b1;
+			// The source geometry moved (242 <-> 231 active lines): re-align the phase
+			// on the next frame. This is video_analyzer.v's `changed`, narrowed to the
+			// one quantity that can actually change on this core.
+			if (act_cnt != act_h) phase_armed <= 1'b1;
 		end else
 			aspect_valid <= 1'b0;
+	end
+
+	// Fire on the output line where vact_sr[2] is about to go high -- the first line that
+	// gets drawn -- so the reset puts cy at 0 exactly there and the source's active area
+	// fills the output's active window from the top.
+	vreset <= 1'b0;
+	if (phase_armed && (cy != cy_rv) && vact_sr[1] && !vact_sr[2]) begin
+		vreset      <= 1'b1;
+		phase_armed <= 1'b0;
 	end
 
 	// Recompute the window once per frame, so it is stable while a frame is being drawn.
@@ -674,29 +721,43 @@ end
 
 assign dbg_out_frame_tog = out_frame_tog;
 assign dbg_vs_cy         = vs_cy_snap;
-// THE SERVO STAYS LIVE IN EVERY MODE -- including the exact-lock one (2026-09-20).
+// THE SERVO RUNS IN EVERY MODE EXCEPT THE EXACT-LOCK ONE (revised 2026-09-21).
 //
-// It was briefly bypassed for VIDEOID 200 on the reasoning that an exact rate lock leaves
-// no beat to chase. That reasoning was WRONG and it produced a black screen on hardware.
-// The servo does two jobs:
+// It does two jobs, and which of them is needed depends entirely on whether the output
+// frame rate is a rational multiple of the source's:
 //
-//   RATE  -- redundant under exact lock, agreed.
-//   PHASE -- still essential. Nothing else aligns the SOURCE frame to the OUTPUT frame.
-//            v_active is driven by the source's own vblank, so if the source active area
-//            happens to land straddling output vblank there is little or no picture --
-//            and under an exact lock it NEVER DRIFTS OUT of that alignment. A bad phase
-//            is permanent. That is the failure that was seen: signal present, raster
-//            running, nothing drawn, OSD invisible (it is gated by the same v_active).
+//   RATE  -- essential at 720p/480p, where the ratio is 2.871 / 2.0047 output lines per
+//            source line. The fractional part has to be absorbed somewhere, and the servo
+//            absorbs it by sigma-delta dithering VTOTAL between two integers.
+//   PHASE -- essential everywhere. Nothing else aligns the SOURCE frame to the OUTPUT
+//            frame, and v_active is driven by the source's own vblank, so a bad phase
+//            means the active area straddles output vblank and little or nothing is drawn.
 //
-// NeoTang's neo2hdmi.sv says the same thing in its header: "The servo moves the phase by
-// varying VTOTAL, never by resetting the raster." It keeps its servo under an exact lock
-// for exactly this reason.
+// Under VIDEOID 200 the ratio is exactly 3.000, so the RATE job has nothing to do -- but
+// the loop does not simply idle. With zero rate error every constant VTOTAL is an
+// equilibrium, so the integrator has no unique fixed point and the sigma-delta stage keeps
+// alternating VTOTAL forever on measurement noise alone. That alternation moves the
+// picture by one line, several times a second: the "parkinson" tremor measured on hardware
+// 2026-09-20. Leaving the servo enabled here would therefore reintroduce, by a slower
+// route, the exact artefact this mode was built to eliminate.
 //
-// hdmi.sv's mode-200 frame_height_base is 787 so that the servo's clamped extra=2 lands
-// on the exact 789; see the comment there.
-wire [7:0] vtotal_extra_eff = vtotal_extra;
+// So for mode 200 VTOTAL is pinned to the exact 789 (hdmi.sv's frame_height_base, with
+// this forced to 0) and the PHASE job moves to the one-shot raster reset above. That is
+// MiSTle-Dev/c64nano's arrangement exactly -- video_analyzer.v + a vreset into the HDMI
+// counters, and no servo in the design at all.
+//
+// NOTE this contradicts the earlier reading of NeoTang's neo2hdmi.sv header ("the servo
+// moves the phase by varying VTOTAL, never by resetting the raster"). That header is
+// describing a design that has never run on hardware, and it is the weaker of the two
+// precedents: c64nano/MiSTeryNano ship the raster-reset arrangement to real users on this
+// same board family.
+wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
 
-assign dbg_vtotal_extra  = vtotal_extra;   // the APPLIED value, not an idle computation
+// The raster reset is likewise mode-200 only; every other mode keeps the free-running
+// counters it has always had.
+wire       hdmi_reset       = (VIDEOID == 200) ? vreset : 1'b0;
+
+assign dbg_vtotal_extra  = vtotal_extra_eff;   // the APPLIED value, not an idle computation
 
 hdmi #( .VIDEO_ID_CODE(VIDEOID),
         .DVI_OUTPUT(0),
@@ -710,7 +771,7 @@ hdmi_inst( .clk_pixel_x5(clk_5x_pixel),
         .clk_pixel(clk_pixel),
         .clk_audio(clk_audio),
         .rgb(rgb),
-        .reset(0),
+        .reset(hdmi_reset),
         .vtotal_extra(vtotal_extra_eff),
         .audio_sample_word(audio_sample_word),
         .tmds(tmds),
