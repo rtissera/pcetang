@@ -19,6 +19,11 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      board:
+        description: 'Which board to build (all, console60k, primer25k, nano20k)'
+        required: false
+        default: 'all'
   schedule:
     # Nightly, so a slow drift in timing margin is caught even without a push.
     - cron: '0 2 * * *'
@@ -49,7 +54,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip non-selected board
+        # A single-board dispatch turns a ~20 minute three-board sweep into ~6 minutes,
+        # which matters when iterating against hardware. Push and schedule runs are
+        # unaffected: the input is empty there, so everything builds.
+        id: gate
+        run: |
+          WANT="${{ github.event.inputs.board }}"
+          if [ -n "$WANT" ] && [ "$WANT" != "all" ] && [ "$WANT" != "${{ matrix.board }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "not selected (${{ matrix.board }} != $WANT), skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Synthesise ${{ matrix.board }}
+        if: steps.gate.outputs.skip != 'true'
         run: |
           set -o pipefail
           # A stale netlist is a real hazard here: rebuilding after only a shared
@@ -70,6 +90,7 @@ jobs:
           $HOME/gowin-edu/IDE/bin/gw_sh ${{ matrix.tcl }} 2>&1 | tee gw_sh_${{ matrix.board }}.log
 
       - name: Gate on timing and report resources
+        if: steps.gate.outputs.skip != 'true'
         run: |
           python3 - <<'PY'
           import re, html, sys, glob, os
@@ -111,9 +132,11 @@ jobs:
           PY
 
       - name: Checksum
+        if: steps.gate.outputs.skip != 'true'
         run: md5sum impl/pnr/${{ matrix.top }}.bin impl/pnr/${{ matrix.top }}.fs
 
       - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.skip != 'true'
         with:
           name: bitstream-${{ matrix.board }}
           path: |

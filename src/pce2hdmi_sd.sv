@@ -124,7 +124,13 @@ wire [10:0] cx, frameWidth;
 // writer finishes the other buffer 63.70 us later and comes straight back to the one still
 // being read. Modelled in sim/hdmi/sd_race.py: 522 collisions in 749 reads with 2 buffers,
 // ZERO with 3. Cost is one extra BSRAM block.
-localparam int N_LINE_BUF = 3;
+// 4 since 2026-09-21, was 3. Hardware showed a whole-frame flicker during MOTION only,
+// invisible on a static screen -- the signature of tearing, not of a drifting line or a
+// rate beat. Going 2 -> 3 previously took measured tearing from 17.2% to 2.7%; this is the
+// same lever. It is also close to free: the array is N * 1024 * 9 bits, so 3 buffers need
+// 27648 bits (two 18Kb BSRAM blocks) and 4 need 36864 -- still exactly two. All the index
+// registers are already [1:0], so 0..3 needs no width change.
+localparam int N_LINE_BUF = 4;
 logic [8:0] sd_buffer [0:N_LINE_BUF*(2**LINE_ABITS)-1];   // 9-bit raw RGB (3/3/3), no palette
 logic [1:0] wr_line_idx;                 // 0..2, replaces the old ping-pong toggle
 logic [LINE_ABITS-1:0] wr_cnt;
@@ -193,7 +199,15 @@ end
 // This changes only WHERE pixels are drawn. cx/cy, frame_height, the VTOTAL servo, the
 // packet sequencers and the audio path are all untouched, so HDMI lock cannot regress.
 // Set ASPECT_4_3 to 0 to get the previous full-width stretch back.
-localparam bit ASPECT_4_3 = 1'b1;
+// OFF for VIDEOID 2, ON otherwise (2026-09-21).
+//
+// This windowing assumes SQUARE output pixels: it computes width = height * 4/3, which is
+// right for 1280x720 and for the custom mode. It is WRONG for CEA 720x480, where the
+// pixels are 0.889 wide because the frame is displayed as 4:3. There the true 4:3 width is
+// height * 1.5, and 720/480 IS exactly 1.5 -- so the full frame already is 4:3 and any
+// windowing makes the picture both narrower and the wrong shape. Confirmed on hardware:
+// pillarboxed with visibly wrong geometry at 480p.
+localparam bit ASPECT_4_3 = (VIDEOID == 2) ? 1'b0 : 1'b1;
 
 reg  [10:0] x_start = 11'd0;
 reg  [10:0] x_stop  = 11'(SCREEN_WIDTH);
@@ -553,7 +567,16 @@ end
 reg tog_meta, tog_sync, tog_prev;
 reg [9:0] vs_cy;
 reg       vs_seen   = 1'b0;
-reg [7:0] vtotal_extra = 8'd5;                        // applied value, slew limited
+// Seeded PER MODE (2026-09-21), so the sink sees one clean lock instead of
+// lock -> roll -> unlock -> relock. The servo starts wherever this says and walks to its
+// target one line per frame; starting far away moves the frame RATE while a display is
+// trying to lock to it, which is exactly the boot roll seen on hardware.
+//   VIDEOID 2   base 525, target VTOTAL ~527.4 (27 MHz / 858 / 59.69 Hz) -> extra ~2.4
+//   VIDEOID 200 base 787, exact lock is 789                              -> extra 2
+//   VIDEOID 4   base 750, the +2.28 lines/frame the 720p PLL was tuned for -> 5
+// Seeded at 3 rather than 2 for 480p so it does not sit on the VT_LO clamp while settling.
+reg [7:0] vtotal_extra = (VIDEOID == 2)   ? 8'd3 :
+                         (VIDEOID == 200) ? 8'd2 : 8'd5;   // applied value, slew limited
 reg signed [23:0] vt_i = 24'sd1321;                   // 16.8 fixed point, seeded 5.16
 reg [7:0] vt_frac = 8'd0;                             // sigma-delta accumulator
 reg out_frame_tog = 1'b0;
