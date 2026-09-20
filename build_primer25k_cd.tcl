@@ -95,14 +95,8 @@ set_option -bit_compress 1
 # than the pre-fix tag (21459 vs 21544) -- placement variance again, not capacity. The
 # pre-fix tag still routes with 1 but at +0.002% clk_pce. place_option 0 on HEAD: 0/0,
 # clk_pce 43.090/42.857 MHz (+0.54%), clk_sdram 120.78/120, Logic 94%, BSRAM 36/56.
-# 2026-09-20 (branch fix/hdmi-exact-lock): place_option 0 -> 1. The exact-lock video
-# change adds ~89 LUTs and a new clock domain to a board already at 94% logic, and
-# option 0 then failed with "DesRoute failed / 20 unrouted nets" -- the same PR0004
-# signature option 2 gave in the sweep above. This board's own history says the binding
-# constraint here is placement VARIANCE, not capacity (option 1 once beat option 0 by
-# +0.5% at HIGHER utilisation), so the lever is the placer objective, not area.
-set_option -place_option 1
-set_option -route_option 1
+set_option -place_option 0
+set_option -route_option 0
 # 2026-09-06 real fix, CONFIRMED by a 3-way sweep: place_option 1 (below) stopped routing
 # this board once the sdram.sv port-B deadlock fix landed -- ERROR (PR0004), 15 unrouted
 # nets, deterministic. Swept place_option 0/2 and route_option 1 on identical trees:
