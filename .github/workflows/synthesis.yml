@@ -120,6 +120,11 @@ jobs:
             impl/pnr/${{ matrix.top }}.bin
             impl/pnr/${{ matrix.top }}.fs
             impl/pnr/${{ matrix.top }}.rpt.txt
+            # The timing report the gate above parses. Worth keeping: without it the only
+            # record of per-clock margin is whatever the gate chose to print, and checking
+            # a clock it did not print (clk_5x_pixel, which has no timed paths and so no
+            # Fmax row) means re-running the whole build.
+            impl/pnr/${{ matrix.top }}_tr_content.html
             gw_sh_${{ matrix.board }}.log
           if-no-files-found: error
 

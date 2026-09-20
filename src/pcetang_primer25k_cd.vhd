@@ -125,11 +125,13 @@ architecture rtl of pcetang_primer25k_cd is
 
    component console60k_pll is
       port (
-         clkin     : in  std_logic;
-         reset     : in  std_logic;
-         clk_pce   : out std_logic;
-         clk_sdram : out std_logic;
-         lock      : out std_logic
+         clkin        : in  std_logic;
+         reset        : in  std_logic;
+         clk_pce      : out std_logic;
+         clk_sdram    : out std_logic;
+         clk_pixel    : out std_logic;
+         clk_5x_pixel : out std_logic;
+         lock         : out std_logic
       );
    end component;
 
@@ -576,13 +578,29 @@ begin
    -- matching comment for the real schematic/hardware confirmation.
    reset_n <= (not key_reset_n) and pll_lock and hdmi_pll_lock;
 
+   -- EXACT VIDEO LOCK (2026-09-20, branch fix/hdmi-exact-lock). This board shares
+   -- console60k_pll.vhd, so it shares the 1200 MHz VCO and the 42.857 MHz core clock --
+   -- the arithmetic is identical to Console 60K's and needs no re-derivation:
+   --
+   --   clk_pixel = 1200/20 = 60 MHz, H_total 1274 -> exactly 3 output lines per source
+   --   line; V_total 789 = 263 x 3.
+   --
+   -- This board gains MORE than Console 60K does. It was on the 480p PLL, and 480p60 is
+   -- the mode some real sinks on this hardware reject outright with "no signal" (see the
+   -- note above the 720p PLL instance in pcetang_console60k_cd.vhd). Exact lock moves it
+   -- to a 720p-class line rate AND removes the 2.87-lines-per-source-line crawl, while
+   -- freeing a PLL primitive.
+   --
+   -- TO REVERT: restore the hdmi_pll instance below, drop clk_pixel/clk_5x_pixel from
+   -- this port map, and delete the generic map on hdmi_out. The 480p PLL is deliberately
+   -- left in the build for exactly that.
    pll: console60k_pll
    port map (clkin => clk, reset => key_reset_n, clk_pce => clk_pce,
-             clk_sdram => clk_sdram, lock => pll_lock);
+             clk_sdram => clk_sdram, clk_pixel => clk_pixel,
+             clk_5x_pixel => clk_5x_pixel, lock => pll_lock);
 
-   hdmi_pll: pcetang_console60k_hdmi_pll_480p
-   port map (clkin => clk, reset => key_reset_n, clk_pixel => clk_pixel,
-             clk_5x_pixel => clk_5x_pixel, lock => hdmi_pll_lock);
+   -- One PLL now supplies both domains, so there is no second lock to wait on.
+   hdmi_pll_lock <= '1';
 
    -- Same init-hold shape as NECTang's own primer25k_core_test.vhd.
    process (clk_pce)
@@ -1272,6 +1290,12 @@ begin
                        & (joy_active(8) or joy_active(0)));  -- I   <- A or B
 
    hdmi_out: pce2hdmi_sd
+   generic map (
+      VIDEOID       => 200,      -- custom "PCE exact lock", 1274x789 @ 60 MHz
+      CLKFRQ        => 60000,    -- kHz, matches clk_pixel (1200/20) exactly
+      SCREEN_WIDTH  => 968,      -- 726 * 4/3, the 4:3 window inside the 1274-pixel line
+      SCREEN_HEIGHT => 726       -- 242 active source lines x 3
+   )
    port map (
       clk => clk_pce, resetn => reset_n,
       video_r => video_r, video_g => video_g, video_b => video_b,
