@@ -1470,7 +1470,7 @@ begin
    -- TO REVERT to the shipping 720p path: put hdmi_pll back, drop clk_pixel/clk_5x_pixel
    -- from this port map, and set VIDEOID/CLKFRQ/SCREEN_* below back to 4/74375/1280/720.
    -- pcetang_console60k_hdmi_pll_720p.vhd is deliberately left in the build for exactly
-   -- that, because 1092x526 is non-standard blanking and only real sinks can approve it.
+   -- that, because 858x526 still carries one line more than CEA 480p60's 525.
    pll: console60k_pll
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, clk_pixel => clk_pixel,
@@ -1512,12 +1512,12 @@ begin
    -- too -- the menu only kept working because it runs on monitor.bin, a different
    -- bitstream that has one.
    ds2_p1 : controller_ds2
-      generic map ( FREQ => 42_857_000 )      -- clk_pce
+      generic map ( FREQ => 42_755_682 )      -- clk_pce
       port map ( clk => clk_pce, snes_buttons => joy1_ds2,
                  ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
 
    ds2_p2 : controller_ds2
-      generic map ( FREQ => 42_857_000 )
+      generic map ( FREQ => 42_755_682 )
       port map ( clk => clk_pce, snes_buttons => joy2_ds2,
                  ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
 
@@ -1526,7 +1526,7 @@ begin
 
    sys_inst: iosys_bl616
    generic map (
-      FREQ => 42_857_000,     -- matches clk_pce below, not the AUDIO/hclk domain
+      FREQ => 42_755_682,     -- matches clk_pce below, not the AUDIO/hclk domain
       COLOR_LOGO => "011000000001000",   -- purple-ish, arbitrary first-cut choice
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00",
@@ -4041,8 +4041,8 @@ begin
    -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
    generic map (
-      VIDEOID       => 200,      -- "PCE exact lock": CEA 480p active area, 1092x526 frame
-      CLKFRQ        => 34286,    -- kHz, matches clk_pixel (1200/35 = 34.2857 MHz)
+      VIDEOID       => 200,      -- "PCE exact lock": CEA 480p active area, 858x526 frame
+      CLKFRQ        => 26875,    -- kHz, matches clk_pixel (940.625/35 = 26.875 MHz)
       SCREEN_WIDTH  => 720,      -- a REAL CEA 480p active area, declared VIC 2
       SCREEN_HEIGHT => 480       -- 480 of the 484 the source gives; see hdmi.sv case 200
    )

@@ -19,15 +19,22 @@
 --                                                      must be 700 .. 1400 MHz
 --   CLKOUTn = FVCO / (ODIVn_SEL + ODIVn_FRAC_SEL/8)    must be 5.469 .. 1400 MHz
 --
--- CONSEQUENCE WORTH KNOWING BEFORE PROPOSING ANY NEW VIDEO MODE. The PFD floor limits
--- IDIV_SEL to 1 or 2 from a 50 MHz crystal. clk_pce must be exactly 300/7 MHz, so FVCO
--- must be (300/7)*k within 700..1400 with 6k/7 expressible in eighths -- which leaves only
--- FVCO 900 (k=21) and FVCO 1200 (k=28). FVCO 900 cannot produce clk_sdram = 2*clk_pce on
--- any integer ODIV, so **FVCO 1200 is forced**, and with it the exact-lock H_total can only
--- be 1092 (ODIV 35) or 1274 (ODIV 30). H_total 858, the real CEA 480p line width, would
--- need FVCO 6600/7 and therefore IDIV_SEL=7 -- a 7.14 MHz PFD, far under the 19 MHz floor.
--- It was tried on 2026-09-21 and rejected by the tool. **1092 is the floor; do not
--- re-derive this.**
+-- HOW THE VIDEO LOCK AND THE CORE CLOCK RELATE. With clk_pce = FVCO/A and clk_pixel =
+-- FVCO/B, the exact-lock line width is **H_total = 1365 * A/B** -- the ODIV RATIO alone.
+-- FVCO does not appear: it sets only absolute speed. A must be even (clk_sdram = 2*clk_pce
+-- sits on ODIV A/2) and B a multiple of 5 (the 5x TMDS tap is ODIV B/5).
+--
+--   A/B = 22/35 -> H_total  858   <- the real CEA 480p60 line width, what this file uses
+--   A/B = 28/35 -> H_total 1092
+--   A/B = 28/30 -> H_total 1274
+--
+-- A DEAD END RECORDED SO IT IS NOT REPEATED: holding clk_pce at exactly 300/7 MHz (the
+-- value this file happened to start with) makes 858 unreachable -- it would need FVCO
+-- 6600/7 and hence IDIV_SEL=7, a 7.14 MHz PFD against the 19 MHz floor, which gw_sh duly
+-- rejected on 2026-09-21. That impossibility is a property of the legacy constant, NOT of
+-- the hardware. 300/7 was never a requirement; MiSTle-Dev/c64nano's whole fourth lever is
+-- that the core clock may move (its C64 NTSC runs 32.5 MHz against a real 32.727, -0.7%).
+-- Letting clk_pce move by a quarter of a percent buys the standard line width.
 -- Cross-checked against that file's own claim ("lands on exactly 28.000 MHz" from a 50 MHz
 -- crystal): FCLKIN=50, IDIV_SEL=1, MDIV_SEL=28 -> FVCO=1400 MHz; ODIV=50 -> 1400/50=28.000
 -- MHz exactly, matching. Confidence: derived and cross-checked against one known-good
@@ -63,13 +70,13 @@ entity console60k_pll is
    port (
       clkin   : in  std_logic;    -- 50 MHz crystal
       reset   : in  std_logic;    -- active-high reset input
-      clk_pce   : out std_logic;    -- 42.857 MHz -- PCE/SGX/TG16 core master clock
+      clk_pce   : out std_logic;    -- 42.7557 MHz -- PCE/SGX/TG16 core master clock
       clk_sdram : out std_logic;    -- 120 MHz -- Primer 25K's sdram.sv only, see above
       -- HDMI clocks, taken from the SAME 1200 MHz VCO as clk_pce so the video raster is
       -- rationally locked to the core instead of beating against it. See the "exact
       -- lock" note below.
-      clk_pixel    : out std_logic; -- 1200/35 = 34.2857 MHz
-      clk_5x_pixel : out std_logic; -- 1200/7  = 171.4286 MHz (exactly 5x clk_pixel)
+      clk_pixel    : out std_logic; -- 940.625/35 = 26.875 MHz
+      clk_5x_pixel : out std_logic; -- 940.625/7  = 134.375 MHz (exactly 5x clk_pixel)
       lock      : out std_logic
    );
 end entity;
@@ -198,11 +205,29 @@ begin
    PLLA_inst: PLLA
       generic map (
          FCLKIN     => "50",
-         IDIV_SEL   => 1,     -- /1
+         IDIV_SEL   => 2,     -- /2 -> PFD 25 MHz (must be 19..87.5)
          FBDIV_SEL  => 1,     -- required field, GW0205 warned it was left at an invalid
                                -- default when omitted; 1 matches the proven sibling config
-         MDIV_SEL   => 24,    -- x24 -> FVCO 1200 MHz
-         ODIV0_SEL  => 28,    -- 1200/28 = 42.857 MHz
+         -- FVCO 940.625 MHz = 50 / 2 * (37 + 5/8). MDIV_FRAC_SEL is what makes this
+         -- reachable at all; the formula this file carried for months did not know the
+         -- field existed.
+         --
+         --   940.625 / 22 = 42.755681 MHz  clk_pce
+         --   940.625 / 11 = 85.511363 MHz  clk_sdram   (exactly 2x clk_pce, as before)
+         --   940.625 / 35 = 26.875000 MHz  clk_pixel   -> H_total 858
+         --   940.625 /  7 = 134.375000 MHz clk_5x      (exactly 5x clk_pixel)
+         --
+         -- clk_pce is 0.46% slow against a real PC Engine's 42.9545 MHz, where the
+         -- previous 42.857142 was 0.23% slow. c64nano accepts 0.7% on the same trade.
+         -- The 0.24% the core gives up buys H_total 858 -- the genuine CEA 480p60 line
+         -- width -- instead of 1092, which a USB capture stick refused outright.
+         --
+         -- It also RELAXES timing: the clk_pce constraint drops from 42.857 to 42.756
+         -- while the design's Fmax is unchanged, so every board gains ~0.24% of margin.
+         MDIV_SEL      => 37,
+         MDIV_FRAC_SEL => 5,     -- 37 + 5/8 = 37.625
+
+         ODIV0_SEL  => 22,    -- 940.625/22 = 42.755681 MHz (clk_pce)
          -- 2026-09-06: 120 -> 100 MHz (ODIV1 10 -> 12). Real hardware read-back of the
          -- ROM image showed 66 of 128 bytes wrong by 1-2 scattered bits, and the flips
          -- were 128/128 in the SAME direction (0->1, never a single 1->0) -- the
@@ -235,13 +260,13 @@ begin
          -- (nand2mario's proven sdram_nes operating point) because 2x lands closest to
          -- the 80 MHz this board was already running.
          -- Refresh stays in spec: 511 cycles @85.714 MHz = 5.96 us vs 7.8 us/row.
-         ODIV1_SEL  => 14,    -- 1200/14 = 85.714 MHz (clk_sdram) = EXACTLY 2x clk_pce
+         ODIV1_SEL  => 11,    -- 940.625/11 = 85.511363 MHz (clk_sdram) = EXACTLY 2x clk_pce
          -- EXACT VIDEO LOCK (2026-09-20). The HDMI clocks come off this same 1200 MHz
          -- VCO, on two of PLLA's five spare taps, instead of from a second PLL with an
          -- unrelated VCO. That is what makes the raster rationally locked to the core:
          --
          --   source line = 2730 core dots / 42.857 MHz  = 63.70 us
-         --   output line = 1092 pixels    / 34.2857 MHz = 31.850 us
+         --   output line =  858 pixels    / 26.8750 MHz = 31.926 us
          --   ratio                                      = EXACTLY 2.000
          --
          -- The old path ran the pixel clock from its own 743.75 MHz VCO at 74.375 MHz
@@ -267,8 +292,8 @@ begin
          -- (43% blanking) and D=20 gives 1911 (62%); 1092 is 34%, beside c64nano's 31%.
          --
          -- 171.4286 MHz TMDS is less than HALF the 371.875 MHz the old 720p PLL ran at.
-         ODIV2_SEL  => 35,    -- 1200/35 = 34.2857 MHz (clk_pixel)
-         ODIV3_SEL  => 7,     -- 1200/7  = 171.4286 MHz (clk_5x_pixel), exact 5x
+         ODIV2_SEL  => 35,    -- 940.625/35 = 26.875000 MHz (clk_pixel) -> H_total 858
+         ODIV3_SEL  => 7,     -- 940.625/7  = 134.375000 MHz (clk_5x_pixel), exact 5x
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE",
          CLKOUT2_EN => "TRUE",

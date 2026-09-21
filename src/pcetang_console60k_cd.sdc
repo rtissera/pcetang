@@ -20,24 +20,24 @@ create_clock -name clk -period 20.000 [get_ports {clk}]
 
 # clk_pce: 42.857 MHz (FVCO 1200 MHz / ODIV0 28) -- same math as NECTang's own
 # console60k_pll.vhd, unchanged here.
-create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 6 [get_nets {clk_pce}]
+create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk -divide_by 352 -multiply_by 301 [get_nets {clk_pce}]
 
-create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 12 [get_nets {clk_sdram}]
+create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 176 -multiply_by 301 [get_nets {clk_sdram}]
 
 # clk_pixel: 73.750 MHz (FVCO 1475 MHz / ODIV0 20), -0.67% vs the nominal 74.25 CEA-861
 # 1280x720p60 spec -- see pcetang_console60k_hdmi_pll_720p.vhd's header for the real
 # PLLA-parameter derivation. Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV0_SEL=20).
 # EXACT VIDEO LOCK. clk_pixel comes off the CORE PLL's 1200 MHz VCO (ODIV2 = 35), not a
-# separate HDMI PLL: 50 * 24/35 = 34.285714 MHz. With H_total 1092 that is exactly two
+# separate HDMI PLL: 50 * 43/80 = 26.875000 MHz. With H_total 858 that is exactly two
 # output lines per source line. See console60k_pll.vhd.
-create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 35 -multiply_by 24 [get_nets {clk_pixel}]
+create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 80 -multiply_by 43 [get_nets {clk_pixel}]
 
 # clk_5x_pixel: 368.750 MHz (FVCO 1475 MHz / ODIV1 4), same -0.67%, exact 5x preserved.
 # Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV1_SEL=4).
 # clk_5x_pixel: 171.4286 MHz (1200 / ODIV3 7) = 50 * 24/7. Exact 5x preserved, and less
 # than HALF the 371.875 MHz the old 720p PLL ran at -- the largest serializer margin of
 # any configuration this board has been built with.
-create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 24 [get_nets {clk_5x_pixel}]
+create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 16 -multiply_by 43 [get_nets {clk_5x_pixel}]
 
 # 2026-09-07: the four `set_multicycle_path -setup 3 / -hold 2` lines that used to sit
 # here are DELETED, not relaxed. They claimed the receiver samples only every 3rd cycle
