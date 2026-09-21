@@ -4,8 +4,9 @@ PC Engine / TurboGrafx-16 core for Sipeed Tang FPGA boards, integrated with
 [TangCore](https://github.com/nand2mario/tangcore) (BL616-based ROM loading, joypad and
 on-screen display).
 
-**HuCard and CD-ROM² games boot and play on Tang Console 60K** — 720p60 HDMI with a
-correct 4:3 aspect, PSG audio, two controllers and an in-game OSD. CD games run from real
+**HuCard and CD-ROM² games boot and play on Tang Console 60K** — exact-locked HDMI
+(720x480, CEA 480p, no shimmer or tremor) with a correct 4:3 aspect, PSG audio, two
+controllers and an in-game OSD. CD games run from real
 CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
 Prince of Persia, Rondo of Blood and Bonk III are playable. **SuperGrafx works** — all four
 titles tested boot and play. Arcade Card titles do not run yet.
@@ -100,9 +101,10 @@ and Battle Ace — boot and play on real hardware. Every one of them was broken 
 below). 1941 was a black screen, Aldynes and Daimakaimura showed graphic corruption, and
 Battle Ace was missing its sprites.
 
-**Video is not perfect.** The scandoubler carries about 2.7% residual line tearing (down
-from 17.2%) and a low-level shimmer that is inherent to the 755.16-output-lines-per-frame
-ratio; the servo dithers between 755 and 756.
+**Video is exact-locked.** Every PC Engine line becomes exactly two HDMI lines, so there is
+no shimmer, no tremor and no roll: the output and the core share one VCO on integer
+dividers, and the frame carries a real CEA 480p active area (720x480, VIC 2) so displays
+accept it. The earlier "inherent" shimmer was not inherent. See `docs/STATUS.md`.
 
 ### Fixed 2026-09-19: CD-RAM shadowed every HuCard over 832 KB
 

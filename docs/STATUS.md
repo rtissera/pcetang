@@ -4,7 +4,48 @@ Last updated 2026-09-19. Written to be blunt about what is *verified on hardware
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
-## Headline
+## Current state (2026-09-21) — read this first
+
+Everything below this section is kept as a dated record and is accurate for its date. Where
+it has been overtaken it is marked **superseded** or **resolved** in place.
+
+**HDMI on Console 60K is exact-locked (branch `fix/hdmi-exact-lock`, tag
+`hdmi-exact-lock-858-2026-09-21`, hardware-verified).** The line-by-line shimmer, the
+"parkinson" tremor and the 1-2 s roll at every title were three faces of one cause: the
+output/source line ratio was 2.871, not an integer, so the doubler crawled and the VTOTAL
+servo had to sigma-delta dither to absorb the fraction. Both HDMI clocks now come off the core's
+own VCO on integer dividers and every source line is exactly two output lines:
+
+    FVCO 940.625 MHz  ->  clk_pce 42.755682 (/22)  clk_pixel 26.875 (/35)  clk_5x 134.375 (/7)
+    858 x 526 frame, 720 x 480 active, declared CEA VIC 2 (480p60), aspect 4:3
+
+A sink sees a standard 480p active area under its real VIC; only V_total differs from CEA
+480p60 (526 vs 525), and that one line is what makes the lock exact (263 x 2). The recipe
+comes from MiSTle-Dev/c64nano (harbaum). There is no servo in this mode: phase is set by a
+one-shot raster reset of the counters only. Cost: the core runs 0.46% slow against a real PC
+Engine (was 0.23%), audio ~8 cents flat. Verified on a PC monitor (reports 720x480@60,
+pillarboxes correctly on "Aspect") and captured with a USB stick.
+
+**Saves: backup RAM survives a power-off (branch `feat/backup-ram-save` + firmware branch
+`feat/pce-backup-ram-save`). Implemented and simulation-tested; NOT yet tested on hardware.**
+The 2 KB backup RAM is now dual-ported; the MCU restores it from `saves/pce/<game>.sav` at
+load and saves it 2 s after the game's last write and whenever the in-game OSD opens. File
+layout is MiSTer TurboGrafx16's (raw 2 KB), so saves are interchangeable. No other TangCore
+core saves today. `sim/saveram` tests the FPGA side with real UART timing.
+
+**Known open, in order of user impact:**
+1. Saves: awaiting a hardware test (save in a game, power-cycle, reload).
+2. Arcade Card games stall on the CD interrupt path (unchanged, see below).
+3. OSD draws twice in games wider than 256 px: `overlay_x` is the game's own sample index
+   and wraps. Fix = derive it from the output position. Parked.
+4. A cheap USB capture stick rolls for ~3 s after a game changes screens (the monitor does
+   not): the one-shot raster reset re-arms on active-height changes. Capture-only.
+5. HDMI audio clock is an integer divider, 48,076 Hz (+0.16%). TVs follow it via the measured
+   CTS; capture cards must drop samples. Not confirmed as the capture crackle.
+6. Latent: huc6260 supports a 262-line frame (VCE CR bit 2) but exact lock assumes 263. No
+   game has been seen using it; a monitor would roll if one does.
+
+## Headline (historical record)
 
 **PC Engine CD games boot and run on Tang Console 60K.** Confirmed on real hardware
 2026-09-16 with *Akumajou Dracula X - Chi no Rondo* and *R-Type Complete CD*. This is the
@@ -71,12 +112,12 @@ Arcade Card RAM or registers.
 | | Console 60K | Primer 25K | Nano 20K |
 |---|---|---|---|
 | Builds clean (gw_sh, 0 errors, 0 setup/hold) | yes | yes | yes |
-| Core clock | 42.857 MHz | 42.857 MHz | **43.200 MHz** (full speed restored 2026-09-19) |
-| Timing margin | +0.105% | +1.24% | +2.95% |
-| Logic / BSRAM | 27005/59904, 110/118 | 21664/23040, 38/56 | 18571/20736, 42/46 |
+| Core clock | **42.756 MHz** (exact-lock detune, 2026-09-21) | 42.857 MHz | **43.200 MHz** (full speed restored 2026-09-19) |
+| Timing margin | +0.012% (backup-RAM build) / +0.241% (exact-lock tag) | +1.24% | +2.95% |
+| Logic / BSRAM | 26964/59904, 110/118 | 21664/23040, 38/56 | 18571/20736, 42/46 |
 | Bitstream loads, core runs on hardware | yes | **yes, 2026-09-19** (HDMI sync locked) | **never loaded** |
 | **HuCard runs on real hardware** | **YES** | no — no storage path | no — no storage path |
-| Video on real hardware | **locked, stable, 4:3** | sync only, no ROM to run | not run |
+| Video on real hardware | **exact-locked 720x480 (VIC 2), no tremor/roll, 4:3** | sync only, no ROM to run | not run |
 | Audio on real hardware | works (PSG) | no | no |
 | Controllers on real hardware | works (DS2 P1) | no | no |
 | **CD game runs on real hardware** | **YES** — Rondo, R-Type Complete CD, Prince of Persia, Bonk III, DD2 all playable | no | no |
@@ -86,6 +127,7 @@ Arcade Card RAM or registers.
 | Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
 | SuperGrafx | **on — all 4 tested boot and play** | off (`LITE => 1`) | off (no room) |
 | **HuCard > 832 KB** | **FIXED + HW-CONFIRMED 2026-09-19** (13 titles) | same fix, built | same fix, built |
+| Saves (backup RAM to SD) | **implemented, sim-tested, awaiting HW test** | not built (`SAVE_IF => 0`) | not built (`SAVE_IF => 0`) |
 
 Exact generic maps, so this cannot drift from the source:
 
@@ -183,20 +225,24 @@ Lesson worth keeping: a clean sim result bounds what the sim covered and nothing
   bitstream: unchanged. Still the CD interrupt path.
 - **1943 Kai**: occasional slowdowns and unreliable bonus pickup (possible VDC sprite
   collision). Present since day one, NOT a regression -- confirmed by the user.
-- **HDMI: four separate defects seen on real hardware, all still open.** Collected here so
-  they are not lost; none blocks play, all are visible.
+- **HDMI: four separate defects seen on real hardware.** **Resolved 2026-09-21 by exact lock
+  (see Current state), except as noted per item.** Kept as the record of what was seen.
   1. **Lock is imperfect for the first second or two on EVERY title.** Reported across
      Bomberman '94, Parodius, PC Genjin 3 and 1943 Kai on 2026-09-19 -- worst on the first
      three, "less visible" on 1943 Kai. Probably the vsync servo re-acquiring, but it has
-     never been instrumented.
+     never been instrumented. **Resolved: gone on the exact-lock build (no servo).**
   2. **Parodius Da! shows rolling white/black lines once stable.** Only title seen doing it
      so far; likely the background-colour path rather than the scandoubler, since the other
-     three are clean after lock.
+     three are clean after lock. **Not retested on the exact-lock build.**
   3. **~2.7% residual torn output lines** (down from 17.2% via the three line buffers).
      Measured in `sim/hdmi`, confirmed by eye: "I can barely see any corruption."
+     **Not re-measured.** The on-hardware figures came through a capture harness later found
+     to misreport (forced MJPEG); the monitor shows no tearing on the exact-lock build.
   4. **Low-level shimmer, believed inherent.** The exact lock needs 755.16 output lines per
      source frame, so the servo dithers between 755 and 756. A PLL search for an exact ratio
-     was exhausted; see the HDMI notes in session memory.
+     was exhausted; see the HDMI notes in session memory. **Resolved: it was not inherent.**
+     That search held clk_pce fixed at 300/7 MHz; letting it move 0.24% reaches an exact
+     ratio. The "shimmer" and the dither were the defect.
 
 Six mechanisms were eliminated with measurements before the real cause was found -- VRAM1
 on SDRAM, ROM size/mapping/headers, the RTL itself (donor-identical and it simulates
@@ -244,6 +290,13 @@ decision, 2026-09-09: not a priority until HuCard is right everywhere.
 margin) — scratch work only, never shipped.
 
 ## Rolling picture (Console 60K): FIXED and confirmed stable
+
+> **Superseded on Console 60K by exact lock (2026-09-21).** This servo design is correct for a
+> non-integer ratio and is still what `pce2hdmi_sd.sv` runs in every other mode, but its
+> steady-state 755/756 dither is precisely the tremor that exact lock removes. Note on the
+> "raster-reset genlock" dead end below: it failed as a PER-FRAME rewind of the whole raster
+> under a non-exact ratio. Exact lock uses a ONE-SHOT reset of cx/cy only (`hdmi.sv`'s
+> `vreset`), and it works -- a different mechanism, not a contradiction.
 
 Real hardware, 2026-09-10. `pce2hdmi_sd.sv` is a 2-line ping-pong buffer whose read side
 shows whichever source line just finished, so it already absorbs phase error line by
@@ -321,6 +374,13 @@ works. The verdict was drawn from one bad control law, not from the approach.
 
 ## 4:3 aspect ratio (Console 60K): DONE
 
+> **Changed for exact lock (2026-09-21).** Mode 200 fills the whole 720x480 active area,
+> which is non-square and declared 4:3 through VIC 2 and `PICTURE_ASPECT_RATIO`, so the sink
+> applies the aspect -- as real 480p hardware does. The square-pixel windowing below is off
+> in that mode (`ASPECT_4_3` is per-mode) and still used by the others. `v_active` was
+> decoupled from `ASPECT_4_3` at the same time; gating both on one flag disabled vertical
+> clipping whenever windowing was turned off.
+
 The picture used to be stretched to the full 1280, i.e. roughly 16:9. The PC Engine is
 4:3 whatever dot clock it is in — 256, 341 and 512 wide all map to the same 4:3 screen —
 and the Bresenham stretch already handled that correctly by mapping whatever width was
@@ -366,9 +426,8 @@ Added 2026-09-18, ahead of the older list below:
 0b. **SuperGrafx: RESOLVED 2026-09-19.** All four titles boot and play on hardware. Every
     symptom -- 1941's black screen, Aldynes/Daimakaimura corruption, Battle Ace's missing
     sprites -- was the CD-RAM shadow, not an SGX bug. See the root-cause section above.
-0c. **HDMI residual tearing ~2.7%** (down from 17.2% via three line buffers) plus a
-    low-level shimmer that is inherent: the exact lock needs 755.16 output lines per
-    frame, so the servo dithers 755/756. PLL search for an exact ratio was exhausted.
+0c. ~~HDMI residual tearing ~2.7% plus an inherent shimmer~~ **Resolved 2026-09-21** by exact
+    lock; the shimmer was not inherent (see Current state).
 
 None of the items below block HuCard play. All observed on real hardware 2026-09-10.
 
@@ -379,12 +438,15 @@ None of the items below block HuCard play. All observed on real hardware 2026-09
    write counter is the instrument — a real stall shows up as a dip in writes per sample.
 2. **Suspected VDC sprite-collision bugs** — wrong behaviour in some titles. Core logic,
    unrelated to video output.
-3. **OSD is glitchy in-game** — readable and navigable, but visibly imperfect. Likely the
-   overlay path assuming TangCore's standard raster; ours is 1280x720 at a non-standard
-   755-line vertical total with a pillarboxed window. Deferred by choice.
+3. **OSD is glitchy in-game** — readable and navigable, but visibly imperfect. **Cause found
+   2026-09-21:** `overlay_x` is the game's own sample index, so in any mode wider than 256 px
+   it passes 255 and the 256-wide OSD canvas wraps (the cursor is drawn twice). Not a raster
+   issue. Fix = derive it from the output position. Parked.
 4. **Brief roll at title on some titles** (seen on Raiden, then stable). Expected: the
-   servo re-acquires when the source changes mode. Worth confirming it is only that.
-5. **Uneven scanline thickness.** The read side updates only on even `cy`, so with a true
+   servo re-acquires when the source changes mode. **Resolved on the monitor by exact lock.**
+   A cheap capture stick still rolls briefly after a screen change (see Current state).
+5. **Uneven scanline thickness.** **Resolved by exact lock: every source line is exactly two
+   output rows.** Original note: the read side updates only on even `cy`, so with a true
    ratio of 2.871 each source line occupies 2 or 4 output rows — a 100% variation.
    Dropping that gate gives 2 or 3 rows, much more uniform; `out_line_pair` must stay on
    the /2 cadence or the OSD's vertical scale halves. Deliberately NOT bundled with the
@@ -460,8 +522,9 @@ an MCU. That work is scoped and deliberately out of scope for this release.
 
 ### Open
 
-- **Games do not run.** CPU at full speed, VBlank firing, no bad-bank trap, but VDC
-  writes stop. Current suspect: the CD interrupt path (IRQ2 from `CD_DTR`/`CD_DTD`).
+- ~~**Games do not run.**~~ **Resolved 2026-09-16** — the CD-RAM bridge handed the CPU byte
+  N-1 on back-to-back fetches (see Headline). CD games boot and play. Original note: CPU at
+  full speed, VBlank firing, no bad-bank trap, but VDC writes stop.
 - **SCSI bus reset is ignored** — `CD_RESET => open`. Real defect; the obvious
   level-sensitive fix regressed hardware and was reverted ($1804 bit 1 is a latch).
 - **UART RX margin is thin** — FIFO high-water 25 of 32 bytes.
