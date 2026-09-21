@@ -7,6 +7,12 @@ module packet_picker
     // The VIC to ADVERTISE, separate from the internal mode number. Defaults to the mode
     // number, which is right for every real CEA mode.
     parameter int AVI_VIC = VIDEO_ID_CODE,
+    // The picture aspect the AVI InfoFrame declares. Defaults to 2'b00 "No Data", which is
+    // what every mode has always sent. Only the exact-lock mode overrides it (2'b01, 4:3),
+    // and ONLY that mode, on purpose: changing the default altered the constant AVI packet
+    // and its checksum logic in every build, and on Primer 25K -- at 100% CLS -- that alone
+    // moved clk_pce from +1.241% to -0.530% (7 setup violations) with no functional change.
+    parameter bit [1:0] PICTURE_ASPECT_RATIO = 2'b00,
     parameter real VIDEO_RATE = 0,
     parameter bit IT_CONTENT = 1'b0,
     parameter int AUDIO_BIT_WIDTH = 0,
@@ -145,6 +151,7 @@ auxiliary_video_information_info_frame #(
     // is far likelier to refuse than one told the truth. The guard lives in the AVI module;
     // this must pass the value through intact for it to work.
     .VIDEO_ID_CODE(AVI_VIC),
+    .PICTURE_ASPECT_RATIO(PICTURE_ASPECT_RATIO),
     .IT_CONTENT(IT_CONTENT)
 ) auxiliary_video_information_info_frame(.header(headers[130]), .sub(subs[130]));
 

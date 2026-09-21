@@ -9,10 +9,9 @@ module auxiliary_video_information_info_frame
     parameter bit [1:0] BAR_INFO = 2'b00, // Not valid
     parameter bit [1:0] SCAN_INFO = 2'b00, // No data
     parameter bit [1:0] COLORIMETRY = 2'b00, // No data
-    // 2'b01 = 4:3. Was 2'b00 "No Data", and hdmi.sv never overrode it, so every mode this
-    // core has ever emitted left the sink to guess the picture aspect. Every mode it
-    // actually uses (480p, 720p as a 4:3 window, and custom 200) is 4:3 content.
-    parameter bit [1:0] PICTURE_ASPECT_RATIO = 2'b01, // 4:3. Was "No data", See CEA-CEB16 for more information about Active Format Description processing.
+    // Default kept at main's 2'b00 "No Data" so every existing mode stays bit-identical --
+    // see the PICTURE_ASPECT_RATIO pass-through in packet_picker.sv for why.
+    parameter bit [1:0] PICTURE_ASPECT_RATIO = 2'b00, // No data, See CEA-CEB16 for more information about Active Format Description processing.
     parameter bit [3:0] ACTIVE_FORMAT_ASPECT_RATIO = 4'b1000, // Not valid unless ACTIVE_FORMAT_INFO_PRESENT = 1'b1, then Same as picture aspect ratio
     parameter bit IT_CONTENT = 1'b0, //  The IT content bit indicates when picture content is composed according to common IT practice (i.e. without regard to Nyquist criterion) and is unsuitable for analog reconstruction or filtering. When the IT content bit is set to 1, downstream processors should pass pixel data unfiltered and without analog reconstruction.
     parameter bit [2:0] EXTENDED_COLORIMETRY = 3'b000, // Not valid unless COLORIMETRY = 2'b11. The extended colorimetry bits, EC2, EC1, and EC0, describe optional colorimetry encoding that may be applicable to some implementations and are always present, whether their information is valid or not (see CEA 861-D Section 7.5.5).
