@@ -265,8 +265,11 @@ wire v_active = aspect_valid ? vact_sr[2] : 1'b1;
 // no reset is ever issued, the raster free-runs and v_active falls back to 1 -- a
 // full-screen picture, the same behaviour as before this change. The one failure mode that
 // must stay unreachable is a blank screen with no way to the OSD.
-reg        phase_armed = 1'b1;              // fire once at power-up, then on any change
-reg        vreset      = 1'b0;              // single-cycle, clk_pixel domain
+// The registers and the arming logic live in a `generate` keyed on VIDEOID below, NOT
+// behind a constant mux on a shared signal. This project has been bitten by that exact
+// shortcut before: an unused trace path tied off at the top level did NOT prune and cost
+// Primer 25K 721 timing violations, and the fix was to gate it with a module parameter.
+// Primer and Nano run VIDEOID 2 and must carry none of this.
 
 // height * 4/3, rounded. 21845/16384 = 1.333313, so the error is under a tenth of a pixel.
 wire [26:0] w_mul  = {16'b0, act_h} * 27'd21845 + 27'd8192;
@@ -290,21 +293,8 @@ always_ff @(posedge clk_pixel) begin
 		if (act_cnt >= 11'(ACT_H_MIN) && act_cnt <= 11'(ACT_H_MAX)) begin
 			act_h        <= act_cnt;
 			aspect_valid <= 1'b1;
-			// The source geometry moved (242 <-> 231 active lines): re-align the phase
-			// on the next frame. This is video_analyzer.v's `changed`, narrowed to the
-			// one quantity that can actually change on this core.
-			if (act_cnt != act_h) phase_armed <= 1'b1;
 		end else
 			aspect_valid <= 1'b0;
-	end
-
-	// Fire on the output line where vact_sr[2] is about to go high -- the first line that
-	// gets drawn -- so the reset puts cy at 0 exactly there and the source's active area
-	// fills the output's active window from the top.
-	vreset <= 1'b0;
-	if (phase_armed && (cy != cy_rv) && vact_sr[1] && !vact_sr[2]) begin
-		vreset      <= 1'b1;
-		phase_armed <= 1'b0;
 	end
 
 	// Recompute the window once per frame, so it is stable while a frame is being drawn.
@@ -756,11 +746,42 @@ assign dbg_vs_cy         = vs_cy_snap;
 // same board family.
 wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
 
-// The raster reset is likewise mode-200 only; every other mode keeps the free-running
-// counters it has always had. It goes to hdmi.sv's `vreset`, NOT its `reset`: the wide
-// reset fans out to the TMDS-clock serializer and cost 3 setup violations when it was tried
-// (clk_pce +0.250% -> +0.016%). See the port comment in hdmi.sv.
-wire       hdmi_reset       = (VIDEOID == 200) ? vreset : 1'b0;
+// The raster reset is mode-200 only, and ELABORATED only for mode 200 -- a generate, not a
+// constant mux on a shared signal, so Primer 25K and Nano 20K carry ZERO logic for it. This
+// project has been bitten by that shortcut before: an unused trace path tied off at the top
+// level did not prune and cost Primer 25K 721 timing violations, and the fix was to gate it
+// with a module parameter. Primer sits at 94% logic and 100% CLS with no slack to spare.
+//
+// It drives hdmi.sv's `vreset`, NOT its `reset`: the wide reset fans out to the TMDS-clock
+// serializer and cost 3 setup violations when that was tried (clk_pce +0.250% -> +0.016%).
+wire hdmi_reset;
+generate
+if (VIDEOID == 200) begin : g_phase_reset
+	reg        phase_armed = 1'b1;   // fire once at power-up, then on any geometry change
+	reg [10:0] act_h_seen  = 11'd0;
+	reg        vreset_r    = 1'b0;
+	always_ff @(posedge clk_pixel) begin
+		vreset_r <= 1'b0;
+		// act_h is re-latched once per frame; a change means the source moved between its
+		// 242- and 231-active-line modes. c64nano's video_analyzer.v `changed`, narrowed
+		// to the one quantity that can vary on this core.
+		if (act_h != act_h_seen) begin
+			act_h_seen  <= act_h;
+			phase_armed <= 1'b1;
+		end
+		// Fire on the output line where vact_sr[2] is about to go high -- the first line
+		// drawn -- so cy lands on 0 exactly there and the source's active area fills the
+		// output's active window from the top.
+		if (phase_armed && (cy != cy_rv) && vact_sr[1] && !vact_sr[2]) begin
+			vreset_r    <= 1'b1;
+			phase_armed <= 1'b0;
+		end
+	end
+	assign hdmi_reset = vreset_r;
+end else begin : g_no_phase_reset
+	assign hdmi_reset = 1'b0;
+end
+endgenerate
 
 assign dbg_vtotal_extra  = vtotal_extra_eff;   // the APPLIED value, not an idle computation
 
