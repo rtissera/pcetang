@@ -665,12 +665,12 @@ begin
    romb_req  <= wr_req xor rd_req;
 
    ds2_p1 : controller_ds2
-      generic map ( FREQ => 42_857_000 )      -- clk_pce
+      generic map ( FREQ => 42_755_682 )      -- clk_pce
       port map ( clk => clk_pce, snes_buttons => joy1_ds2,
                  ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
 
    ds2_p2 : controller_ds2
-      generic map ( FREQ => 42_857_000 )
+      generic map ( FREQ => 42_755_682 )
       port map ( clk => clk_pce, snes_buttons => joy2_ds2,
                  ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
 
@@ -680,7 +680,7 @@ begin
 
    sys_inst: iosys_bl616
    generic map (
-      FREQ => 42_857_000,
+      FREQ => 42_755_682,
       COLOR_LOGO => "011000000001000",
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00"
