@@ -123,7 +123,10 @@ end entity;
 
 architecture rtl of pcetang_primer25k_cd is
 
-   component console60k_pll is
+   -- This board's OWN PLL (src/pce/common/pll/primer25k_pll.vhd), not Console 60K's.
+   -- It used to instantiate console60k_pll, so Console 60K's video experiments moved this
+   -- board's core and SDRAM clocks; see that file's header for why that kept breaking it.
+   component primer25k_pll is
       port (
          clkin     : in  std_logic;
          reset     : in  std_logic;
@@ -576,7 +579,7 @@ begin
    -- matching comment for the real schematic/hardware confirmation.
    reset_n <= (not key_reset_n) and pll_lock and hdmi_pll_lock;
 
-   pll: console60k_pll
+   pll: primer25k_pll
    port map (clkin => clk, reset => key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, lock => pll_lock);
 
@@ -665,12 +668,12 @@ begin
    romb_req  <= wr_req xor rd_req;
 
    ds2_p1 : controller_ds2
-      generic map ( FREQ => 42_755_682 )      -- clk_pce
+      generic map ( FREQ => 42_857_000 )      -- clk_pce
       port map ( clk => clk_pce, snes_buttons => joy1_ds2,
                  ds_clk => ds_clk, ds_miso => ds_miso, ds_mosi => ds_mosi, ds_cs => ds_cs );
 
    ds2_p2 : controller_ds2
-      generic map ( FREQ => 42_755_682 )
+      generic map ( FREQ => 42_857_000 )
       port map ( clk => clk_pce, snes_buttons => joy2_ds2,
                  ds_clk => ds_clk2, ds_miso => ds_miso2, ds_mosi => ds_mosi2, ds_cs => ds_cs2 );
 
@@ -680,7 +683,7 @@ begin
 
    sys_inst: iosys_bl616
    generic map (
-      FREQ => 42_755_682,
+      FREQ => 42_857_000,
       COLOR_LOGO => "011000000001000",
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00"
