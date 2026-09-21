@@ -1,3 +1,5 @@
+# MEASUREMENT ONLY (branch measure/*): clk_pce/clk_sdram over-constrained to 44/88 MHz (+2.9%)
+# to find the real Fmax ceiling -- the placer stops once timing is met. NEVER ship this SDC.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Tang Console 60K, pcetang Phase 2 (CD, scandoubler HDMI path). Same clk/clk_pce as
@@ -20,9 +22,9 @@ create_clock -name clk -period 20.000 [get_ports {clk}]
 
 # clk_pce: 42.857 MHz (FVCO 1200 MHz / ODIV0 28) -- same math as NECTang's own
 # console60k_pll.vhd, unchanged here.
-create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk -divide_by 352 -multiply_by 301 [get_nets {clk_pce}]
+create_generated_clock -name clk_pce -source [get_ports {clk}] -master_clock clk -divide_by 25 -multiply_by 22 [get_nets {clk_pce}]
 
-create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 176 -multiply_by 301 [get_nets {clk_sdram}]
+create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock clk -divide_by 25 -multiply_by 44 [get_nets {clk_sdram}]
 
 # clk_pixel: 73.750 MHz (FVCO 1475 MHz / ODIV0 20), -0.67% vs the nominal 74.25 CEA-861
 # 1280x720p60 spec -- see pcetang_console60k_hdmi_pll_720p.vhd's header for the real

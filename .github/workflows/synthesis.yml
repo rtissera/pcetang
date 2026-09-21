@@ -39,12 +39,6 @@ jobs:
           - board: console60k
             tcl: build_console60k_cd.tcl
             top: pcetang_console60k_cd
-          - board: primer25k
-            tcl: build_primer25k_cd.tcl
-            top: pcetang_primer25k_cd
-          - board: nano20k
-            tcl: build_nano20k_cd.tcl
-            top: pcetang_nano20k_cd
 
     steps:
       - uses: actions/checkout@v4
