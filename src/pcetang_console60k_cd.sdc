@@ -27,16 +27,17 @@ create_generated_clock -name clk_sdram -source [get_ports {clk}] -master_clock c
 # clk_pixel: 73.750 MHz (FVCO 1475 MHz / ODIV0 20), -0.67% vs the nominal 74.25 CEA-861
 # 1280x720p60 spec -- see pcetang_console60k_hdmi_pll_720p.vhd's header for the real
 # PLLA-parameter derivation. Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV0_SEL=20).
-# EXACT VIDEO LOCK (2026-09-20). clk_pixel now comes off the CORE PLL's 1200 MHz VCO
-# (ODIV2 = 20), not a separate HDMI PLL: 50 * 6/5 = 60.000 MHz. With H_total 1274 that is
-# exactly three output lines per source line. See console60k_pll.vhd.
-create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 5 -multiply_by 6 [get_nets {clk_pixel}]
+# EXACT VIDEO LOCK. clk_pixel comes off the CORE PLL's 1200 MHz VCO (ODIV2 = 35), not a
+# separate HDMI PLL: 50 * 24/35 = 34.285714 MHz. With H_total 1092 that is exactly two
+# output lines per source line. See console60k_pll.vhd.
+create_generated_clock -name clk_pixel -source [get_ports {clk}] -master_clock clk -divide_by 35 -multiply_by 24 [get_nets {clk_pixel}]
 
 # clk_5x_pixel: 368.750 MHz (FVCO 1475 MHz / ODIV1 4), same -0.67%, exact 5x preserved.
 # Ratio: 50MHz * (MDIV_SEL=59) / (IDIV_SEL=2 * ODIV1_SEL=4).
-# clk_5x_pixel: 300.000 MHz (1200 / ODIV3 4) = 50 * 6. Exact 5x preserved, and LOWER than
-# the 371.875 MHz the old 720p PLL ran at, so the TMDS serializer has more margin, not less.
-create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 1 -multiply_by 6 [get_nets {clk_5x_pixel}]
+# clk_5x_pixel: 171.4286 MHz (1200 / ODIV3 7) = 50 * 24/7. Exact 5x preserved, and less
+# than HALF the 371.875 MHz the old 720p PLL ran at -- the largest serializer margin of
+# any configuration this board has been built with.
+create_generated_clock -name clk_5x_pixel -source [get_ports {clk}] -master_clock clk -divide_by 7 -multiply_by 24 [get_nets {clk_5x_pixel}]
 
 # 2026-09-07: the four `set_multicycle_path -setup 3 / -hold 2` lines that used to sit
 # here are DELETED, not relaxed. They claimed the receiver samples only every 3rd cycle

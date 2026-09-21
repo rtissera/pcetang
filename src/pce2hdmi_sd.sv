@@ -193,16 +193,20 @@ end
 // This changes only WHERE pixels are drawn. cx/cy, frame_height, the VTOTAL servo, the
 // packet sequencers and the audio path are all untouched, so HDMI lock cannot regress.
 // Set ASPECT_4_3 to 0 to get the previous full-width stretch back.
-localparam bit ASPECT_4_3 = 1'b1;
+// Mode 200 sends a standard 720x480 active area declared VIC 2, which is NON-SQUARE and
+// displayed 4:3 by the sink -- exactly like real 480p hardware. Doing our own square-pixel
+// 4:3 windowing on top of that would pillarbox a picture the sink is about to squeeze
+// again. So this mode fills all 720 pixels and lets the sink do the one squeeze.
+localparam bit ASPECT_4_3 = (VIDEOID == 200) ? 1'b0 : 1'b1;
 
 reg  [10:0] x_start = 11'd0;
 reg  [10:0] x_stop  = 11'(SCREEN_WIDTH);
 reg  [10:0] act_w   = 11'(SCREEN_WIDTH);   // Bresenham denominator
 // Seeded with the 242-active-line value for the configured mode: 242 x 2.871 = 695 at
-// 720p, 242 x 3 = 726 in exact-lock. Only a seed -- the real height is MEASURED each
+// 720p, 242 x 2 = 484 in exact-lock. Only a seed -- the real height is MEASURED each
 // frame -- but a seed from the wrong mode shows a visibly wrong aspect until the first
 // measurement lands.
-reg  [10:0] act_h   = (VIDEOID == 200) ? 11'd726 : 11'd695;
+reg  [10:0] act_h   = (VIDEOID == 200) ? 11'd484 : 11'd695;
 
 // video_vbl is low over the source's active area (huc6260 clears VBL_FF at the first
 // active line). Cross it into clk_pixel and count output lines across that window.
@@ -221,14 +225,18 @@ reg  [2:0] vact_sr = 3'b0;
 // the window only narrows once a PLAUSIBLE height has been measured, and until then the
 // old full-width behaviour stands. A blank screen is the one failure mode that would
 // cost the user the menu, so it must not be reachable from a measurement going wrong.
-localparam int ACT_H_MIN = 300;
+localparam int ACT_H_MIN = 300;   // 231 source lines x 2 = 462 is the smallest real case
 localparam int ACT_H_MAX = 780;
 reg  aspect_valid = 1'b0;
-wire v_active = (ASPECT_4_3 && aspect_valid) ? vact_sr[2] : 1'b1;
+// DECOUPLED from ASPECT_4_3 on purpose. These are two unrelated jobs -- horizontal
+// windowing and the vertical clip to the source's active area -- and gating both on one
+// flag meant that turning 4:3 windowing off also disabled vertical clipping, which on
+// hardware showed up as a wandering picture with dropouts.
+wire v_active = aspect_valid ? vact_sr[2] : 1'b1;
 
 // ==================== Exact-lock phase: a one-shot raster reset ====================
 //
-// VIDEOID 200 only. Under the exact 3:1 lock the output frame and the source frame run
+// VIDEOID 200 only. Under the exact 2:1 lock the output frame and the source frame run
 // at rationally identical rates, so once their phase is right it NEVER drifts -- which is
 // what makes a servo both unnecessary and harmful here. Unnecessary because there is no
 // beat to chase; harmful because a PI loop against a zero rate error has no unique fixed
@@ -338,8 +346,7 @@ reg [23:0] rgb;
 reg active;
 reg [LINE_ABITS-1:0] sx;                 // current source sample index within the line
 reg [10:0] xcnt;
-reg [1:0] osd_div = 2'd0;                // mod-3 divider for VIDEOID 200, see below
-reg [9:0] out_line_pair;                 // output line / 2 (or / 3) -- which real source line
+reg [9:0] out_line_pair;                 // output line / 2 -- which real source line
 reg [1:0] line_idx_rd;
 reg [1:0] pend_idx;                      // completed line waiting for an output-line boundary
 reg [LINE_ABITS-1:0] pend_width;
@@ -396,18 +403,14 @@ always @(posedge clk_pixel) begin
 			cur_line_width <= pend_width;
 			pend_valid     <= 1'b0;
 		end
-		// OSD row counter only. The divisor must match the line-repeat ratio or the
-		// overlay ends up a different scale from the picture: /2 for the 2.871-ratio
-		// 720p mode (it repeats 2 or 3 times, 2 on average), /3 for the exact-lock mode
-		// where every source line is shown exactly 3 times.
-		if (VIDEOID == 200) begin
-			if (osd_div == 2'd2) begin osd_div <= 2'd0; out_line_pair <= out_line_pair + 1'b1; end
-			else                        osd_div <= osd_div + 2'd1;
-		end else if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;
+		// OSD row counter only. /2 matches the line-repeat ratio in every mode now: the
+		// 720p mode repeats each source line 2 or 3 times, 2 on average, and the
+		// exact-lock mode repeats every one exactly twice.
+		if (cy[0] == 1'b0) out_line_pair <= out_line_pair + 1'b1;
 	end
 
 	if (cx == 0) begin sx <= 0; xcnt <= 0; end
-	if (cy == 0) begin out_line_pair <= 0; osd_div <= 2'd0; end
+	if (cy == 0) begin out_line_pair <= 0; end
 end
 
 // 9-bit RGB (3/3/3) -> 24-bit, bit-replication expansion (r3,r3,r3[2:1]), not a
@@ -741,7 +744,7 @@ assign dbg_vs_cy         = vs_cy_snap;
 // 2026-09-20. Leaving the servo enabled here would therefore reintroduce, by a slower
 // route, the exact artefact this mode was built to eliminate.
 //
-// So for mode 200 VTOTAL is pinned to the exact 789 (hdmi.sv's frame_height_base, with
+// So for mode 200 VTOTAL is pinned to the exact 526 (hdmi.sv's frame_height_base, with
 // this forced to 0) and the PHASE job moves to the one-shot raster reset above. That is
 // MiSTle-Dev/c64nano's arrangement exactly -- video_analyzer.v + a vreset into the HDMI
 // counters, and no servo in the design at all.
@@ -755,7 +758,7 @@ wire [7:0] vtotal_extra_eff = (VIDEOID == 200) ? 8'd0 : vtotal_extra;
 
 // The raster reset is likewise mode-200 only; every other mode keeps the free-running
 // counters it has always had. It goes to hdmi.sv's `vreset`, NOT its `reset`: the wide
-// reset fans out to the 300 MHz serializer and cost 3 setup violations when it was tried
+// reset fans out to the TMDS-clock serializer and cost 3 setup violations when it was tried
 // (clk_pce +0.250% -> +0.016%). See the port comment in hdmi.sv.
 wire       hdmi_reset       = (VIDEOID == 200) ? vreset : 1'b0;
 
