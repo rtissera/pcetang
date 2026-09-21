@@ -211,7 +211,7 @@ generate
         //
         // APPLIED HERE:
         //     source line = 2730 core dots / 42.857 MHz   = 63.700 us
-        //     output line = 1092 pixels    / 34.2857 MHz  = 31.850 us  (ratio EXACTLY 2)
+        //     output line =  858 pixels    / 26.9388 MHz  = 31.850 us  (ratio EXACTLY 2)
         //     V_total     = 526 = 263 x 2                 -> frame rate locks on both sides
         //     active      = 720 x 480, declared VIC 2      -> what the sink expects to see
         //
@@ -219,14 +219,14 @@ generate
         //     active            720x480    | 720x480| 720x480
         //     VIC                    2     |    2   |    2
         //     V_total              526     |   526  |   525
-        //     H_total             1040     |  1092  |   858
-        //     pixel clock      32.5 MHz    | 34.2857|  27.027
-        //     H blanking           31%     |   34%  |    16%
+        //     H_total             1040     |   858  |   858
+        //     pixel clock      32.5 MHz    | 26.9388|  27.027
+        //     H blanking           31%     |   16%  |    16%
         //
-        // WHY NOT x3. An exact lock quantises H_total to 38220/D. x3 lands on 1274, and
-        // 1274 < 1280, so a standard 720p active area cannot fit in the line at all --
-        // the recipe above is simply unavailable there. x2's 1092 carries 720x480 with
-        // room to spare. Both clocks are integer taps off the core's own 1200 MHz VCO
+        // WHY NOT x3. H_total = 1365 * clk_pixel/clk_pce. At x3 the smallest workable
+        // value is 1274, and 1274 < 1280, so a standard 720p active area cannot fit in the
+        // line at all -- the recipe above is simply unavailable there. x2 reaches 858, the
+        // real CEA 480p line width. Both clocks are integer taps off the core's own 1200 MHz VCO
         // (console60k_pll.vhd), so this is a rational lock, not a servo chasing a beat,
         // and clk_pce is untouched.
         //
@@ -239,7 +239,7 @@ generate
         // the aspect -- the same thing real 480p hardware does.
         200:
         begin
-            assign frame_width = 1092;
+            assign frame_width = 858;
             // The EXACT value: 526 = 263 x 2, with vtotal_extra forced to 0 for this mode
             // (see pce2hdmi_sd.sv). It was briefly a servo base instead; under an exact
             // lock a VTOTAL servo has no unique fixed point, so its sigma-delta stage
@@ -321,10 +321,10 @@ always_comb begin
         vsync <= invert ^ (cy >= screen_height + vsync_pulse_start && cy < screen_height + vsync_pulse_start + vsync_pulse_size);
 end
 
-// PCE PORT: mode 200 runs at 1200/35 = 34.2857 MHz. VIDEO_RATE feeds the audio clock
+// PCE PORT: mode 200 runs at 942.857/35 = 26.938775 MHz. VIDEO_RATE feeds the audio clock
 // regeneration (CTS/N); getting it wrong silently detunes HDMI audio, which matters here
 // because CD-DA is half the point of this core.
-localparam real VIDEO_RATE = (VIDEO_ID_CODE == 200 ? 34.285714E6
+localparam real VIDEO_RATE = (VIDEO_ID_CODE == 200 ? 26.938775E6
     : VIDEO_ID_CODE == 1 ? 25.2E6
     : VIDEO_ID_CODE == 2 || VIDEO_ID_CODE == 3 ? 27.027E6
     : VIDEO_ID_CODE == 4 ? 74.25E6
