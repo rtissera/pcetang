@@ -159,6 +159,24 @@ end entity;
 
 architecture rtl of pcetang_console60k_cd is
 
+   -- DEBUG_TRACE: the RTL trace channel (FPGA -> BL616 -> debug.log, see
+   -- pcetang_rtl_trace_channel in project notes) and every probe that only feeds it.
+   --
+   -- 0 for release. Measured 2026-09-21: with it on, 23 of this board's 25 worst setup
+   -- paths ended in trace-only probe registers (the SCSI phase recorder ph_*, the CD-RAM
+   -- write tracker cdram_wr_lo) driven from the CPU microcode address bus, and the top file's
+   -- own logic -- mostly this apparatus -- was 3652 LUTs and 2844 registers, 22% of all
+   -- registers on the chip. Instrumentation, not the emulator, was setting the clock margin.
+   --
+   -- Turning it off only removes iosys_bl616's trace transmitter (a module parameter, the
+   -- pattern that genuinely prunes). The probes then have no load, and synthesis sweeps
+   -- them: nothing is deleted from this file, and nothing functional can change, because
+   -- dead-logic removal only takes logic whose outputs go nowhere.
+   --
+   -- Set to 1 to debug (the CD bus-reset work is exactly where these probes earn their
+   -- keep), and expect the timing margin to shrink when you do.
+   constant DEBUG_TRACE : integer := 0;
+
    component console60k_pll is
       port (
          clkin        : in  std_logic;
@@ -1543,7 +1561,7 @@ begin
       COLOR_LOGO => "011000000001000",   -- purple-ish, arbitrary first-cut choice
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00",
-      DBG_TRACE => 1,
+      DBG_TRACE => DEBUG_TRACE,
       SAVE_IF   => 1,     -- backup RAM survives power-off, see iosys_bl616.v
       SAVE_AW   => 11
    )
