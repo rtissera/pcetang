@@ -2697,6 +2697,9 @@ begin
    trace_ready  <= '1' when trace_warmup >= 42860000 else '0';
 
    cd_bridge_inst: entity work.cd_bridge
+   -- APOS_PIPE: register the SAPSP/SAPEP position decode a cycle early. With the trace
+   -- channel off, this was Console 60K's worst setup path (TOC LUT-RAM -> read_lba, 0.002 ns).
+   generic map (APOS_PIPE => 1)
    port map (
       CLK          => clk_pce,
       RST_N        => core_resetn,

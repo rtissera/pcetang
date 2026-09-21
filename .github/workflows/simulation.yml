@@ -71,8 +71,8 @@ jobs:
       fail-fast: false
       matrix:
         # Only the self-contained suites. The others (sim/boot, run_cd_boot,
-        # run_adpcm_dma, run_adpcm_golden, run_cd_bridge) need a real ROM or CHD, which
-        # cannot live in this repository.
+        # run_adpcm_dma, run_adpcm_golden) need a real ROM or CHD, which cannot live in this
+        # repository. run_cd_bridge used to be listed here too, wrongly: it needs neither.
         #
         # Deliberately NOT included, so a red run always means a real regression:
         #   sim/hdmi/run_sd_buffer.sh   fails by design today -- it measures the KNOWN
@@ -87,6 +87,10 @@ jobs:
           - sim/cd/run_cd_endcmd.sh
           - sim/cd/run_cd_regwalk.sh
           - sim/cd/run_adpcm_bridge.sh
+          # cd_bridge in both builds: 0 = Primer/Nano's single-cycle audio-position decode,
+          # 1 = Console 60K's pipelined one (which also checks its CD_COMM timing contract).
+          - sim/cd/run_cd_bridge.sh -gAPOS_PIPE=0
+          - sim/cd/run_cd_bridge.sh -gAPOS_PIPE=1
 
     steps:
       - uses: actions/checkout@v4

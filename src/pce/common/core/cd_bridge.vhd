@@ -80,6 +80,12 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity cd_bridge is
+	generic (
+		-- APOS_PIPE = 1 registers the SAPSP/SAPEP audio-position decode one cycle early
+		-- (Console 60K). 0 keeps the original single-cycle decode, so boards that do not
+		-- set it synthesise exactly the logic they always had. See apos_lba_r below.
+		APOS_PIPE : integer := 0
+	);
 	port (
 		CLK           : in  std_logic;
 		RST_N         : in  std_logic;
@@ -483,7 +489,65 @@ architecture rtl of cd_bridge is
 		return unsigned(v(7 downto 4)) * 10 + unsigned(v(3 downto 0));
 	end function;
 
+	-- Pipelined audio-position decode (APOS_PIPE = 1).
+	--
+	-- WHY. On Console 60K the worst setup path ran from the TOC table (async LUT-RAM)
+	-- through this decode, the opcode case and the read_lba mux, all in the dispatch cycle:
+	-- 0.002 ns of slack. The AMSF branch (three BCD conversions, x4500 and x75) is the other
+	-- long leg. Computing it every cycle into apos_lba_r ends both legs at a register.
+	--
+	-- WHY IT IS SAFE. The dispatch reads CD_COMM in the same cycle CD_COMM_SEND pulses, so a
+	-- register is only valid if CD_COMM was already stable one cycle earlier. It always is:
+	-- SCSI.vhd latches the last command byte in SP_COMM_START and raises COMM_OUT (our
+	-- CD_COMM_SEND) only later, in SP_COMM_END, after the CPU releases ACK -- which takes a
+	-- CPU register access, i.e. many cycles. The simulation-only assertion below makes that
+	-- contract fail loudly if a future edit ever breaks it.
+	--
+	-- This is a deliberate copy of the inline decode in the dispatch below, kept separate so
+	-- that APOS_PIPE = 0 elaborates the original code untouched.
+	function decode_apos(comm : std_logic_vector(95 downto 0); toc : toc_lba_arr_t) return unsigned is
+		variable m, sec, f : unsigned(7 downto 0);
+		variable v : std_logic_vector(23 downto 0);
+	begin
+		case comm(79 downto 78) is                    -- cdb[9][7:6]
+			when "01" =>                              -- BCD AMSF
+				m := bcd_to_u8(comm(23 downto 16)); sec := bcd_to_u8(comm(31 downto 24)); f := bcd_to_u8(comm(39 downto 32));
+				return resize(resize(m, 24) * 4500 + resize(sec, 24) * 75 + resize(f, 24) - 150, 24);
+			when "10" =>                              -- BCD track number, TOC lookup
+				return toc(to_integer(bcd_to_u8(comm(23 downto 16))));
+			when others =>                            -- raw LBA, cdb[3:5]
+				v := comm(31 downto 24) & comm(39 downto 32) & comm(47 downto 40);
+				return unsigned(v);
+		end case;
+	end function;
+	signal apos_lba_r : unsigned(23 downto 0) := (others => '0');
+
+
 begin
+
+	gen_apos_pipe: if APOS_PIPE = 1 generate
+		process (CLK)
+		begin
+			if rising_edge(CLK) then
+				apos_lba_r <= decode_apos(CD_COMM, toc_lba_tbl);
+			end if;
+		end process;
+
+		-- synthesis translate_off
+		-- The contract apos_lba_r relies on: CD_COMM must not change in the cycle
+		-- CD_COMM_SEND is high. True of SCSI.vhd by construction; checked in every sim.
+		apos_contract: process (CLK)
+			variable comm_q : std_logic_vector(95 downto 0) := (others => '0');
+		begin
+			if rising_edge(CLK) then
+				assert not (CD_COMM_SEND = '1' and CD_COMM /= comm_q)
+					report "cd_bridge APOS_PIPE: CD_COMM changed in the same cycle as CD_COMM_SEND"
+					severity failure;
+				comm_q := CD_COMM;
+			end if;
+		end process;
+		-- synthesis translate_on
+	end generate;
 
 	DBG_STATE <= state_code(scsi_state);
 	DBG_DEND  <= std_logic_vector(dend_ok) & std_logic_vector(dend_lost);
@@ -649,6 +713,11 @@ begin
 								apos_vec(7 downto 0)   := CD_COMM(47 downto 40);
 								apos_lba := unsigned(apos_vec);
 						end case;
+						-- APOS_PIPE = 1: the same decode, but computed a cycle earlier into a
+						-- register (see apos_lba_r). Folds away entirely when APOS_PIPE = 0.
+						if APOS_PIPE = 1 then
+							apos_lba := apos_lba_r;
+						end if;
 						case CD_COMM(7 downto 0) is
 							when SCSI_OP_REQUEST_SENSE =>
 								-- Real drive-level condition overrides whatever's pending
