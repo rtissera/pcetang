@@ -1470,7 +1470,7 @@ begin
    -- TO REVERT to the shipping 720p path: put hdmi_pll back, drop clk_pixel/clk_5x_pixel
    -- from this port map, and set VIDEOID/CLKFRQ/SCREEN_* below back to 4/74375/1280/720.
    -- pcetang_console60k_hdmi_pll_720p.vhd is deliberately left in the build for exactly
-   -- that, because 1092x526 is non-standard blanking and only real sinks can approve it.
+   -- that, because 858x526 still carries one line more than CEA 480p60's 525.
    pll: console60k_pll
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, clk_pixel => clk_pixel,
@@ -4041,8 +4041,8 @@ begin
    -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
    generic map (
-      VIDEOID       => 200,      -- "PCE exact lock": CEA 480p active area, 1092x526 frame
-      CLKFRQ        => 34286,    -- kHz, matches clk_pixel (1200/35 = 34.2857 MHz)
+      VIDEOID       => 200,      -- "PCE exact lock": CEA 480p active area, 858x526 frame
+      CLKFRQ        => 26939,    -- kHz, matches clk_pixel (942.857/35 = 26.9388 MHz)
       SCREEN_WIDTH  => 720,      -- a REAL CEA 480p active area, declared VIC 2
       SCREEN_HEIGHT => 480       -- 480 of the 484 the source gives; see hdmi.sv case 200
    )
