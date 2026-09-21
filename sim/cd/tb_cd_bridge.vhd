@@ -322,6 +322,7 @@ begin
 	stimulus: process
 		variable rx_count : integer;
 		variable exp_byte  : std_logic_vector(7 downto 0);
+		variable rst_wr, rst_req, aud_after : integer;
 		variable sense_exp : sense_data_t;
 		variable req_mark  : integer;
 		variable req_seen  : boolean := false;
@@ -1008,13 +1009,92 @@ begin
 		fifo_space <= (others => '1');
 		wait for CLK_PERIOD * 4;
 
-		-- 17. REMOVED 2026-09-11. It asserted that a SCSI bus reset aborts the transfer
-		-- and returns to idle -- correct behaviour, and the test did catch its absence
-		-- (the bridge answered the next command with sector payload bytes 05 06 07 where
-		-- the GETDIRINFO reply belonged). But the implementation that made it pass caused
-		-- a real hardware regression and was reverted; see BUS_RST's comment in
-		-- cd_bridge.vhd. A green test for behaviour the RTL no longer has is worse than
-		-- no test, so it is gone until the fix is redone properly.
+		-- 17. SCSI BUS RESET mid-transfer (reinstated 2026-09-21; see BUS_RST in
+		-- cd_bridge.vhd). The removed 2026-09-11 version caught the real failure: after a
+		-- reset the next command was answered with stale sector bytes (05 06 07) where the
+		-- GETDIRINFO reply belonged. Sectors already requested cannot be recalled; their
+		-- bytes must be drained, never delivered.
+		mcu_mode <= false;
+		mon_clear <= true; wait until rising_edge(clk); mon_clear <= false;
+		-- 17a. data: READ(6) sa=0x001000 sc=2, reset partway through sector 1
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(12 downto 8)  <= "00000";
+		cd_comm(23 downto 16) <= x"10";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"02";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and wr_count >= 100;
+		bus_rst <= '1';                          -- the BIOS holds $1804 bit 1: a LATCH
+		wait until rising_edge(clk); wait until rising_edge(clk);
+		rst_wr := wr_count; rst_req := req_count;
+		wait for CLK_PERIOD * 200;
+		bus_rst <= '0';
+		wait for CLK_PERIOD * 8000;              -- the aborted sector finishes streaming
+		if wr_count /= rst_wr then
+			report "FAIL bus reset: " & integer'image(wr_count - rst_wr)
+			     & " stale byte(s) of the aborted sector were delivered" severity error;
+			errors <= errors + 1;
+		end if;
+		if req_count /= rst_req then
+			report "FAIL bus reset: the aborted READ still requested another sector" severity error;
+			errors <= errors + 1;
+		end if;
+		-- the next command must be answered from the TOC, not with leftover payload
+		cd_comm(7 downto 0)  <= x"DE";
+		cd_comm(15 downto 8) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"01", "after bus reset: GETDIRINFO mode0 first_track");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"02", "after bus reset: GETDIRINFO mode0 last_track");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "after bus reset: GETDIRINFO status");
+		wait for CLK_PERIOD * 4;
+		-- and a fresh READ must deliver a whole, clean sector (LBA 0x1003)
+		cd_comm(7 downto 0)   <= x"08";
+		cd_comm(23 downto 16) <= x"10";
+		cd_comm(31 downto 24) <= x"03";
+		cd_comm(39 downto 32) <= x"01";
+		send_cmd(clk, cd_comm_send);
+		for i in 0 to 2047 loop
+			wait until rising_edge(clk) and cd_data_wr = '1';
+			exp_byte := std_logic_vector(to_unsigned(16#03#, 8) xor to_unsigned(i mod 256, 8));
+			check_eq(errors, cd_data, exp_byte, "after bus reset: READ(6) byte " & integer'image(i));
+		end loop;
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "after bus reset: READ(6) status");
+		wait for CLK_PERIOD * 4;
+
+		-- 17b. CD-DA: start playback, reset once audio is flowing -> no more audio writes,
+		-- no more fetches (mednafen: PLAYMODE_SILENT, CDDASTATUS_STOPPED).
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";
+		cd_comm(79 downto 78) <= "00";
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"10";
+		cd_comm(47 downto 40) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_audio_wr = '1';
+		bus_rst <= '1';
+		wait until rising_edge(clk); wait until rising_edge(clk);
+		rst_req := req_count;
+		wait for CLK_PERIOD * 200;
+		bus_rst <= '0';
+		aud_after := 0;
+		for i in 1 to 3000 loop
+			wait until rising_edge(clk);
+			if cd_audio_wr = '1' then aud_after := aud_after + 1; end if;
+		end loop;
+		if aud_after /= 0 then
+			report "FAIL bus reset: " & integer'image(aud_after)
+			     & " CD-DA byte(s) written after the reset" severity error;
+			errors <= errors + 1;
+		end if;
+		if req_count /= rst_req then
+			report "FAIL bus reset: CD-DA kept fetching after the reset" severity error;
+			errors <= errors + 1;
+		end if;
+		wait for CLK_PERIOD * 4;
 
 		-- 18. THE REAL BOOT, byte for byte. Every command below, and every expected
 		-- reply byte, is transcribed from an instrumented mednafen run of Dungeon

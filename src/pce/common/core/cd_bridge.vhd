@@ -171,26 +171,25 @@ entity cd_bridge is
 		-- own counters freshly zeroed, waiting for sector bytes belonging to a transfer
 		-- the host had already abandoned. No further requests, drive looks dead.
 		--
-		-- CURRENTLY ACCEPTED AND IGNORED -- port kept because the plumbing is right and
-		-- the underlying defect is real, but the obvious implementation is WRONG and was
-		-- reverted 2026-09-11 after a measured regression.
+		-- IMPLEMENTED 2026-09-21, the way mednafen does it (pcecd_drive.c VirtualReset):
+		-- on the RISING EDGE only, abort the transfer, stop CD-DA, return to idle -- and
+		-- keep the TOC and read_lba. Sectors already requested from the MCU cannot be
+		-- recalled, so their bytes are counted into drain_n and DISCARDED as they arrive.
 		--
-		-- Tried: fold BUS_RST into this process's reset branch, so a bus reset returns
-		-- the FSM to SCSI_IDLE. Result on hardware: Bonk III went BACKWARDS (it had been
-		-- executing game code; it returned to LOAD ERROR) and Prince of Persia changed
-		-- failure mode. The tell was the MCU logging a sector request for LBA 43520 =
-		-- 0x00AA00 -- 0xAA is the UART frame header byte, so a corrupted/mis-framed
-		-- request was going out. That value appears in NO earlier run.
+		-- History, because both halves of it mattered. The 2026-09-11 attempt folded
+		-- BUS_RST into this FSM's reset branch and was reverted after a hardware
+		-- regression. It was wrong twice: level-sensitive ($1804 bit 1 is a LATCH, and the
+		-- BIOS holds it, so the FSM sat in reset for as long as the host left it asserted),
+		-- and it did not drain -- its own test caught the next command being answered with
+		-- stale sector bytes (05 06 07) where the GETDIRINFO reply belonged. Its tell on
+		-- hardware, a request for LBA 0x00AA00, is also the signature of the MCU UART RX
+		-- truncation bug fixed the next day, so part of that regression was probably
+		-- misattributed.
 		--
-		-- Why the naive version is wrong: $1804 bit 1 is a LATCH, not a strobe
-		-- (`SCSI_RST_N <= not EXT_DI(1)` in cd.vhd) -- the BIOS asserts it and releases
-		-- it later, so a level-sensitive abort holds this FSM in reset for as long as the
-		-- host leaves it asserted, and clearing read_lba underneath an in-flight
-		-- SECTOR_REQ lets a request escape with garbage.
-		--
-		-- A correct fix probably acts on the RISING EDGE only, and clears just the
-		-- transfer (scsi_state, read_count, SECTOR_REQ) while leaving read_lba and the
-		-- TOC alone. Not attempted yet -- do not re-try the level-sensitive version.
+		-- Why it matters: SCSI.vhd IS reset by the bus reset (cd.vhd RESET_N => RST_N and
+		-- SCSI_RST_N), so ignoring it here left the phase engine at BUS FREE while this FSM
+		-- carried on. That split is the prime suspect for the Arcade Card titles: Garou
+		-- Densetsu 2 stuck in COMMAND, World Heroes 2 in DATA IN with bytes never taken.
 		BUS_RST         : in  std_logic := '0'
 	);
 end entity;
@@ -361,6 +360,13 @@ architecture rtl of cd_bridge is
 	-- in flight only covers 11.76 ms of the ~62 ms decode (74% of realtime); hiding all
 	-- of it needs about 5.3, hence AUDIO_MAX_OUT below and the deeper CDDA FIFO.
 	signal audio_out     : unsigned(2 downto 0) := (others => '0');
+	-- SCSI bus reset handling (see BUS_RST). bus_rst_q gives the rising edge; drain_n
+	-- counts sectors requested from the MCU before a reset whose bytes are still to come
+	-- and must be DISCARDED; drain_wd bounds that wait, so a request the MCU dropped can
+	-- never wedge the drive. ~0.78 s at clk_pce, far above the ~62 ms CHD hunk decode.
+	signal bus_rst_q     : std_logic := '0';
+	signal drain_n       : unsigned(3 downto 0) := (others => '0');
+	signal drain_wd      : unsigned(24 downto 0) := (others => '0');
 	signal audio_byte_ct : unsigned(11 downto 0) := (others => '0');
 	-- Issue the next request this many bytes into the current 2352-byte sector. Late
 	-- enough that a host command still has most of the sector to arrive and cancel it
@@ -572,6 +578,7 @@ begin
 		variable apos_vec  : std_logic_vector(23 downto 0);
 		variable gdi_track : unsigned(7 downto 0);
 		variable amsf_m, amsf_s, amsf_f : unsigned(7 downto 0);
+		variable v_drain   : unsigned(3 downto 0);
 	begin
 		if RST_N = '0' then
 			scsi_state    <= SCSI_IDLE;
@@ -607,6 +614,9 @@ begin
 			audio_out        <= (others => '0');
 			audio_byte_ct    <= (others => '0');
 			comm_pending     <= '0';
+			bus_rst_q        <= '0';
+			drain_n          <= (others => '0');
+			drain_wd         <= (others => '0');
 		elsif rising_edge(CLK) then
 			CD_STAT_GET     <= '0';
 			CD_DATA_WR      <= '0';
@@ -1122,7 +1132,9 @@ begin
 					else
 						req_wdog <= req_wdog + 1;
 					end if;
-					if SECTOR_DATA_VALID = '1' then
+					-- While draining, every byte belongs to a sector requested BEFORE a bus
+					-- reset: consumed by the drain accounting below, never delivered.
+					if SECTOR_DATA_VALID = '1' and drain_n = 0 then
 						if is_audio_read = '1' then
 							-- Real audio byte: forwarded straight into cd.vhd's own CDDA_FIFO
 							-- write path. No gap state needed here (unlike the data path
@@ -1273,6 +1285,76 @@ begin
 				else
 					if dend_lost /= x"FFFF" then dend_lost <= dend_lost + 1; end if;
 				end if;
+			end if;
+
+			-- Drain: swallow the bytes of sectors requested before a bus reset. The MCU serves
+			-- requests strictly in order, so these always arrive before any new transfer's.
+			if drain_n /= 0 then
+				if SECTOR_DATA_VALID = '1' then
+					drain_wd <= (others => '0');
+					if SECTOR_DATA_LAST = '1' then
+						drain_n <= drain_n - 1;
+					end if;
+				elsif drain_wd = (drain_wd'range => '1') then
+					drain_n  <= (others => '0');           -- the MCU dropped one; give up
+					drain_wd <= (others => '0');
+				else
+					drain_wd <= drain_wd + 1;
+				end if;
+			end if;
+
+			-- SCSI BUS RESET, on the RISING EDGE only (mednafen pcecd_drive.c: `if (RST &&
+			-- !last_RST) ResetNeeded = true;` then one VirtualReset()). Last in this branch on
+			-- purpose, so on the reset cycle it overrides whatever the FSM decided above --
+			-- including a SECTOR_REQ that was about to go out.
+			bus_rst_q <= BUS_RST;
+			if BUS_RST = '1' and bus_rst_q = '0' then
+				-- Sectors already sent to the MCU and not yet complete, counted as of the end
+				-- of this cycle. A request the FSM raised THIS cycle is cancelled below, so it
+				-- is not counted; one raised last cycle is already out and is.
+				v_drain := drain_n;
+				if drain_n /= 0 and SECTOR_DATA_VALID = '1' and SECTOR_DATA_LAST = '1' then
+					v_drain := v_drain - 1;                  -- a drained sector ended now
+				end if;
+				if is_audio_read = '1' then
+					if scsi_state = SCSI_READ_WAIT_BYTE then
+						v_drain := v_drain + resize(audio_out, 4);
+						if drain_n = 0 and SECTOR_DATA_VALID = '1' and SECTOR_DATA_LAST = '1'
+						   and audio_out /= 0 then
+							v_drain := v_drain - 1;              -- ours, and it ended now
+						end if;
+					end if;
+				else
+					if scsi_state = SCSI_READ_WAIT_BYTE
+					   or (scsi_state = SCSI_READ_GAP and read_byte_ct /= 2047) then
+						v_drain := v_drain + 1;
+						if scsi_state = SCSI_READ_WAIT_BYTE and drain_n = 0
+						   and SECTOR_DATA_VALID = '1' and SECTOR_DATA_LAST = '1' then
+							v_drain := v_drain - 1;              -- last byte landed now
+						end if;
+					end if;
+				end if;
+				drain_n  <= v_drain;
+				drain_wd <= (others => '0');
+
+				-- Mednafen VirtualReset(): flush, stop the read, silence CD-DA, BUS FREE.
+				-- The TOC is disc state and is kept. read_lba is kept too: every request
+				-- already sent is latched in iosys, so it cannot be corrupted from here.
+				scsi_state      <= SCSI_IDLE;
+				SECTOR_REQ      <= '0';
+				SECTOR_IS_AUDIO <= '0';
+				CD_DATA_WR      <= '0';
+				CD_AUDIO_WR     <= '0';
+				CD_STAT_GET     <= '0';
+				read_count      <= (others => '0');
+				read_byte_ct    <= (others => '0');
+				audio_byte_ct   <= (others => '0');
+				audio_out       <= (others => '0');
+				is_audio_read   <= '0';
+				req_wdog        <= (others => '0');
+				cdda_status     <= CDDA_STOPPED;
+				cdda_mode       <= "00";                     -- PLAYMODE_SILENT
+				comm_pending    <= '0';
 			end if;
 		end if;
 	end process;
