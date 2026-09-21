@@ -445,7 +445,11 @@ generate
             // The VIC the AVI InfoFrame ADVERTISES, which is not always the internal mode
             // number. Mode 200 sends a standard 720x480 active area and declares VIC 2 for
             // it, which is the whole reason a sink accepts the non-standard blanking.
-            .AVI_VIC(VIDEO_ID_CODE == 200 ? 2 : VIDEO_ID_CODE)
+            .AVI_VIC(VIDEO_ID_CODE == 200 ? 2 : VIDEO_ID_CODE),
+            // 4:3 for the exact-lock mode only; every other mode keeps "No Data" so its
+            // netlist is unchanged. Verified on hardware: a monitor on "Aspect" pillarboxes
+            // mode 200 correctly with this set.
+            .PICTURE_ASPECT_RATIO(VIDEO_ID_CODE == 200 ? 2'b01 : 2'b00)
         ) packet_picker (.clk_pixel(clk_pixel), .clk_audio(clk_audio), .reset(reset), .video_field_end(video_field_end), .packet_enable(packet_enable), .packet_pixel_counter(packet_pixel_counter), .audio_sample_word(audio_sample_word), .header(header), .sub(sub));
         logic [8:0] packet_data;
         packet_assembler packet_assembler (.clk_pixel(clk_pixel), .reset(reset), .data_island_period(data_island_period), .header(header), .sub(sub), .packet_data(packet_data), .counter(packet_pixel_counter));
