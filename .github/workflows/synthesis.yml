@@ -131,6 +131,11 @@ jobs:
             # a clock it did not print (clk_5x_pixel, which has no timed paths and so no
             # Fmax row) means re-running the whole build.
             impl/pnr/${{ matrix.top }}_tr_content.html
+            # Synthesis report and gate-level netlist. Every primitive in the .vg carries its
+            # full hierarchical instance name, which is the only per-module resource breakdown
+            # Gowin produces here (the PnR report is chip totals only).
+            impl/gwsynthesis/${{ matrix.top }}_syn.rpt.html
+            impl/gwsynthesis/${{ matrix.top }}.vg
             gw_sh_${{ matrix.board }}.log
           # warn, not error: when gw_sh itself fails there are no files, and a hard
           # error here would mask the real failure with a missing-artifact one.
