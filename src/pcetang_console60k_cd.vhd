@@ -242,7 +242,9 @@ architecture rtl of pcetang_console60k_cd is
          -- Real RTL debug-trace channel, enabled on THIS board only -- see
          -- iosys_bl616.v's own DBG_TRACE parameter comment for the measured timing
          -- cost it carries on boards that don't read traces.
-         DBG_TRACE : integer := 0
+         DBG_TRACE : integer := 0;
+         SAVE_IF   : integer := 0;
+         SAVE_AW   : integer := 11
       );
       port (
          clk       : in  std_logic;
@@ -289,6 +291,12 @@ architecture rtl of pcetang_console60k_cd is
          dbg_trace_tag        : in  std_logic_vector(7 downto 0);
          dbg_trace_data       : in  std_logic_vector(63 downto 0);
 
+         -- save-RAM interface (iosys_bl616.v SAVE_IF); unused unless SAVE_IF = 1
+         sv_addr    : out std_logic_vector(10 downto 0);
+         sv_din     : out std_logic_vector(7 downto 0);
+         sv_we      : out std_logic;
+         sv_q       : in  std_logic_vector(7 downto 0);
+         sv_core_we : in  std_logic;
          uart_rx : in  std_logic;
          uart_tx : out std_logic
       );
@@ -1411,6 +1419,11 @@ architecture rtl of pcetang_console60k_cd is
    signal brm_di : std_logic_vector(7 downto 0);
    signal brm_do : std_logic_vector(7 downto 0);
    signal brm_we : std_logic;
+   -- MCU side of the backup RAM (iosys_bl616 save-RAM interface)
+   signal sv_addr : std_logic_vector(10 downto 0);
+   signal sv_din  : std_logic_vector(7 downto 0);
+   signal sv_q    : std_logic_vector(7 downto 0);
+   signal sv_we   : std_logic;
 
    -- ADPCM RAM offload to SDRAM (2026-08-28): moved off the on-chip dpram(17,4) shim
    -- onto sdram.sv's port C, sharing it with the CD-RAM bridge above -- same design as
@@ -1530,7 +1543,9 @@ begin
       COLOR_LOGO => "011000000001000",   -- purple-ish, arbitrary first-cut choice
       CORE_ID => x"0008",                -- must match firmware-bl616 cores.cpp id 8 ("PC Engine CD")
       LOADING_STATE => x"00",
-      DBG_TRACE => 1
+      DBG_TRACE => 1,
+      SAVE_IF   => 1,     -- backup RAM survives power-off, see iosys_bl616.v
+      SAVE_AW   => 11
    )
    port map (
       clk => clk_pce, hclk => clk_pixel, resetn => reset_n,
@@ -1557,6 +1572,8 @@ begin
       dbg_trace_req => dbg_trace_req,
       dbg_trace_tag => dbg_trace_tag,
       dbg_trace_data => dbg_trace_data,
+      sv_addr => sv_addr, sv_din => sv_din, sv_we => sv_we,
+      sv_q => sv_q, sv_core_we => brm_we,
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
@@ -2760,10 +2777,18 @@ begin
    -- BRAM looks FORMATTED at power-on the way a real battery-backed one does, instead of
    -- presenting every game with an unformatted 2KB of zeros on every single boot.
    -- See init_spram in bram_gowin.vhd for the signature and where it comes from.
-   backup_ram: entity work.spram
+   --
+   -- DUAL-PORTED (2026-09-21) so saves survive a power-off: port A is the core, exactly as
+   -- before; port B belongs to iosys_bl616's save-RAM interface, which lets the MCU restore
+   -- this RAM from the SD card at game load and dump it back after the game writes to it.
+   -- Same shape as MiSTer TurboGrafx16's `backram`. One BSRAM block either way. Both ports
+   -- run on clk_pce, so there is no clock crossing.
+   backup_ram: entity work.dpram
    generic map (addr_width => 11, data_width => 8, mem_init_file => "pce_bram")
    port map (
-      clock => clk_pce, address => brm_a, data => brm_di, wren => brm_we, q => brm_do
+      clock => clk_pce,
+      address_a => brm_a, data_a => brm_di, wren_a => brm_we, q_a => brm_do,
+      address_b => sv_addr, data_b => sv_din, wren_b => sv_we, q_b => sv_q
    );
 
    core: entity work.pce_top

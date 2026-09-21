@@ -32,7 +32,25 @@ module iosys_bl616 #(
     // in f75a2fa being these three ports tied to constants. A module parameter is
     // constant-folded at elaboration, so `if (DBG_TRACE ...)` prunes the whole channel
     // properly. Set to 1 only on a board that actually reads traces.
-    parameter DBG_TRACE=0
+    parameter DBG_TRACE=0,
+    // SAVE-RAM INTERFACE (2026-09-21). A generic "save RAM as 512-byte blocks" channel
+    // between a core's battery-backed RAM and a file on the MCU's SD card, so saves
+    // survive a power-off. No TangCore core has this today (NESTang lists saves under
+    // "next steps"; SNESTang/GBATang carry TODOs), so it is kept core-agnostic: the MCU
+    // addresses blocks, the core only exposes a RAM port and a "written" strobe.
+    // Modelled on MiSTer TurboGrafx16's backram (dual-port RAM, raw image in 512-byte
+    // blocks, per-game file), plus a "RAM changed" notice so the MCU can save shortly
+    // after a write instead of only when the OSD opens.
+    //   MCU -> FPGA 0x11 blk[15:0] <512 bytes>   write one block into save RAM (restore)
+    //   MCU -> FPGA 0x12 blk[15:0]               request one block back
+    //   FPGA -> MCU 0x0A blk[15:0] <512 bytes>   the requested block
+    //   FPGA -> MCU 0x0B 0x00                    save RAM written since the last dump
+    // The response-type byte on the wire IS the TX state number (see SEND_HEADER), which
+    // is why 0x0A/0x0B are the next free states. SAVE_IF=0 elaborates none of this: every
+    // assignment below is guarded by it, the pattern that genuinely prunes here (a
+    // top-level tie-off does not -- see the DBG_TRACE history).
+    parameter SAVE_IF=0,
+    parameter SAVE_AW=11                // save RAM address width in bytes (11 = 2 KB)
 )
 (
     input clk,                      // main logic clock
@@ -101,6 +119,14 @@ module iosys_bl616 #(
     input      [63:0] dbg_trace_data,
 
     // UART interface
+    // Save-RAM port (SAVE_IF=1 only; tie inputs to 0 and leave outputs open otherwise).
+    // Same clock as `clk`. The core owns the other port of a dual-port RAM.
+    output     [SAVE_AW-1:0] sv_addr,
+    output reg [7:0]         sv_din,
+    output reg               sv_we,
+    input      [7:0]         sv_q,
+    input                    sv_core_we,    // the CORE wrote save RAM this cycle
+
     input  uart_rx,
     output uart_tx
 );
@@ -179,6 +205,16 @@ reg [6:0] recv_state = RECV_IDLE;
 // UART command buffer
 reg [7:0] cmd_reg;
 reg [15:0] len_reg;
+// save-RAM interface state (SAVE_IF=1)
+reg [SAVE_AW-1:0] sv_waddr;         // RX side: restore write address
+reg [SAVE_AW-1:0] sv_raddr;         // TX side: dump read address
+reg [15:0]        sv_req_blk;       // block the MCU asked for (latched in RX)
+reg               sv_rd_req = 0, sv_rd_ack = 0;   // RX->TX toggle handshake
+reg               sv_dirty = 0;     // core wrote save RAM since the last dump of block 0
+reg               sv_notify = 0;    // a 0x0B notice is owed
+reg [9:0]         sv_idx;           // TX byte index within a block frame
+// Write wins the shared address: the MCU never restores while it is dumping.
+assign sv_addr = sv_we ? sv_waddr : sv_raddr;
 reg [31:0] data_reg;
 reg [23:0] rom_remain;
 reg [15:0] data_cnt;
@@ -286,6 +322,7 @@ always @(posedge clk) begin
         cd_sector_data_valid <= 0;
         cd_sector_data_last <= 0;
         toc_wr <= 0;
+        sv_we <= 0;
 
         case (recv_state)
 
@@ -428,6 +465,29 @@ always @(posedge clk) begin
                                 cd_sector_data_last <= 1;
                         end
                     end
+                    'h11: if (SAVE_IF) begin       // write one save-RAM block
+                        // data_cnt 0 is blk[15:8]: unused, SAVE_AW-9 bits of blk suffice
+                        if (data_cnt == 1)
+                            sv_waddr <= {rx_data, 9'd0};   // blk * 512 (truncated to SAVE_AW)
+                        else if (data_cnt >= 2 && data_cnt < 2 + 512) begin
+                            // >= 2 matters: byte 0 (blk[15:8]) must NOT fall through to a
+                            // write -- it would land at the previous frame's last address.
+                            // sim/saveram caught exactly that: the last byte of every block
+                            // but the final one was zeroed by the next frame's first byte.
+                            sv_din <= rx_data;
+                            sv_we  <= 1;
+                            if (data_cnt > 2)
+                                sv_waddr <= sv_waddr + 1'd1;
+                        end
+                    end
+                    'h12: if (SAVE_IF) begin       // request one save-RAM block back
+                        if (data_cnt == 0)
+                            sv_req_blk[15:8] <= rx_data;
+                        else if (data_cnt == 1) begin
+                            sv_req_blk[7:0] <= rx_data;
+                            sv_rd_req <= ~sv_rd_req;
+                        end
+                    end
                     default: begin
                         // unknown command: consume all data and return
                     end
@@ -466,6 +526,8 @@ localparam SEND_CD_SECTOR_REQ = 6;  // real (2026-08-31): matches wire protocol'
 localparam SEND_HEADER = 7;
 localparam SEND_DONE = 8;
 localparam SEND_DBG_TRACE = 9;      // real (2026-09-06): RTL debug trace, see ports
+localparam SEND_SAVE_BLK = 10;      // save-RAM block (response type 0x0A on the wire)
+localparam SEND_SAVE_DIRTY = 11;    // save-RAM changed notice (0x0B)
 
 reg [3:0] send_state, send_state_next;
 reg [$clog2(STR_LEN+1)-1:0] send_idx;
@@ -517,6 +579,15 @@ always @(posedge clk) begin
             cd_req_is_audio <= cd_sector_is_audio;
         end
 
+        // Save-RAM change tracking. A core write marks the RAM dirty and owes the MCU one
+        // 0x0B notice; the MCU then dumps it after the game goes quiet. Dirty is cleared
+        // when a dump of block 0 starts, so a write landing mid-dump re-dirties it and
+        // earns a fresh notice -- a save can lag, but it can never be silently lost.
+        if (SAVE_IF && sv_core_we) begin
+            if (!sv_dirty) sv_notify <= 1;
+            sv_dirty <= 1;
+        end
+
         // Real RTL debug-trace latch (see declaration comment above)
         if (DBG_TRACE && dbg_trace_req && !dbg_pending) begin
             dbg_pending <= 1;
@@ -539,6 +610,18 @@ always @(posedge clk) begin
                     send_state_next <= SEND_CD_SECTOR_REQ;
                     send_state <= SEND_HEADER;
                     resp_frame_len <= 5;    // cmd + 4-byte LBA
+                end else if (SAVE_IF && sv_rd_req != sv_rd_ack) begin
+                    send_state_next <= SEND_SAVE_BLK;
+                    send_state <= SEND_HEADER;
+                    resp_frame_len <= 1 + 2 + 512;          // type + blk16 + data
+                    sv_raddr <= {sv_req_blk[7:0], 9'd0};    // read settles during the header
+                    sv_idx <= 0;
+                    if (sv_req_blk == 0 && !sv_core_we)
+                        sv_dirty <= 0;                      // dump starting: clean again
+                end else if (SAVE_IF && sv_notify) begin
+                    send_state_next <= SEND_SAVE_DIRTY;
+                    send_state <= SEND_HEADER;
+                    resp_frame_len <= 2;                    // type + one pad byte
                 end else if (DBG_TRACE && dbg_pending) begin
                     send_state_next <= SEND_DBG_TRACE;
                     send_state <= SEND_HEADER;
@@ -710,6 +793,35 @@ always @(posedge clk) begin
                         response_ack <= response_req;
                         fdd_read_start <= 1;                // notify FDD state machine
                     end
+                end
+            end
+
+            // Save-RAM block: blk[15:8], blk[7:0], then 512 bytes read from port B. The next
+            // byte's read is issued as each one is sent; the UART takes ~200 clocks per byte,
+            // so the RAM's one-cycle latency is never on the critical path.
+            SEND_SAVE_BLK: begin
+                if (SAVE_IF && tx_ready && ~tx_valid) begin
+                    if (sv_idx == 0)      tx_data <= sv_req_blk[15:8];
+                    else if (sv_idx == 1) tx_data <= sv_req_blk[7:0];
+                    else begin
+                        tx_data  <= sv_q;
+                        sv_raddr <= sv_raddr + 1'd1;
+                    end
+                    tx_valid <= 1;
+                    sv_idx <= sv_idx + 1'd1;
+                    if (sv_idx == 2 + 511) begin
+                        send_state <= SEND_IDLE;
+                        sv_rd_ack <= sv_rd_req;
+                    end
+                end
+            end
+
+            SEND_SAVE_DIRTY: begin
+                if (SAVE_IF && tx_ready && ~tx_valid) begin
+                    tx_data <= 8'h00;
+                    tx_valid <= 1;
+                    sv_notify <= 0;
+                    send_state <= SEND_IDLE;
                 end
             end
 

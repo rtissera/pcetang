@@ -251,6 +251,12 @@ architecture rtl of pcetang_primer25k_cd is
          dbg_trace_tag        : in  std_logic_vector(7 downto 0);
          dbg_trace_data       : in  std_logic_vector(63 downto 0);
 
+         -- save-RAM interface (iosys_bl616.v SAVE_IF); unused unless SAVE_IF = 1
+         sv_addr    : out std_logic_vector(10 downto 0);
+         sv_din     : out std_logic_vector(7 downto 0);
+         sv_we      : out std_logic;
+         sv_q       : in  std_logic_vector(7 downto 0);
+         sv_core_we : in  std_logic;
          uart_rx : in  std_logic;
          uart_tx : out std_logic
       );
@@ -713,6 +719,8 @@ begin
       dbg_trace_req => '0',
       dbg_trace_tag => (others => '0'),
       dbg_trace_data => (others => '0'),
+      sv_addr => open, sv_din => open, sv_we => open,
+      sv_q => (others => '0'), sv_core_we => '0',
 
       uart_rx => uart_rxd, uart_tx => uart_txd
    );
