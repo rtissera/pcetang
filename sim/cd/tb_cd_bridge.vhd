@@ -159,6 +159,13 @@ architecture sim of tb_cd_bridge is
 	-- strobe), matches every inline command send this file used to repeat by hand.
 	procedure send_cmd(signal clk : in std_logic; signal cd_comm_send : out std_logic) is
 	begin
+		-- Stage for two clocks BEFORE the strobe, as the hardware does: SCSI.vhd latches the
+		-- last CDB byte in SP_COMM_START and raises COMM_OUT only in SP_COMM_END, after the
+		-- CPU releases ACK. Strobing in the same instant the bytes change was a testbench
+		-- artefact that real hardware never produces, and it would hide any bug that
+		-- depends on CD_COMM being stable before the strobe.
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 		cd_comm_send <= '1';
 		wait until rising_edge(clk);
 		cd_comm_send <= '0';
@@ -535,6 +542,36 @@ begin
 		check_eq(errors, cd_data, x"30", "READSUBQ (BCD AMSF round-trip) abs S");
 		wait until rising_edge(clk) and cd_data_wr = '1';
 		check_eq(errors, cd_data, x"25", "READSUBQ (BCD AMSF round-trip) abs F");
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		wait for CLK_PERIOD * 4;
+
+		-- 11c. SAPSP (BCD TRACK mode, cdb[9]=0x80, cdb[2]=02) -> the start comes from the
+		-- TOC: track 2 was loaded at LBA 0x1800 = 6144, so READSUBQ's absolute position is
+		-- 6144 + 150 = 6294 frames = 01:23:69. Added 2026-09-21: the TOC-lookup branch had
+		-- no coverage, and it was Console 60K's worst timing path once the trace channel
+		-- was compiled out.
+		cd_comm(7 downto 0)   <= x"D8";
+		cd_comm(15 downto 8)  <= x"01";  -- play
+		cd_comm(79 downto 78) <= "10";  -- cdb[9] = 0x80 = BCD track number
+		cd_comm(23 downto 16) <= x"02";  -- cdb[2] = BCD track 2
+		cd_comm(31 downto 24) <= x"00";
+		cd_comm(39 downto 32) <= x"00";
+		send_cmd(clk, cd_comm_send);
+		wait until rising_edge(clk) and cd_stat_get = '1';
+		check_eq(errors, cd_stat, x"00", "SAPSP (BCD track) status");
+		wait for CLK_PERIOD * 4;
+
+		cd_comm(7 downto 0) <= x"DD";
+		send_cmd(clk, cd_comm_send);
+		for i in 1 to 6 loop
+			wait until rising_edge(clk) and cd_data_wr = '1';
+		end loop;
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"01", "READSUBQ (BCD track 2) abs M");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"23", "READSUBQ (BCD track 2) abs S");
+		wait until rising_edge(clk) and cd_data_wr = '1';
+		check_eq(errors, cd_data, x"69", "READSUBQ (BCD track 2) abs F");
 		wait until rising_edge(clk) and cd_stat_get = '1';
 		wait for CLK_PERIOD * 4;
 
