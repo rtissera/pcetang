@@ -88,6 +88,18 @@ architecture rtl of dpram is
 				exit when i > huc6260_palette_init'high;
 				m(i) := huc6260_palette_init(i);
 			end loop;
+		elsif mem_init_file = "pce_bram" and data_width = 8 and DEPTH >= 8 then
+			-- Same formatted-BRAM header as spram's init_spram below (beetle-pce-fast's
+			-- BRAM_Init_String). Only the Console 60K backup RAM uses this string on a
+			-- dpram, so no other instance's init value changes.
+			m(0) := std_logic_vector(to_unsigned(16#48#, data_width));  -- 'H'
+			m(1) := std_logic_vector(to_unsigned(16#55#, data_width));  -- 'U'
+			m(2) := std_logic_vector(to_unsigned(16#42#, data_width));  -- 'B'
+			m(3) := std_logic_vector(to_unsigned(16#4D#, data_width));  -- 'M'
+			m(4) := std_logic_vector(to_unsigned(16#00#, data_width));
+			m(5) := std_logic_vector(to_unsigned(16#88#, data_width));
+			m(6) := std_logic_vector(to_unsigned(16#10#, data_width));
+			m(7) := std_logic_vector(to_unsigned(16#80#, data_width));
 		end if;
 		return m;
 	end function;
