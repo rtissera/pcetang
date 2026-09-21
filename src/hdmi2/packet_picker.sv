@@ -4,6 +4,9 @@
 module packet_picker
 #(
     parameter int VIDEO_ID_CODE = 4,
+    // The VIC to ADVERTISE, separate from the internal mode number. Defaults to the mode
+    // number, which is right for every real CEA mode.
+    parameter int AVI_VIC = VIDEO_ID_CODE,
     parameter real VIDEO_RATE = 0,
     parameter bit IT_CONTENT = 1'b0,
     parameter int AUDIO_BIT_WIDTH = 0,
@@ -136,7 +139,12 @@ audio_sample_packet #(.SAMPLING_FREQUENCY(SAMPLING_FREQUENCY), .WORD_LENGTH({{WO
 
 
 auxiliary_video_information_info_frame #(
-    .VIDEO_ID_CODE(7'(VIDEO_ID_CODE)),
+    // NOT 7'(VIDEO_ID_CODE). That truncated BEFORE the AVI module's own >127 guard could
+    // see the value, so internal mode 200 was advertised as 200 & 0x7F = VIC 72 -- a real,
+    // unrelated format (1080p24, 64:27). A sink told "1080p24" and handed something else
+    // is far likelier to refuse than one told the truth. The guard lives in the AVI module;
+    // this must pass the value through intact for it to work.
+    .VIDEO_ID_CODE(AVI_VIC),
     .IT_CONTENT(IT_CONTENT)
 ) auxiliary_video_information_info_frame(.header(headers[130]), .sub(subs[130]));
 

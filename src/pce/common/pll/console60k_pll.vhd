@@ -55,8 +55,8 @@ entity console60k_pll is
       -- HDMI clocks, taken from the SAME 1200 MHz VCO as clk_pce so the video raster is
       -- rationally locked to the core instead of beating against it. See the "exact
       -- lock" note below.
-      clk_pixel    : out std_logic; -- 1200/20 = 60 MHz
-      clk_5x_pixel : out std_logic; -- 1200/4  = 300 MHz (exactly 5x clk_pixel)
+      clk_pixel    : out std_logic; -- 1200/35 = 34.2857 MHz
+      clk_5x_pixel : out std_logic; -- 1200/7  = 171.4286 MHz (exactly 5x clk_pixel)
       lock      : out std_logic
    );
 end entity;
@@ -228,8 +228,8 @@ begin
          -- unrelated VCO. That is what makes the raster rationally locked to the core:
          --
          --   source line = 2730 core dots / 42.857 MHz  = 63.70 us
-         --   output line = 1274 pixels    / 60 MHz      = 21.233 us
-         --   ratio                                      = EXACTLY 3.000
+         --   output line = 1092 pixels    / 34.2857 MHz = 31.850 us
+         --   ratio                                      = EXACTLY 2.000
          --
          -- The old path ran the pixel clock from its own 743.75 MHz VCO at 74.375 MHz
          -- with H_total 1650, giving 2.871 output lines per source line -- a non-integer
@@ -238,21 +238,24 @@ begin
          -- amount of VTOTAL servoing could remove it because the error is generated per
          -- LINE, not per frame.
          --
-         -- WHY x3 AND NOT x2. Exact lock forces the output line rate to N x 15.699 kHz:
-         -- N=2 gives 31.40 kHz, which is 480p class -- and this board's own history is
-         -- that some real HDMI sinks reject 480p60 outright with "no signal" (see the
-         -- comment above the 720p PLL in pcetang_console60k_cd.vhd). N=3 gives 47.10 kHz,
-         -- next to real 720p60's 45.00 kHz, which those same sinks accept.
+         -- WHY x2, AND WHY H_total IS 1092. The output line rate is quantised to
+         -- N x 15.699 kHz. The deciding argument is not the line rate but whether the
+         -- frame can carry a REAL CEA active area, which is how MiSTle-Dev/c64nano gets a
+         -- non-standard raster accepted by consumer TVs (see hdmi.sv case 200):
          --
-         -- D=20 is the only workable divider: clk_pixel must be 1200/D with D divisible
-         -- by 5 (so the 5x tap is an integer ODIV) and 76440/(D*3) a whole H_total.
-         -- D=5 and D=10 need 240/600 MHz TMDS; D=40 gives a 637-pixel line, too narrow
-         -- for the 4:3 window. So this is the unique solution, not a preference.
+         --   N=3 -> H_total 1274. 1274 < 1280, so a standard 720p active area does not
+         --          fit at all. Dead, whatever its line rate.
+         --   N=2 -> H_total 1092 with 720x480 active inside it, declared VIC 2. Fits.
          --
-         -- 300 MHz TMDS is LOWER than the 371.875 MHz the 720p PLL runs at, so the
-         -- serializer's timing gets easier, not harder. Core clock untouched.
-         ODIV2_SEL  => 20,    -- 1200/20 = 60 MHz (clk_pixel)
-         ODIV3_SEL  => 4,     -- 1200/4  = 300 MHz (clk_5x_pixel), exact 5x
+         -- H_total = 38220/D, so D must divide 38220 and be a multiple of 5 (the 5x TMDS
+         -- tap has to stay an integer ODIV). D=35 gives H_total 1092 and, crucially,
+         -- 1200/7 = 171.4286 MHz for the 5x tap -- BOTH integer taps off the EXISTING
+         -- 1200 MHz VCO, so clk_pce and clk_sdram are untouched. D=30 gives H_total 1274
+         -- (43% blanking) and D=20 gives 1911 (62%); 1092 is 34%, beside c64nano's 31%.
+         --
+         -- 171.4286 MHz TMDS is less than HALF the 371.875 MHz the old 720p PLL ran at.
+         ODIV2_SEL  => 35,    -- 1200/35 = 34.2857 MHz (clk_pixel)
+         ODIV3_SEL  => 7,     -- 1200/7  = 171.4286 MHz (clk_5x_pixel), exact 5x
          CLKOUT0_EN => "TRUE",
          CLKOUT1_EN => "TRUE",
          CLKOUT2_EN => "TRUE",

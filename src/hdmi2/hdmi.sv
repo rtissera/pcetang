@@ -187,62 +187,76 @@ generate
             assign vsync_pulse_size = 5;
             assign invert = 0;
         end
-        // PCE PORT (2026-09-20): custom mode 200 -- "PCE exact lock".
+        // PCE PORT: custom mode 200 -- "PCE exact lock", built to MiSTle-Dev/c64nano's
+        // recipe rather than as a free-form custom timing.
         //
-        // Not a CEA-861 code, deliberately. Every standard mode has a pixel clock that is
-        // irrational against the PC Engine's line rate, which forces the line doubler into
-        // a 2-or-3 output lines per source line pattern that crawls -- the line-by-line
-        // shimmer. This mode exists so one source line is EXACTLY two output lines:
+        // THE PROBLEM. Every standard mode has a pixel clock irrational against the PC
+        // Engine's line rate, so the line doubler shows each source line for 2 or 3 output
+        // lines in a crawling pattern (the shimmer), and the frame servo has to dither
+        // VTOTAL between two integers to absorb the rest (the tremor). Both are consequences
+        // of a non-integer ratio, not bugs.
         //
-        //   source line = 2730 core dots / 42.857 MHz = 63.700 us
-        //   output line = 1274 pixels    / 60 MHz     = 21.233 us   (ratio exactly 3)
-        //   V_total     = 789 = 263 x 3               -> frame rate locks on both sides
+        // THE RECIPE, read out of c64nano/src/hdmi/hdmi.sv. Its NTSC mode is:
+        //     htiming0 = { 1040, 720, 16, 62 }   vtiming0 = { 526, 480, 9, 6 }   cea0 = 2
+        // That is a REAL CEA 480p active area (720x480) under the REAL VIC (2), with the
+        // rate error pushed entirely into blanking and a faster-than-standard pixel clock.
+        // A sink therefore sees exactly the active area and VIC it expects; only H_total
+        // and the clock are off, by under 1% in line rate. That is why a non-standard
+        // raster is accepted by consumer displays -- NOT because sinks tolerate arbitrary
+        // timings, which was the assumption behind the first cut of this mode.
         //
-        // x3 rather than x2 on purpose. Exact lock quantises the output line rate to
-        // N x 15.699 kHz: N=2 lands on 31.40 kHz (480p class, which some sinks on this
-        // board reject with "no signal") and N=3 on 47.10 kHz, beside real 720p60's
-        // 45.00 kHz. Real 720p cannot itself be locked -- 1650/74.25 MHz gives 2.8665
-        // output lines per source line, and the core clock that would fix it (43.18 MHz)
-        // is above this board's measured Fmax of 43.056.
+        // c64nano's NTSC frame is 526 lines = 263 x 2, and 263 is ALSO the PC Engine's
+        // NTSC line count. Its line rate (15.734 kHz real) is within 0.2% of PCE's 15.699.
+        // The closest geometric match that exists to this core chose 480p, not 720p.
         //
-        // Both clocks come off the core's own 1200 MHz VCO (see console60k_pll.vhd), so
-        // this is a rational lock, not a servo chasing a beat. The VTOTAL servo in
-        // pce2hdmi_sd.sv is redundant here and is disabled for this mode.
+        // APPLIED HERE:
+        //     source line = 2730 core dots / 42.857 MHz   = 63.700 us
+        //     output line = 1092 pixels    / 34.2857 MHz  = 31.850 us  (ratio EXACTLY 2)
+        //     V_total     = 526 = 263 x 2                 -> frame rate locks on both sides
+        //     active      = 720 x 480, declared VIC 2      -> what the sink expects to see
         //
-        // Active window: 726 of 789 lines (242 active source lines tripled, the RVBL=0
-        // case -- within 6 lines of real 720p's 720) and 968 of 1274 pixels. The 4:3 mapping is not done here -- pce2hdmi_sd.sv
-        // MEASURES the real active height and derives width = height * 4/3 inside this
-        // rectangle, so both PCE line counts (242 and 231) stay correct.
+        //                     c64nano NTSC | here   | real CEA 480p60
+        //     active            720x480    | 720x480| 720x480
+        //     VIC                    2     |    2   |    2
+        //     V_total              526     |   526  |   525
+        //     H_total             1040     |  1092  |   858
+        //     pixel clock      32.5 MHz    | 34.2857|  27.027
+        //     H blanking           31%     |   34%  |    16%
         //
-        // 1274x789 is non-standard, so display acceptance is a HARDWARE question and the
-        // AVI InfoFrame advertises VIC 0 ("no applicable CEA code, use the timing as
-        // received") rather than a truncated fake -- see the note in
-        // auxiliary_video_information_info_frame.sv. PC monitors are usually tolerant of
-        // arbitrary timings in range; TVs and cheap capture sticks are stricter. If a sink
-        // objects, reverting is one generic in the board top (VIDEOID back to 4) since the
-        // 720p PLL stays in the build. This is why standard 720p remains the DEFAULT and
-        // this mode is opt-in.
+        // WHY NOT x3. An exact lock quantises H_total to 38220/D. x3 lands on 1274, and
+        // 1274 < 1280, so a standard 720p active area cannot fit in the line at all --
+        // the recipe above is simply unavailable there. x2's 1092 carries 720x480 with
+        // room to spare. Both clocks are integer taps off the core's own 1200 MHz VCO
+        // (console60k_pll.vhd), so this is a rational lock, not a servo chasing a beat,
+        // and clk_pce is untouched.
+        //
+        // Sync values are c64nano's, which are themselves the standard 480p ones: front
+        // porch 16, hsync 62, vsync at line 9 for 6 lines. The extra blanking all lands in
+        // the back porch, exactly as it does in c64nano.
+        //
+        // 720x480 under VIC 2 is NON-SQUARE (displayed 4:3), so pce2hdmi_sd.sv disables its
+        // own 4:3 windowing for this mode and fills all 720 pixels, letting the sink apply
+        // the aspect -- the same thing real 480p hardware does.
         200:
         begin
-            assign frame_width = 1274;
-            // 789 = 263 x 3, the EXACT value, with vtotal_extra forced to 0 for this
-            // mode (see pce2hdmi_sd.sv). It used to be 787 so that the phase servo's
-            // clamped extra=2 would land here, but the servo is gone in this mode: with
-            // an exact rate lock a VTOTAL servo has no unique fixed point, so its
-            // sigma-delta stage keeps dithering VTOTAL between two integers forever and
-            // that dither is exactly the tremor this mode exists to remove. Phase is now
-            // set once by a raster reset instead -- MiSTle-Dev/c64nano's video_analyzer.v
-            // does the same thing, and has no servo anywhere in the design.
-            assign frame_height_base = 789;
-            assign screen_width = 968;
-            assign screen_height = 726;
-            // Sync shape follows 720p (mode 4) rather than 480p, to match the class of
-            // timing this mode sits in; scaled to the shorter line.
-            assign hsync_pulse_start = 85;
-            assign hsync_pulse_size = 31;
-            assign vsync_pulse_start = 5;
-            assign vsync_pulse_size = 5;
-            assign invert = 0;
+            assign frame_width = 1092;
+            // The EXACT value: 526 = 263 x 2, with vtotal_extra forced to 0 for this mode
+            // (see pce2hdmi_sd.sv). It was briefly a servo base instead; under an exact
+            // lock a VTOTAL servo has no unique fixed point, so its sigma-delta stage
+            // dithers forever and that dither IS the tremor this mode exists to remove.
+            // Phase is set once by vreset instead, as c64nano's video_analyzer.v does.
+            assign frame_height_base = 526;
+            assign screen_width = 720;
+            // 480, not the 484 the source supplies (242 active lines doubled). Cropping 4
+            // lines is what buys the exact CEA active area, and c64nano makes the same
+            // trade -- its "std" mode shows 480 of its own 484 and only its overscan mode
+            // shows all of them.
+            assign screen_height = 480;
+            assign hsync_pulse_start = 16;
+            assign hsync_pulse_size = 62;
+            assign vsync_pulse_start = 9;
+            assign vsync_pulse_size = 6;
+            assign invert = 1;
         end
         16, 34:
         begin
@@ -307,10 +321,10 @@ always_comb begin
         vsync <= invert ^ (cy >= screen_height + vsync_pulse_start && cy < screen_height + vsync_pulse_start + vsync_pulse_size);
 end
 
-// PCE PORT: mode 200 runs at 1200/20 = 60 MHz. VIDEO_RATE feeds the audio clock
+// PCE PORT: mode 200 runs at 1200/35 = 34.2857 MHz. VIDEO_RATE feeds the audio clock
 // regeneration (CTS/N); getting it wrong silently detunes HDMI audio, which matters here
 // because CD-DA is half the point of this core.
-localparam real VIDEO_RATE = (VIDEO_ID_CODE == 200 ? 60.0E6
+localparam real VIDEO_RATE = (VIDEO_ID_CODE == 200 ? 34.285714E6
     : VIDEO_ID_CODE == 1 ? 25.2E6
     : VIDEO_ID_CODE == 2 || VIDEO_ID_CODE == 3 ? 27.027E6
     : VIDEO_ID_CODE == 4 ? 74.25E6
@@ -428,7 +442,11 @@ generate
             .AUDIO_BIT_WIDTH(AUDIO_BIT_WIDTH),
             .VENDOR_NAME(VENDOR_NAME),
             .PRODUCT_DESCRIPTION(PRODUCT_DESCRIPTION),
-            .SOURCE_DEVICE_INFORMATION(SOURCE_DEVICE_INFORMATION)
+            .SOURCE_DEVICE_INFORMATION(SOURCE_DEVICE_INFORMATION),
+            // The VIC the AVI InfoFrame ADVERTISES, which is not always the internal mode
+            // number. Mode 200 sends a standard 720x480 active area and declares VIC 2 for
+            // it, which is the whole reason a sink accepts the non-standard blanking.
+            .AVI_VIC(VIDEO_ID_CODE == 200 ? 2 : VIDEO_ID_CODE)
         ) packet_picker (.clk_pixel(clk_pixel), .clk_audio(clk_audio), .reset(reset), .video_field_end(video_field_end), .packet_enable(packet_enable), .packet_pixel_counter(packet_pixel_counter), .audio_sample_word(audio_sample_word), .header(header), .sub(sub));
         logic [8:0] packet_data;
         packet_assembler packet_assembler (.clk_pixel(clk_pixel), .reset(reset), .data_island_period(data_island_period), .header(header), .sub(sub), .packet_data(packet_data), .counter(packet_pixel_counter));

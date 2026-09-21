@@ -1461,15 +1461,16 @@ begin
 
    reset_n <= key_reset_n and pll_lock and hdmi_pll_lock;
 
-   -- EXACT VIDEO LOCK (2026-09-20, branch fix/hdmi-exact-lock). The HDMI clocks now come
-   -- off the SAME 1200 MHz VCO as clk_pce (two of PLLA's five spare taps) instead of a
-   -- second PLL with an unrelated VCO. That is what makes one source line exactly three
-   -- output lines; see console60k_pll.vhd and hdmi.sv case 200.
+   -- EXACT VIDEO LOCK (branch fix/hdmi-exact-lock). The HDMI clocks come off the SAME
+   -- 1200 MHz VCO as clk_pce (two of PLLA's five spare taps) instead of a second PLL with
+   -- an unrelated VCO. That is what makes one source line exactly TWO output lines, in a
+   -- frame that still carries a real CEA 480p active area; see console60k_pll.vhd and
+   -- hdmi.sv case 200.
    --
    -- TO REVERT to the shipping 720p path: put hdmi_pll back, drop clk_pixel/clk_5x_pixel
    -- from this port map, and set VIDEOID/CLKFRQ/SCREEN_* below back to 4/74375/1280/720.
    -- pcetang_console60k_hdmi_pll_720p.vhd is deliberately left in the build for exactly
-   -- that, because 1274x789 is non-standard and only real sinks can approve it.
+   -- that, because 1092x526 is non-standard blanking and only real sinks can approve it.
    pll: console60k_pll
    port map (clkin => clk, reset => not key_reset_n, clk_pce => clk_pce,
              clk_sdram => clk_sdram, clk_pixel => clk_pixel,
@@ -4040,10 +4041,10 @@ begin
    -- module's Bresenham stretch already targets SCREEN_WIDTH generically).
    hdmi_out: pce2hdmi_sd
    generic map (
-      VIDEOID       => 200,      -- custom "PCE exact lock", 1274x789 @ 60 MHz
-      CLKFRQ        => 60000,    -- kHz, matches clk_pixel (1200/20) exactly
-      SCREEN_WIDTH  => 968,      -- 726 * 4/3, the 4:3 window inside the 1274-pixel line
-      SCREEN_HEIGHT => 726       -- 242 active source lines x 3
+      VIDEOID       => 200,      -- "PCE exact lock": CEA 480p active area, 1092x526 frame
+      CLKFRQ        => 34286,    -- kHz, matches clk_pixel (1200/35 = 34.2857 MHz)
+      SCREEN_WIDTH  => 720,      -- a REAL CEA 480p active area, declared VIC 2
+      SCREEN_HEIGHT => 480       -- 480 of the 484 the source gives; see hdmi.sv case 200
    )
    port map (
       clk => clk_pce, resetn => reset_n,
