@@ -1073,6 +1073,7 @@ architecture rtl of pcetang_console60k_cd is
    -- case, and one idiom across both bridges is worth more than fidelity to a mechanism
    -- neither bridge currently uses. Reviving ROM_CLKEN for both at once is the cleanup.
    signal cdr_a_last     : std_logic_vector(21 downto 0) := (others => '0');
+   signal cd_req_a       : std_logic_vector(21 downto 0) := (others => '0');
    signal cd_new_comb    : std_logic;
    signal cd_done        : std_logic := '0';
    signal cd_ram_rdy_comb : std_logic;
@@ -2301,8 +2302,15 @@ begin
    cd_new_comb <= '1' when (cdr_rd_mux = '1' or cdr_wr_mux = '1')
                            and ((cdr_rd_mux = '1' and cdram_rd_r = '0')
                                 or (cdr_wr_mux = '1' and cdram_wr_r = '0')
-                                or cdr_a_mux /= cdr_a_last)
+                                or (cdr_a_mux /= cdr_a_last and cdr_a_mux(21) = '1'))
                   else '0';
+   -- ARCADE CARD (2026-09-22): the address term is CD-RAM only. arcade.sv advances a
+   -- port's pointer on the access edge, i.e. about two clocks INTO the CPU's own bus
+   -- cycle, so for an AC port access the address changing is not a new access -- it is
+   -- this access's post-increment. Counting it launched a second SDRAM access at N+inc
+   -- inside the same bus cycle: every port write also stamped N+inc, and every port read
+   -- returned the byte at N+inc (the second access completes last). MiSTer has no bridge
+   -- between the CPU and the card's RAM, so it never sees the moving address.
 
    -- Low the instant a new CD-RAM access is pending, so the CPU cannot sample the
    -- previous byte in the cycle before the REGISTERED cd_ram_rdy_i catches up -- the same
@@ -2435,6 +2443,7 @@ begin
 
    process (clk_pce)
       variable cd_new, adpcm_new : std_logic;
+      variable v_a : std_logic_vector(21 downto 0);
    begin
       if rising_edge(clk_pce) then
          cd_done <= '0';
@@ -2453,6 +2462,16 @@ begin
          if cd_new = '1' then
             cd_pend      <= '1';
             cd_ram_rdy_i <= '0';
+            cd_req_a     <= cdr_a_mux;
+         end if;
+         -- The address this access was REQUESTED at. A request that waits behind an ADPCM
+         -- slot used to launch with the address on the bus at launch time, which for an
+         -- Arcade Card port is already post-increment (see cd_new_comb). CD-RAM addresses
+         -- do not move during a waited access, so for CD-RAM this is the same value.
+         if cd_new = '1' then
+            v_a := cdr_a_mux;
+         else
+            v_a := cd_req_a;
          end if;
          if adpcm_new = '1' then
             adpcm_pend        <= '1';
@@ -2473,9 +2492,9 @@ begin
                   -- each to its own real, non-overlapping SDRAM window instead of both
                   -- collapsing onto CD-RAM's 256KB slice (the real aliasing bug this
                   -- file's header used to describe under "ARCADE CARD RAM: NOT done").
-                  if cdr_a_mux(21) = '0' then
+                  if v_a(21) = '0' then
                      cdr_addr <= std_logic_vector(AC_SDRAM_BASE +
-                                 resize(unsigned(cdr_a_mux(20 downto 0)), 25));
+                                 resize(unsigned(v_a(20 downto 0)), 25));
                   else
                      -- cdr_a_mux, NOT cd_ram_a: the AC branch above already uses the
                      -- mux, and taking the raw core signal here meant the CD-RAM
@@ -2485,7 +2504,7 @@ begin
                      -- result cleared a CD-RAM that was in fact completely broken.
                      -- Identical when cdt_active='0', so the shipped path is unchanged.
                      cdr_addr <= std_logic_vector(CDRAM_SDRAM_BASE +
-                                 resize(unsigned(cdr_a_mux(17 downto 0)), 25));
+                                 resize(unsigned(v_a(17 downto 0)), 25));
                   end if;
                   -- POLARITY FIX (2026-09-13). This read WRONG for the whole life of
                   -- the CD path and is why no CD game ever booted.
@@ -2517,7 +2536,7 @@ begin
                   cd_pend  <= '0';
                   -- Consume the address this access is being launched for, so the
                   -- address-change term in cd_new_comb falls until the CPU moves on.
-                  cdr_a_last <= cdr_a_mux;
+                  cdr_a_last <= v_a;
                   cdr_settle_cnt <= (others => '0');
                   cdr_seen_wait  <= '0';
                   cdr_wdog       <= (others => '0');
