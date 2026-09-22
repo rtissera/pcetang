@@ -443,6 +443,30 @@ and audio are untouched, so HDMI lock cannot regress from it.
 **Confirmed on hardware 2026-09-10:** 4:3 correct, OSD reachable in-game with
 SELECT + D-pad RIGHT (`OSD_KEY_CODE`, firmware default `OPTION_OSD_KEY_SELECT_RIGHT`).
 
+## Post-release: move PCE / PCE-CD memory to the Console 60K's DDR3
+
+**Not before release. Recorded 2026-09-22 so it is not lost.**
+
+Console 60K carries 4 Gbit (512 MB) of DDR3 that this core has never used: everything --
+ROM, CD-RAM, Arcade Card RAM, ADPCM RAM, VRAM0 -- lives in the SDRAM that the design shares
+between three ports through one arbiter. That arbiter is where four of this project's worst
+bugs came from (the ROM double fetch, the CD-RAM stale byte, the CD-RAM polarity inversion
+and the Arcade Card phantom access), all of them variants of "the bridge mis-detected where
+one CPU access ends and the next begins".
+
+Why DDR3 is worth doing afterwards:
+- It would end the port contention that forces the CD-RAM/ADPCM arbiter to exist at all,
+  and with it a whole bug family.
+- It frees SDRAM entirely, which is what Primer 25K and Nano 20K are short of.
+- 512 MB removes every capacity question (Arcade Card 2 MB, big HuCards, CD-RAM) at once.
+- nand2mario already has working Gowin DDR3 controllers to start from
+  (`ddr3-tang-primer-20k`, `ddr3_framebuffer_gowin`), so this is a port, not a design.
+
+Costs to price before starting: DDR3 latency is higher and burst-oriented, so every client
+needs a cache or prefetch in front of it (VRAM0 already has one, and that pattern is the
+model); the controller itself costs logic and a PLL; and it is Console 60K only, so the
+three boards would diverge unless the SDRAM path is kept in parallel.
+
 ## Open items on Console 60K, in priority order
 
 Added 2026-09-18, ahead of the older list below:
