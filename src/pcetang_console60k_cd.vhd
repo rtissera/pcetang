@@ -1372,6 +1372,18 @@ architecture rtl of pcetang_console60k_cd is
    signal acp_fly_a   : std_logic_vector(20 downto 0) := (others => '0');
    signal acp_wa      : std_logic_vector(20 downto 0) := (others => '1');
    signal acp_wd      : std_logic_vector(7 downto 0) := (others => '0');
+   -- BURST-ABANDON PROBE (2026-09-22), tags 0xF4-0xFF, see its capture process.
+   type bst_ring_t is array (natural range <>) of std_logic_vector(31 downto 0);
+   signal bst_after  : bst_ring_t(0 to 9)  := (others => (others => '0'));
+   signal bst_roll   : bst_ring_t(0 to 11) := (others => (others => '0'));
+   signal bst_after_n: unsigned(3 downto 0) := (others => '0');
+   signal bst_cnt    : unsigned(19 downto 0) := (others => '0');  -- $1808 reads since SELECT
+   signal bst_idle   : unsigned(24 downto 0) := (others => '0');  -- cycles since last $1808
+   signal bst_frozen : std_logic := '0';
+   signal bst_fcnt   : unsigned(19 downto 0) := (others => '0');  -- bst_cnt at freeze
+   signal bst_irq    : std_logic_vector(1 downto 0) := "11";
+   signal bst_sel_n  : unsigned(7 downto 0) := (others => '0');   -- SELECTs seen
+   signal bst_idx    : unsigned(3 downto 0) := (others => '0');
    type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
    signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
    -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
@@ -2648,6 +2660,51 @@ begin
       end if;
    end process;
 
+   -- BURST-ABANDON PROBE (2026-09-22). World Heroes 2 on hardware: READ(6) LBA 0x2D4A x56,
+   -- the CPU copies ~11.75 sectors as 2048-byte $1808 bursts, then stops ~1547 bytes into
+   -- a burst and never reads $1808 again; the game re-issues the command every ~6 s
+   -- forever. The reference (beetle, same disc) never leaves a burst. This records where
+   -- the CPU went: bst_after = the first 10 CPU cycles after the most recent $1808 read
+   -- (re-armed by every read, so in a healthy loop it only ever holds the loop body),
+   -- bst_roll = the last 12 cycles, frozen together with bst_after once 500 ms pass with
+   -- no $1808 read while mid-sector (read count since SELECT not a multiple of 2048).
+   -- Entry: [31] write | [30] IRQ1_N | [29] IRQ2_N | [28:8] physical address | [7:0] data.
+   -- Freezes once per game (core reset clears it).
+   process (clk_pce)
+      variable e : std_logic_vector(31 downto 0);
+   begin
+      if rising_edge(clk_pce) then
+         if core_resetn = '0' then
+            bst_frozen <= '0'; bst_cnt <= (others => '0'); bst_idle <= (others => '0');
+            bst_after_n <= (others => '0'); bst_sel_n <= (others => '0');
+         elsif bst_frozen = '0' then
+            if bst_idle /= "1111111111111111111111111" then bst_idle <= bst_idle + 1; end if;
+            if dbg_cpu_ce = '1' and acp_ce_r = '0'
+               and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0') then
+               e := (not dbg_cpu_wr_n) & dbg_irq1_n & dbg_irq2_n & dbg_cpu_a & cdreg_data;
+               bst_roll <= bst_roll(1 to 11) & e;
+               if dbg_cpu_a = "111111111100000001000" and dbg_cpu_wr_n = '1' then   -- RD $1808
+                  bst_cnt     <= bst_cnt + 1;
+                  bst_idle    <= (others => '0');
+                  bst_after_n <= (others => '0');
+               elsif dbg_cpu_a = "111111111100000000000" and dbg_cpu_wr_n = '0' then -- WR $1800
+                  bst_cnt <= (others => '0');
+                  if bst_sel_n /= x"FF" then bst_sel_n <= bst_sel_n + 1; end if;
+               elsif bst_after_n < 10 then
+                  bst_after(to_integer(bst_after_n)) <= e;
+                  bst_after_n <= bst_after_n + 1;
+               end if;
+            end if;
+            -- 21,400,000 cycles = 500 ms at 42.76 MHz
+            if bst_idle = to_unsigned(21400000, 25) and bst_cnt(10 downto 0) /= 0 then
+               bst_frozen <= '1';
+               bst_fcnt   <= bst_cnt;
+               bst_irq    <= dbg_irq1_n & dbg_irq2_n;
+            end if;
+         end if;
+      end if;
+   end process;
+
    -- CD-RAM read snoop capture (see cdsnoop_buf's declaration comment). Gated on
    -- sum_cmd_cnt >= 8 so it samples the program the boot actually loaded, not the
    -- syscard's own earlier scratch traffic. cd_ram_rdy_i's rising edge is when the
@@ -3541,6 +3598,30 @@ begin
                   dbg_trace_tag  <= x"B1";
                   dbg_trace_data <= std_logic_vector(ph_chg) & std_logic_vector(ph_d8)
                                     & std_logic_vector(ph_f8) & std_logic_vector(ph_bf);
+               end if;
+            elsif dbg_hb_cnt = 0 and ph_tag(1 downto 0) = "10" then
+               -- 0xF4-0xFF: BURST-ABANDON PROBE. 0xF4 always (so "never fired" is visible):
+               -- [63] frozen | [62:61] IRQ1_N,IRQ2_N at freeze | [60:41] $1808 reads since
+               -- SELECT at freeze | [40:21] reads now | [20:13] SELECTs seen | [12:0] 0.
+               -- Once frozen, 0xF5-0xF9 = bst_after(0..9), 0xFA-0xFF = bst_roll(0..11),
+               -- two 32-bit entries per frame, oldest first; one frame per slot, cycling.
+               dbg_trace_req <= '1';
+               if bst_frozen = '0' or bst_idx = 0 then
+                  dbg_trace_tag  <= x"F4";
+                  dbg_trace_data <= bst_frozen & bst_irq & std_logic_vector(bst_fcnt)
+                                    & std_logic_vector(bst_cnt) & std_logic_vector(bst_sel_n)
+                                    & "0000000000000";
+               elsif bst_idx <= 5 then
+                  dbg_trace_tag  <= std_logic_vector(unsigned'(x"F4") + bst_idx);
+                  dbg_trace_data <= bst_after(to_integer(bst_idx - 1) * 2)
+                                    & bst_after(to_integer(bst_idx - 1) * 2 + 1);
+               else
+                  dbg_trace_tag  <= std_logic_vector(unsigned'(x"F4") + bst_idx);
+                  dbg_trace_data <= bst_roll(to_integer(bst_idx - 6) * 2)
+                                    & bst_roll(to_integer(bst_idx - 6) * 2 + 1);
+               end if;
+               if bst_frozen = '1' then
+                  if bst_idx = 11 then bst_idx <= (others => '0'); else bst_idx <= bst_idx + 1; end if;
                end if;
             elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
