@@ -175,7 +175,7 @@ architecture rtl of pcetang_console60k_cd is
    --
    -- Set to 1 to debug (the CD bus-reset work is exactly where these probes earn their
    -- keep), and expect the timing margin to shrink when you do.
-   constant DEBUG_TRACE : integer := 0;
+   constant DEBUG_TRACE : integer := 1;
 
    component console60k_pll is
       port (
@@ -1353,6 +1353,25 @@ architecture rtl of pcetang_console60k_cd is
    signal ph_f8   : unsigned(15 downto 0) := (others => '0');
    signal ph_bf   : unsigned(15 downto 0) := (others => '0');
    signal ph_tag  : unsigned(4 downto 0)  := (others => '0');
+   -- ARCADE CARD PROBE (2026-09-22), tags 0xF0-0xF3, see the capture process below.
+   signal acp_ce_r    : std_logic := '0';
+   signal acp_reg_rd  : unsigned(15 downto 0) := (others => '0');
+   signal acp_reg_wr  : unsigned(15 downto 0) := (others => '0');
+   signal acp_ram_rd  : unsigned(15 downto 0) := (others => '0');
+   signal acp_ram_wr  : unsigned(15 downto 0) := (others => '0');
+   signal acp_wr_ring : std_logic_vector(63 downto 0) := (others => '0');
+   signal acp_id_last : std_logic_vector(7 downto 0) := (others => '0');
+   signal acp_id_cnt  : unsigned(7 downto 0) := (others => '0');
+   signal acp_ok      : unsigned(15 downto 0) := (others => '0');
+   signal acp_bad     : unsigned(15 downto 0) := (others => '0');
+   signal acp_bad1    : std_logic_vector(15 downto 0) := (others => '0');
+   signal acp_bad1_a  : std_logic_vector(20 downto 0) := (others => '0');
+   signal acp_last_a  : std_logic_vector(20 downto 0) := (others => '0');
+   signal acp_fly     : std_logic := '0';
+   signal acp_fly_wr  : std_logic := '0';
+   signal acp_fly_a   : std_logic_vector(20 downto 0) := (others => '0');
+   signal acp_wa      : std_logic_vector(20 downto 0) := (others => '1');
+   signal acp_wd      : std_logic_vector(7 downto 0) := (others => '0');
    type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
    signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
    -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
@@ -2561,6 +2580,63 @@ begin
       end if;
    end process;
 
+   -- ARCADE CARD PROBE (2026-09-22). Sapphire, Garou Densetsu 2 and World Heroes 2 fail
+   -- on hardware and nothing in the trace set looks at the card itself. Two questions:
+   --   1. does the game talk to the card at all -- register window $1A00-$1AFF
+   --      (physical 0x1FFA00), and what did the ID read at $1AFF return (0x51 expected)?
+   --   2. does AC RAM give back what was written -- every AC RAM read of the address
+   --      most recently written is compared against the byte written there.
+   -- AC RAM traffic is observed where cdr_a_mux(21) = '0' launches an arbiter access,
+   -- i.e. exactly the accesses that go to AC_SDRAM_BASE. Own process, own registers:
+   -- nothing here drives anything the emulator reads.
+   process (clk_pce)
+   begin
+      if rising_edge(clk_pce) then
+         acp_ce_r <= dbg_cpu_ce;
+         if dbg_cpu_ce = '1' and acp_ce_r = '0'
+            and dbg_cpu_a(20 downto 8) = "1111111111010" then
+            if dbg_cpu_wr_n = '0' then
+               if acp_reg_wr /= x"FFFF" then acp_reg_wr <= acp_reg_wr + 1; end if;
+               acp_wr_ring <= acp_wr_ring(47 downto 0) & dbg_cpu_a(7 downto 0) & cdreg_data;
+            elsif dbg_cpu_rd_n = '0' then
+               if acp_reg_rd /= x"FFFF" then acp_reg_rd <= acp_reg_rd + 1; end if;
+               if dbg_cpu_a(7 downto 0) = x"FF" then
+                  acp_id_last <= cdreg_data;
+                  if acp_id_cnt /= x"FF" then acp_id_cnt <= acp_id_cnt + 1; end if;
+               end if;
+            end if;
+         end if;
+
+         if cdr_state = CDR_IDLE and (cd_pend = '1' or cd_new_comb = '1')
+            and cdr_a_mux(21) = '0' then
+            acp_fly    <= '1';
+            acp_fly_wr <= cdr_wr_mux;
+            acp_fly_a  <= cdr_a_mux(20 downto 0);
+            acp_last_a <= cdr_a_mux(20 downto 0);
+            if cdr_wr_mux = '1' then
+               if acp_ram_wr /= x"FFFF" then acp_ram_wr <= acp_ram_wr + 1; end if;
+               acp_wa <= cdr_a_mux(20 downto 0);
+               acp_wd <= cdr_do_mux;
+            else
+               if acp_ram_rd /= x"FFFF" then acp_ram_rd <= acp_ram_rd + 1; end if;
+            end if;
+         elsif acp_fly = '1' and cd_done = '1' then
+            acp_fly <= '0';
+            if acp_fly_wr = '0' and acp_fly_a = acp_wa then
+               if cd_ram_di_i = acp_wd then
+                  if acp_ok /= x"FFFF" then acp_ok <= acp_ok + 1; end if;
+               else
+                  if acp_bad = 0 then
+                     acp_bad1   <= acp_wd & cd_ram_di_i;
+                     acp_bad1_a <= acp_fly_a;
+                  end if;
+                  if acp_bad /= x"FFFF" then acp_bad <= acp_bad + 1; end if;
+               end if;
+            end if;
+         end if;
+      end if;
+   end process;
+
    -- CD-RAM read snoop capture (see cdsnoop_buf's declaration comment). Gated on
    -- sum_cmd_cnt >= 8 so it samples the program the boot actually loaded, not the
    -- syscard's own earlier scratch traffic. cd_ram_rdy_i's rising edge is when the
@@ -3381,7 +3457,31 @@ begin
                -- here -- incrementing it inside a branch gated on its own value would
                -- stop it after one step.
                dbg_trace_req <= '1';
-               if ph_tag(3 downto 2) = "11" then
+               if ph_tag(4) = '1' then
+                  -- 0xF0-0xF3: ARCADE CARD PROBE, every other lap of this rotation.
+                  --   0xF0 [63:48] AC register reads | [47:32] AC register writes
+                  --        | [31:16] AC RAM reads | [15:0] AC RAM writes
+                  --   0xF1 last 4 AC register writes, oldest first, each
+                  --        [15:8] register ($1Axx low byte) | [7:0] byte written
+                  --   0xF2 [63:56] last $1AFF read (0x51 = card present) | [55:48] $1AFF reads
+                  --        | [47:32] read-after-write MATCHES | [31:16] MISMATCHES
+                  --        | [15:0] first mismatch as wrote|read
+                  --   0xF3 [63:43] first mismatch AC address | [42:22] last AC RAM address
+                  dbg_trace_tag <= "111100" & std_logic_vector(ph_tag(3 downto 2));
+                  case ph_tag(3 downto 2) is
+                     when "00" =>
+                        dbg_trace_data <= std_logic_vector(acp_reg_rd) & std_logic_vector(acp_reg_wr)
+                                          & std_logic_vector(acp_ram_rd) & std_logic_vector(acp_ram_wr);
+                     when "01" =>
+                        dbg_trace_data <= acp_wr_ring;
+                     when "10" =>
+                        dbg_trace_data <= acp_id_last & std_logic_vector(acp_id_cnt)
+                                          & std_logic_vector(acp_ok) & std_logic_vector(acp_bad)
+                                          & acp_bad1;
+                     when others =>
+                        dbg_trace_data <= acp_bad1_a & acp_last_a & "0000000000000000000000";
+                  end case;
+               elsif ph_tag(3 downto 2) = "11" then
                   -- 0xB3: VIDEO GEOMETRY.
                   -- [63:56] every VDC0 SCREEN (BAT size) value seen, OR-ed
                   --         bit2 = 64 rows (else 32), bits1:0 = 32/64/128 columns
