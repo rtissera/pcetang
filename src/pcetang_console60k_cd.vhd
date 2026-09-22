@@ -2634,6 +2634,17 @@ begin
                end if;
             end if;
          end if;
+         -- Per game: a ROM load holds the core in reset, so every counter above
+         -- describes the game running now, not the session.
+         if core_resetn = '0' then
+            acp_reg_rd <= (others => '0');  acp_reg_wr <= (others => '0');
+            acp_ram_rd <= (others => '0');  acp_ram_wr <= (others => '0');
+            acp_wr_ring <= (others => '0'); acp_id_last <= (others => '0');
+            acp_id_cnt <= (others => '0');  acp_ok <= (others => '0');
+            acp_bad <= (others => '0');     acp_bad1 <= (others => '0');
+            acp_bad1_a <= (others => '0');  acp_fly <= '0';
+            acp_wa <= (others => '1');
+         end if;
       end if;
    end process;
 
