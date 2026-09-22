@@ -2691,8 +2691,8 @@ begin
          else
             if dbg_cpu_ce = '1' and acp_ce_r = '0'
                and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0') then
-               stl_roll <= stl_roll(1 to 11)
-                           & ((not dbg_cpu_wr_n) & dbg_irq1_n & dbg_irq2_n & dbg_cpu_a & cdreg_data);
+               e := (not dbg_cpu_wr_n) & dbg_irq1_n & dbg_irq2_n & dbg_cpu_a & cdreg_data;
+               stl_roll <= stl_roll(1 to 11) & e;
                if (dbg_cpu_a = "111111111100000001000" and dbg_cpu_wr_n = '1')
                   or (dbg_cpu_a = "111111111100000000000" and dbg_cpu_wr_n = '0') then
                   stl_idle  <= (others => '0');
