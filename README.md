@@ -9,7 +9,8 @@ on-screen display).
 controllers and an in-game OSD. CD games run from real
 CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
 Prince of Persia, Rondo of Blood and Bonk III are playable. **SuperGrafx works** — all four
-titles tested boot and play. Arcade Card titles do not run yet.
+titles tested boot and play. **Arcade Card titles play too** — Sapphire, Garou Densetsu 2
+and World Heroes 2, confirmed on hardware 2026-09-22.
 
 Primer 25K and Nano 20K build clean but have **never run a game** — don't buy hardware on
 the strength of this table.
@@ -40,7 +41,7 @@ UART. GPL-3.0 throughout — see
 | CD-ROM²: system card boots off a CHD | **yes** | no | no |
 | **CD game playable, with CD-DA and ADPCM** | **yes** | no | no |
 | SuperGrafx | **all 4 tested boot and play** | compiled out | no room |
-| Arcade Card | compiled in, **games stall** | no room | no room |
+| Arcade Card | **Sapphire, Garou 2, WH2 play** | no room | no room |
 
 ### Why only one board plays games
 
@@ -88,12 +89,7 @@ and Bonk III run with CD-DA music and ADPCM voices. Double Dragon II plays with 
 voice cut short. Sectors are served from a CHD by the BL616 companion over UART at 99.8%
 of realtime.
 
-### What does not
-
-**Arcade Card games do not run.** Sapphire reaches "NOW LOADING" then black-screens; Garou
-Densetsu 2 and World Heroes 2 black-screen after the system card. None of the three looks
-like an Arcade Card RAM or register fault — all three sit waiting on the CD unit, which
-points at the CD interrupt path. Unaffected by the CD-RAM fix, and still open.
+### Also working
 
 **SuperGrafx works.** All four titles tested — 1941 Counter Attack, Aldynes, Daimakaimura
 and Battle Ace — boot and play on real hardware. Every one of them was broken until
@@ -105,6 +101,23 @@ Battle Ace was missing its sprites.
 no shimmer, no tremor and no roll: the output and the core share one VCO on integer
 dividers, and the frame carries a real CEA 480p active area (720x480, VIC 2) so displays
 accept it. The earlier "inherent" shimmer was not inherent. See `docs/STATUS.md`.
+
+**The Arcade Card plays its games.** Sapphire, Garou Densetsu 2 and World Heroes 2 all reach
+gameplay on hardware (2026-09-22). They had never run before: every Arcade Card port access
+launched a phantom second SDRAM access at the next address, which released the CPU early and
+let an instruction fetch take the byte just written to the card as its opcode. The games
+stream CD sectors into the card byte by byte, so the CPU derailed within a few sectors and
+the game re-issued the same read forever — which looked like a CD fault for two rounds of
+debugging, and was not one.
+
+### What does not
+
+**Backup-RAM saves are untested on hardware.** Implemented on both sides and flashed, but no
+game has saved and reloaded yet.
+
+**Garou Densetsu 2 and World Heroes 2 have minor graphic glitches** in gameplay, undiagnosed.
+
+**Primer 25K and Nano 20K still play nothing**, for want of a storage path — see above.
 
 ### Fixed 2026-09-19: CD-RAM shadowed every HuCard over 832 KB
 

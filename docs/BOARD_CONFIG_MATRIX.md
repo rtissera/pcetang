@@ -30,7 +30,7 @@ fails on any timing violation — so this table cannot silently drift from the t
 | SF2' mapper (2560 KB) | yes | yes | yes |
 | CD-ROM² + CD-DA + ADPCM | built | built | **yes, HW-confirmed** |
 | SuperGrafx | no (no room) | no (`LITE => 1`) | **yes, all 4 titles** |
-| Arcade Card | no (no room) | no (no room) | built, **games stall** |
+| Arcade Card | no (no room) | no (no room) | **yes, games play (2026-09-22)** |
 | VRAM0 | SDRAM + prefetch | SDRAM + prefetch | on-chip |
 | PSG path | Path 0 (BRAM) | Path A | Path A |
 
@@ -132,7 +132,7 @@ straight into a public claim, so state it exactly:
 
 - **Console 60K**: HuCards (including >832 KB), CD-ROM² and Super CD-ROM² with CD-DA and
   ADPCM, and all four SuperGrafx titles — confirmed on hardware across 13 titles. The
-  Arcade Card is compiled in but **its games stall**, so it is not a claim.
+  Arcade Card plays its games too (Sapphire, Garou Densetsu 2, World Heroes 2, 2026-09-22).
 - **Primer 25K and Nano 20K**: build clean and the core runs, but **neither plays a game**,
   because neither board's MCU can reach storage. Not a CD-tier distinction at all — a
   storage one. See "Why only one board plays games" above.

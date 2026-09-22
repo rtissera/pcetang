@@ -1,10 +1,40 @@
 # Where this core actually stands
 
-Last updated 2026-09-19. Written to be blunt about what is *verified on hardware*
+Last updated 2026-09-22. Written to be blunt about what is *verified on hardware*
 versus what merely *builds*, because those are very different claims and this file
 exists so git history records which is which.
 
-## Current state (2026-09-21) — read this first
+## Current state (2026-09-22) — read this first
+
+**Arcade Card games run on hardware (branch `fix/arcade-card-double-access`).** Ginga Fukei
+Densetsu Sapphire, Garou Densetsu 2 and World Heroes 2 all reach gameplay on Console 60K,
+2026-09-22 -- the first time any of them has. Every "stalls on the CD interrupt path"
+statement further down this file is **superseded**: the CD unit was never the fault.
+
+The cause was one line of this port's own bridge logic. `arcade.sv` advances a port's
+pointer about two clocks INTO the CPU's bus cycle, and the CD-RAM arbiter's new-request
+detect (`cd_new_comb`) counted that moving address as a second access. So every Arcade Card
+port access launched a phantom second SDRAM access at N+inc, and the first access's
+`cd_done` released the CPU while the phantom was still queued. The next instruction fetch
+from CD-RAM could then be released by the phantom's completion and take the byte just
+written to the card **as its opcode** -- a dice roll on every byte copied. The games copy CD
+sectors into the card byte by byte, so a derail was certain within a few sectors: the CPU
+left its copy loop mid-sector, the game re-issued the same READ(6) forever, and that is what
+looked like a CD stall. The address-change term is now CD-RAM only, and the arbiter launches
+at the address latched when the request was made. Same family as the CD-RAM stale byte of
+2026-09-15: donor logic that is correct with no bridge, wrong behind ours.
+
+Evidence (hardware trace, tags 0xF0-0xFF in `debug.log`): the card ID at `$1AFF` always read
+0x51 correctly, every sector was served with zero errors, and the read-after-write check
+found no bad byte -- the games simply never got as far as reading card RAM.
+
+Regression on the same build: Rondo, Bonk III, Prince of Persia, R-Type Complete CD, DD2,
+1943 Kai (HuCard) and Aldynes (SuperGrafx) all still play.
+
+**Still open from this round:** minor graphic glitches in Garou Densetsu 2 and World Heroes 2
+(not yet diagnosed; the trace shows no data error), and Rondo's intro not skipping with RUN.
+
+## Current state (2026-09-21)
 
 Everything below this section is kept as a dated record and is accurate for its date. Where
 it has been overtaken it is marked **superseded** or **resolved** in place.
@@ -35,7 +65,7 @@ core saves today. `sim/saveram` tests the FPGA side with real UART timing.
 
 **Known open, in order of user impact:**
 1. Saves: awaiting a hardware test (save in a game, power-cycle, reload).
-2. Arcade Card games stall on the CD interrupt path (unchanged, see below).
+2. ~~Arcade Card games stall on the CD interrupt path~~ **RESOLVED 2026-09-22, see above.**
 3. OSD draws twice in games wider than 256 px: `overlay_x` is the game's own sample index
    and wraps. Fix = derive it from the output position. Parked.
 4. A cheap USB capture stick rolls for ~3 s after a game changes screens (the monitor does
@@ -103,9 +133,9 @@ accepts `.sgx` ROMs. Three of four titles boot -- Battle Ace, Aldynes and Daimak
 all with rendering defects (missing sprites, graphic corruption); 1941 Counter Attack
 stays black. See the SuperGrafx section below for the six mechanisms already ruled out.
 
-**The Arcade Card is compiled in but its games do not run (2026-09-18).** Sapphire,
-Garou Densetsu 2 and World Heroes 2 all stall waiting on the CD unit rather than on
-Arcade Card RAM or registers.
+**The Arcade Card is compiled in but its games do not run (2026-09-18).** SUPERSEDED
+2026-09-22: all three run. The diagnosis in this line was wrong -- they were not waiting on
+the CD unit; the CPU was derailing on a phantom SDRAM access. See the top section.
 
 ## Per-board matrix
 
@@ -124,10 +154,10 @@ Arcade Card RAM or registers.
 | CD-DA music on real hardware | **YES, full rate** | no | no |
 | ADPCM voices on real hardware | **YES** (DD2 title voice cut short) | no | no |
 | CD-ROM² | compiled in, **runs games** | compiled in, **no storage path** | compiled in, **no storage path** |
-| Arcade Card | compiled in, **games stall** | compiled out (no room) | compiled out (no room) |
+| Arcade Card | **on — Sapphire, Garou 2, WH2 all play (2026-09-22)** | compiled out (no room) | compiled out (no room) |
 | SuperGrafx | **on — all 4 tested boot and play** | off (`LITE => 1`) | off (no room) |
 | **HuCard > 832 KB** | **FIXED + HW-CONFIRMED 2026-09-19** (13 titles) | same fix, built | same fix, built |
-| Saves (backup RAM to SD) | **implemented, sim-tested, awaiting HW test** | not built (`SAVE_IF => 0`) | not built (`SAVE_IF => 0`) |
+| Saves (backup RAM to SD) | **implemented, sim-tested, firmware flashed 2026-09-22, awaiting HW test** | not built (`SAVE_IF => 0`) | not built (`SAVE_IF => 0`) |
 
 Exact generic maps, so this cannot drift from the source:
 
@@ -220,9 +250,9 @@ banks above `$68` through the MPRs, and CD-RAM was stealing those cycles.
 Lesson worth keeping: a clean sim result bounds what the sim covered and nothing more.
 
 ### Still open, and NOT fixed by this
-- **Arcade Card games**: Sapphire reaches "NOW LOADING" then black-screens; Garou Densetsu 2
-  and World Heroes 2 black-screen after the system card. Re-tested 2026-09-19 on the fixed
-  bitstream: unchanged. Still the CD interrupt path.
+- **Arcade Card games**: ~~Sapphire reaches "NOW LOADING" then black-screens; Garou Densetsu 2
+  and World Heroes 2 black-screen after the system card~~ -- **RESOLVED 2026-09-22**, and the
+  "still the CD interrupt path" call here was wrong. See the top section.
 - **1943 Kai**: occasional slowdowns and unreliable bonus pickup (possible VDC sprite
   collision). Present since day one, NOT a regression -- confirmed by the user.
 - **HDMI: four separate defects seen on real hardware.** **Resolved 2026-09-21 by exact lock
@@ -417,12 +447,13 @@ SELECT + D-pad RIGHT (`OSD_KEY_CODE`, firmware default `OPTION_OSD_KEY_SELECT_RI
 
 Added 2026-09-18, ahead of the older list below:
 
-0a. **Arcade Card games stall on the CD interrupt path.** Sapphire holds at "NOW LOADING"
-    while toggling `$1802` (the CD IRQ mask) with only 16 sector requests and zero ADPCM
-    accesses; Garou Densetsu 2 parks in the SCSI COMMAND phase; World Heroes 2 sticks in
-    DATA IN with bytes offered and never consumed. None is an Arcade Card RAM or register
-    fault. Next: compare `$1802` masking, the transfer-done flag (`cd.vhd` sets `CD_DTD`
-    at the status phase) and the ADPCM end/half interrupts against Mednafen's `pcecd.c`.
+0a. **Arcade Card games: RESOLVED 2026-09-22.** All three play. The symptoms recorded here
+    (Sapphire toggling `$1802`, Garou parked in COMMAND, WH2 sticking in DATA IN with bytes
+    never consumed) were all downstream of the CPU derailing on a phantom SDRAM access
+    launched by the card port's own auto-increment -- not the CD interrupt path, and not
+    `$1802` masking. Kept as a record of how convincing a wrong localisation can look: two
+    separate rounds blamed the drive because the drive was where the symptom showed.
+    Remaining: minor graphic glitches in Garou 2 and WH2, undiagnosed.
 0b. **SuperGrafx: RESOLVED 2026-09-19.** All four titles boot and play on hardware. Every
     symptom -- 1941's black screen, Aldynes/Daimakaimura corruption, Battle Ace's missing
     sprites -- was the CD-RAM shadow, not an SGX bug. See the root-cause section above.
