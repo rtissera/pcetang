@@ -2667,7 +2667,8 @@ begin
    -- the CPU went: bst_after = the first 10 CPU cycles after the most recent $1808 read
    -- (re-armed by every read, so in a healthy loop it only ever holds the loop body),
    -- bst_roll = the last 12 cycles, frozen together with bst_after once 500 ms pass with
-   -- no $1808 read while mid-sector (read count since SELECT not a multiple of 2048).
+   -- no $1808 read while mid-sector (read count since SELECT not a multiple of 2048), or
+   -- after the CPU's last $1800 poll returned 0xC8 (DATA IN + REQ: a sector on offer).
    -- Entry: [31] write | [30] IRQ1_N | [29] IRQ2_N | [28:8] physical address | [7:0] data.
    -- Freezes once per game (core reset clears it).
    process (clk_pce)
@@ -2696,7 +2697,10 @@ begin
                end if;
             end if;
             -- 21,400,000 cycles = 500 ms at 42.76 MHz
-            if bst_idle = to_unsigned(21400000, 25) and bst_cnt(10 downto 0) /= 0 then
+            -- Mid-sector (WH2: left a burst) OR the CPU last saw DATA IN + REQ and then
+            -- never started reading (Garou 2: an offered transfer that is never taken).
+            if bst_idle = to_unsigned(21400000, 25)
+               and (bst_cnt(10 downto 0) /= 0 or ph_last = x"C8") then
                bst_frozen <= '1';
                bst_fcnt   <= bst_cnt;
                bst_irq    <= dbg_irq1_n & dbg_irq2_n;
