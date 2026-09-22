@@ -1384,6 +1384,13 @@ architecture rtl of pcetang_console60k_cd is
    signal bst_irq    : std_logic_vector(1 downto 0) := "11";
    signal bst_sel_n  : unsigned(7 downto 0) := (others => '0');   -- SELECTs seen
    signal bst_idx    : unsigned(3 downto 0) := (others => '0');
+   -- STALL SNAPSHOT (2026-09-22), tags 0xDC-0xDF + 0xEC-0xEE, see the burst probe.
+   signal stl_roll   : bst_ring_t(0 to 11) := (others => (others => '0'));
+   signal stl_snap   : bst_ring_t(0 to 11) := (others => (others => '0'));
+   signal stl_idle   : unsigned(26 downto 0) := (others => '0');
+   signal stl_taken  : std_logic := '0';
+   signal stl_n      : unsigned(7 downto 0) := (others => '0');   -- snapshots taken
+   signal stl_idx    : unsigned(2 downto 0) := (others => '0');
    type cdt_mem_t is array (0 to 63) of std_logic_vector(15 downto 0);
    signal cdt_mem    : cdt_mem_t := (others => (others => '0'));
    -- 7-bit pointers over a 64-entry ring: the extra bit distinguishes full from empty.
@@ -2675,6 +2682,32 @@ begin
       variable e : std_logic_vector(31 downto 0);
    begin
       if rising_edge(clk_pce) then
+         -- STALL SNAPSHOT: unlike the burst trigger this re-arms. 3 s with no SELECT and
+         -- no $1808 read copies the last 12 CPU cycles into stl_snap; the next CD access
+         -- re-arms it. So the LAST snapshot in the log is where the CPU sits when a game
+         -- stops talking to the drive (Sapphire: all 14 commands complete, then no 15th).
+         if core_resetn = '0' then
+            stl_idle <= (others => '0'); stl_taken <= '0'; stl_n <= (others => '0');
+         else
+            if dbg_cpu_ce = '1' and acp_ce_r = '0'
+               and (dbg_cpu_wr_n = '0' or dbg_cpu_rd_n = '0') then
+               stl_roll <= stl_roll(1 to 11)
+                           & ((not dbg_cpu_wr_n) & dbg_irq1_n & dbg_irq2_n & dbg_cpu_a & cdreg_data);
+               if (dbg_cpu_a = "111111111100000001000" and dbg_cpu_wr_n = '1')
+                  or (dbg_cpu_a = "111111111100000000000" and dbg_cpu_wr_n = '0') then
+                  stl_idle  <= (others => '0');
+                  stl_taken <= '0';
+               end if;
+            end if;
+            if stl_idle /= "111111111111111111111111111" then stl_idle <= stl_idle + 1; end if;
+            -- 128,280,000 cycles = 3 s at 42.76 MHz
+            if stl_idle = to_unsigned(128280000, 27) and stl_taken = '0' then
+               stl_snap  <= stl_roll;
+               stl_taken <= '1';
+               if stl_n /= x"FF" then stl_n <= stl_n + 1; end if;
+            end if;
+         end if;
+
          if core_resetn = '0' then
             bst_frozen <= '0'; bst_cnt <= (others => '0'); bst_idle <= (others => '0');
             bst_after_n <= (others => '0'); bst_sel_n <= (others => '0');
@@ -3627,6 +3660,25 @@ begin
                if bst_frozen = '1' then
                   if bst_idx = 11 then bst_idx <= (others => '0'); else bst_idx <= bst_idx + 1; end if;
                end if;
+            elsif dbg_hb_cnt = 0 and ph_tag(1 downto 0) = "11" then
+               -- STALL SNAPSHOT. 0xDC always: [63] snapshot held now | [62:55] snapshots
+               -- taken this game | [54:0] 0. Then 0xDD-0xDF, 0xEC-0xEE = stl_snap(0..11),
+               -- two 32-bit entries per frame (same entry format as 0xF5), oldest first.
+               dbg_trace_req <= '1';
+               if stl_idx = 0 then
+                  dbg_trace_tag  <= x"DC";
+                  dbg_trace_data <= stl_taken & std_logic_vector(stl_n)
+                                    & "0000000000000000000000000000000000000000000000000000000";
+               elsif stl_idx <= 3 then
+                  dbg_trace_tag  <= std_logic_vector(unsigned'(x"DC") + stl_idx);
+                  dbg_trace_data <= stl_snap(to_integer(stl_idx - 1) * 2)
+                                    & stl_snap(to_integer(stl_idx - 1) * 2 + 1);
+               else
+                  dbg_trace_tag  <= std_logic_vector(unsigned'(x"E8") + stl_idx);
+                  dbg_trace_data <= stl_snap(to_integer(stl_idx - 1) * 2)
+                                    & stl_snap(to_integer(stl_idx - 1) * 2 + 1);
+               end if;
+               if stl_n = 0 or stl_idx = 6 then stl_idx <= (others => '0'); else stl_idx <= stl_idx + 1; end if;
             elsif rdcmd_pend = '1' and rdcmd_cnt < 2 then
                rdcmd_pend    <= '0';
                rdcmd_cnt     <= rdcmd_cnt + 1;
