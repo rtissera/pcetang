@@ -15,7 +15,8 @@
 // Pin names map to the Tang SDRAM V1.3 module on the 40-pin header; see
 // src/tang_console60k/zxnext_console60k.cst (O_sdram_* / IO_sdram_dq).
 //
-// Part of the ZX Spectrum Next port to the Tang Console 60K. GPLv3.
+// Part of the ZX Spectrum Next port to the Tang Console 60K. Licence: the upstream code is
+// GPL-2.0-or-later (Alexey Melnikov); this derived file is distributed as GPL-3.0-or-later.
 //
 // PCE PORT: copied into this port (PC Engine/SGX/TG16, GPL-3.0-or-later) from
 // ../TangNano60K/src/common/mem/sdram.sv, same author, same GW5A family (Primer 25K here,
