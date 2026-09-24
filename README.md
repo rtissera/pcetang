@@ -8,12 +8,14 @@ on-screen display).
 (720x480, CEA 480p, no shimmer or tremor) with a correct 4:3 aspect, PSG audio, two
 controllers and an in-game OSD. CD games run from real
 CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
-Prince of Persia, Rondo of Blood and Bonk III are playable. **SuperGrafx works** — all four
-titles tested boot and play. **Arcade Card titles play too** — Sapphire, Garou Densetsu 2
-and World Heroes 2, confirmed on hardware 2026-09-22.
+Prince of Persia, Rondo of Blood and Bonk III are playable, and **backup-RAM saves persist
+on the SD card**. **SuperGrafx works** (some titles may still be imperfect). **Arcade Card
+games boot and play, not perfect yet** — Sapphire, Garou Densetsu 2 and World Heroes 2 reach
+gameplay; known issues are listed below.
 
-Primer 25K and Nano 20K build clean but have **never run a game** — don't buy hardware on
-the strength of this table.
+Primer 25K and Nano 20K build clean but have **never run a game** yet — support is on the
+way (an external MCU gives them the storage path they lack; wiring in progress). Don't buy
+those boards for this core today.
 
 ## Credits
 
@@ -40,8 +42,9 @@ UART. GPL-3.0 throughout — see
 | Video / audio / controllers on real hardware | yes | no | no |
 | CD-ROM²: system card boots off a CHD | **yes** | no | no |
 | **CD game playable, with CD-DA and ADPCM** | **yes** | no | no |
-| SuperGrafx | **all 4 tested boot and play** | compiled out | no room |
-| Arcade Card | **Sapphire, Garou 2, WH2 play** | no room | no room |
+| SuperGrafx | **works** (some titles may be imperfect) | compiled out | no room |
+| Arcade Card | **boots and plays, not perfect yet** | no room | no room |
+| Backup-RAM saves (persist on SD) | **yes** | no | no |
 
 ### Why only one board plays games
 
@@ -92,7 +95,7 @@ of realtime.
 ### Also working
 
 **SuperGrafx works.** All four titles tested — 1941 Counter Attack, Aldynes, Daimakaimura
-and Battle Ace — boot and play on real hardware. Every one of them was broken until
+and Battle Ace — boot and play on real hardware; some titles may still be imperfect. Every one of them was broken until
 2026-09-19, and every one was the same bug: CD-RAM shadowing the top of a large HuCard (see
 below). 1941 was a black screen, Aldynes and Daimakaimura showed graphic corruption, and
 Battle Ace was missing its sprites.
@@ -112,10 +115,13 @@ debugging, and was not one.
 
 ### What does not
 
-**Backup-RAM saves are untested on hardware.** Implemented on both sides and flashed, but no
-game has saved and reloaded yet.
+**Arcade Card games are not perfect yet.** Garou Densetsu 2 and World Heroes 2 have minor
+graphic glitches in gameplay, undiagnosed. Sapphire plays but its audio does not reach HDMI
+capture devices, and it locks up at the end of level 1.
 
-**Garou Densetsu 2 and World Heroes 2 have minor graphic glitches** in gameplay, undiagnosed.
+**An HDMI capture device can lose the audio after a game load** (seen with Sapphire, Bonk III
+and Skweek) while a monitor on the same signal still plays it; rebooting the board brings it
+back. Under investigation.
 
 **Primer 25K and Nano 20K still play nothing**, for want of a storage path — see above.
 
@@ -174,8 +180,9 @@ start at all.
 
 ### The companion firmware is required, not optional
 
-The BL616 MCU firmware lives in a separate repo, a fork of nand2mario's
-`firmware-bl616`. **Stock TangCore firmware has no PC Engine support of any kind** — its
+The BL616 MCU firmware lives in a separate repo,
+[rtissera/firmware-bl616](https://github.com/rtissera/firmware-bl616) — a fork of nand2mario's
+`firmware-bl616`. **Use v0.2.0 or later** (see its releases). **Stock TangCore firmware has no PC Engine support of any kind** — its
 cores are NES, SNES, GBA, Mega Drive, Master System and PC/XT. The fork adds:
 
 - `core/pce.cpp` — HuCard (`.pce`, `.sgx`) loading
