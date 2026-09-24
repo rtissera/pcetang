@@ -15,9 +15,13 @@ name: synthesis
 # SECURITY: this executes on a machine on the author's LAN. Keep it to this repository's
 # own branches -- never enable it for pull requests from forks.
 
+# No `pull_request` trigger, on purpose (see SECURITY above): a PR runs the workflow file
+# from the PR itself, so a guard in this file cannot protect the runner from a fork.
 on:
   push:
     branches: [main, master]
+    # A version tag also builds and drafts a release with the Console 60K bitstream.
+    tags: ['v*']
   workflow_dispatch:
   schedule:
     # Nightly, so a slow drift in timing margin is caught even without a push.
@@ -145,3 +149,46 @@ jobs:
         if: always()
         # Each run is ~2 GB of intermediates; three boards nightly fills a disk fast.
         run: rm -rf impl/gwsynthesis impl/pnr
+
+  # Tag -> draft release with the Console 60K bitstream, the only board that loads games.
+  # Runs on a GitHub-hosted runner: it only downloads the artifact the self-hosted build
+  # uploaded, so nothing here touches the author's LAN.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bitstream-console60k
+          path: dist
+
+      - name: Package
+        run: |
+          cd dist
+          test -f pcetang_console60k_cd.bin
+          mv pcetang_console60k_cd.bin pcetang.bin
+          md5sum pcetang.bin | tee MD5SUMS.txt
+          sha256sum pcetang.bin | tee SHA256SUMS.txt
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          PC Engine / TurboGrafx-16 / CD-ROM² / SuperGrafx core for the **Sipeed Tang Console 60K**.
+
+          - `pcetang.bin` goes to `cores/console60k/pcetang.bin` on the SD card (the name is fixed).
+          - Requires the TangCore BL616 firmware fork, **v0.2.0 or later**:
+            https://github.com/rtissera/firmware-bl616/releases
+            Stock TangCore firmware cannot load this core.
+          - CD games: `.chd` only, plus `bios/syscard3.pce` (System Card 3.0).
+
+          Primer 25K and Nano 20K are not included: they cannot load games yet
+          (external MCU wiring in progress). See `README.md` for status and known issues.
+          EOF
+          gh release create "$TAG" --repo "${{ github.repository }}" --draft --title "$TAG" \
+            --notes-file notes.md dist/pcetang.bin dist/MD5SUMS.txt dist/SHA256SUMS.txt

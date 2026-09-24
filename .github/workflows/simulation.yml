@@ -8,10 +8,13 @@ name: simulation
 # so once the repo is public these jobs can move to `ubuntu-latest` unchanged -- GHDL is
 # apt-installable and the suites pass on both 2.0.0 and 4.1.0.
 
+# SECURITY: push and manual dispatch only -- no `pull_request` trigger. On a pull request
+# GitHub runs the workflow file FROM THE PR, so a fork could delete any `if:` guard below
+# and run arbitrary code on the self-hosted runner. Only people with push access can
+# trigger these jobs.
 on:
   push:
     branches: ['**']
-  pull_request:
   workflow_dispatch:
 
 jobs:
