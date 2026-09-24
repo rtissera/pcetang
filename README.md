@@ -193,6 +193,12 @@ cores are NES, SNES, GBA, Mega Drive, Master System and PC/XT. The fork adds:
 So a bitstream from this repo running against stock firmware loads nothing at all — no
 HuCard, no disc. The two repositories are one system and have to be built together.
 
+## Support
+
+If this core is useful to you, you can support its development on
+[Ko-fi](https://ko-fi.com/rtissera). Support goes straight into the next round of work:
+the Arcade Card fixes, Primer 25K / Nano 20K via the external MCU, and more.
+
 ## How this was built
 
 Development was AI-assisted (Claude, under my direction). Saying so here rather than
