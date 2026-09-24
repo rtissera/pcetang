@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
 
 // Tang Primer 25K pins for pcetang. clk/key_reset_n/SDRAM pins reused unchanged from
 // NECTang's own real, gw_sh-verified core_test.cst (src/boards/tang_primer25k/

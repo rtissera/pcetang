@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 -- tb_adpcm_golden.vhd -- replay a real game's ADPCM playback against a beetle-pce-fast trace.
 --
 -- Run: sim/cd/run_adpcm_golden.sh

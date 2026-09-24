@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
 // Verilator test for iosys_bl616's save-RAM interface (SAVE_IF=1).
 // Drives real UART bit timing into uart_rx, models the dual-port backup RAM on port B,
 // decodes uart_tx, and checks: restore (0x11), dump (0x12 -> 0x0A), the change notice

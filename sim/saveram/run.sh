@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # Verilator test of iosys_bl616's save-RAM interface. Real UART bit timing in and out, a
 # model of the dual-port backup RAM on port B. Exit status is the verdict.
 set -e

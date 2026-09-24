@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # ADPCM co-simulation: real cd.vhd + port-C arbiter (ghdl synth -> Verilog) + REAL sdram.sv +
 # chip model, in Verilator. Replays a golden case and writes a WAV comparison.
 #   CDRAM=1 adds CD-RAM traffic on the shared port; AB=1 adds port A/B contention in sdram.sv.

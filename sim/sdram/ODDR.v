@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
 // Minimal Gowin ODDR stub for simulation only. On hardware this primitive regenerates
 // SDRAM_CLK at the pin with the output register's delay; the chip model is clocked from
 // the controller's own `clk` instead, so nothing in this test depends on Q0/Q1. It exists

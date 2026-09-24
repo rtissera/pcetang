@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 """Does pce2hdmi_sd.sv's 2-line ping-pong buffer get overwritten while it is being read?
 
 Model, straight from the RTL:

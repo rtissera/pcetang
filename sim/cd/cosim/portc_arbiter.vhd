@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 -- portc_arbiter.vhd -- SIMULATION COPY of the Console 60K port-C arbiter (CD-RAM + ADPCM RAM).
 --
 -- The logic between the BEGIN VERBATIM / END VERBATIM markers is copied from

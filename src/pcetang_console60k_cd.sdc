@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 
 # Tang Console 60K, pcetang Phase 2 (CD, scandoubler HDMI path). Same clk/clk_pce as
 # Phase 1's pcetang_console60k.sdc (console60k_pll.vhd unchanged) -- only clk_pixel/

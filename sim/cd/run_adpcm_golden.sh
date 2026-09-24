@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # Replay a real game's ADPCM playback (golden trace from beetle-pce-fast) against cd.vhd.
 # Pass: "PASS: cd.vhd plays exactly what beetle played".
 set -euo pipefail

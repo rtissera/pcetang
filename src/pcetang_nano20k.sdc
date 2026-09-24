@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 
 # Tang Nano 20K, pcetang Phase 1. Two real rPLLs (nano20k_pll.vhd, unchanged from
 # NECTang): core master (clk_pce, 43.2 MHz) and HDMI (135/27 MHz, both now real loads

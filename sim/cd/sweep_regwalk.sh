@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # Sweep the register-level end-of-command walk (cd.vhd + cd_bridge, CPU modelled as the
 # system card really behaves). See tb_cd_regwalk.vhd's header.
 set -u
