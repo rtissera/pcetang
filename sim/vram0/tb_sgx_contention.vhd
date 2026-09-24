@@ -46,7 +46,7 @@
 -- verification trail behind every register value below.
 --
 -- Register init table verified against a REAL, working PC Engine dev-kit source file:
--- /home/romain/NECTang/upstream/fpgapce/soft/mkit251/INCLUDE/PCE/LIBRARY.ASM's
+-- the fpgapce project's soft/mkit251/INCLUDE/PCE/LIBRARY.ASM's
 -- `init_vdc`/HSR/HDR macros for xres=256 (256x224, 64x32 BAT map, auto SATB DMA every
 -- vblank) -- NOT recalled from training data. Field meanings cross-checked directly
 -- against src/pce/common/core/huc6270.vhd's own HDISP_END_POS/VDISP_END_POS formulas and
