@@ -29,7 +29,10 @@ This repo combines RTL from two GPL-3.0 projects:
   "Copyright(c) 2003 - 2004 Katsumi Degawa, All rights reserved", rewritten in 2023 by
   nand2mario, and its own header says "This program is freeware for non-commercial use";
   it carries no GPL grant of its own. That notice is kept intact and is flagged here as an
-  open licensing question inherited from nestang.
+  open licensing question inherited from nestang (every TangCore core ships the same file).
+  A "non-commercial" condition is not compatible with the GPL, so the plan is to replace
+  this file with a clean-room DualShock 2 reader; until then, treat `src/input/` as
+  carrying that restriction.
 - **SDRAM controllers** (`src/pce/common/mem/sdram.sv`, `sdram32.sv`) — derived from
   ZXNext_MISTer `rtl/mister/sdram.sv`, Copyright (C) 2021 Alexey Melnikov (GPL-2.0-or-later),
   via this author's own Tang port of that core. Both carry a "Modifications copyright"
@@ -64,7 +67,8 @@ copyright line from this project at all.
 
 The MiSTer PC Engine chip cores trace back to a codebase with **no explicit license grant**.
 This is inherited from upstream, it is not resolved here, and anyone redistributing this
-work should be aware of it. See the NECTang `THIRD_PARTY_LICENSES.md` for the donor-by-donor
-survey.
+work should be aware of it. The `SPDX-License-Identifier: GPL-3.0-or-later` lines on the
+derived files state the licence this project distributes them under; the original upstream
+files carry no per-file grant of their own.
 
 See `docs/ARCHITECTURE.md` for the integration design.
