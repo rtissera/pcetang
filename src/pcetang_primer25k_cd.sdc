@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # clk_pce / clk_sdram come from primer25k_pll.vhd, this board's own PLL (FVCO 1200,
 # ODIV0 28 -> 42.857142 MHz, ODIV1 14 -> 85.714285 MHz).
 #

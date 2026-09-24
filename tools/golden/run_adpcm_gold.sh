@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # ADPCM golden trace for one disc: beetle-pce-fast headless under xvfb, RUN pressed every
 # KEY_EVERY seconds so the syscard/title are passed, then the game is left to play.
 #   ./run_adpcm_gold.sh /path/game.chd out_prefix [seconds] [key_every_s]

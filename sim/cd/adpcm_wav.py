@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
+# The golden decoder reimplements the OKI/Dialogic ADPCM algorithm as found in Mednafen's
+# okiadpcm.c/.h (beetle-pce-fast, GPL-2.0-or-later) -- see THIRD_PARTY_LICENSES.md.
 """ADPCM WAVs from a golden case and from the RTL sim, and a diff between them.
 
   adpcm_wav.py <golden_dir> [rtl_pcm.txt] [out_dir]

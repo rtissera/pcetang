@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 """Fail if sim/cd/cosim/portc_arbiter.vhd's verbatim blocks have drifted from the boards.
 
 Console 60K: every verbatim block must appear in the board file (comments/whitespace ignored).

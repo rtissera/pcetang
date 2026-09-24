@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 # ADPCM RAM bridge regression: real cd.vhd + the board's ADPCM arbiter logic + SDRAM model.
 # Pass criterion with FIXED=true: never_written=0, stale=0, address_skips=0.
 # FIXED=false models the board bridge as it was before 2026-09-17 (expect ~17% / ~23%).

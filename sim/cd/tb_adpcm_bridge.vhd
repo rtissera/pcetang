@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (c) 2026 Romain Tisserand
 -- tb_adpcm_bridge.vhd -- does the board's ADPCM SDRAM bridge lose accesses?
 --
 -- Run: sim/cd/run_adpcm_bridge.sh   (expects: 0 never_written, 0 stale, 0 address_skips

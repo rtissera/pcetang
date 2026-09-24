@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Romain Tisserand
 """Summarise a beetle ADPCM golden trace: how the game feeds ADPCM, and what it plays.
 usage: adpcm_analyze.py golden/adpcm/<prefix>"""
 import sys, os, struct, re, collections

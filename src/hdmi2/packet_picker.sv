@@ -1,3 +1,7 @@
+// Modifications copyright (c) 2026 Romain Tisserand.
+// This file is derived from third-party code and is NOT original work of
+// this project; only the changes made here are covered by the line above.
+// See THIRD_PARTY_LICENSES.md for the upstream project, author and licence.
 // Implementation of HDMI packet choice logic.
 // By Sameer Puri https://github.com/sameer
 

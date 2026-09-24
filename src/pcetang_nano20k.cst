@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Romain Tisserand
 
 // Tang Nano 20K pins for pcetang. clk/reset reused from NECTang's own real, gw_sh-
 // verified nano20k_core_test.cst. HDMI/UART pins reused directly from nand2mario's own
