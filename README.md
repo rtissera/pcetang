@@ -195,9 +195,13 @@ HuCard, no disc. The two repositories are one system and have to be built togeth
 
 ## Support
 
-If this core is useful to you, you can support its development on
-[Ko-fi](https://ko-fi.com/rtissera). Support goes straight into the next round of work:
-the Arcade Card fixes, Primer 25K / Nano 20K via the external MCU, and more.
+This is a one-person project with real costs: FPGA boards, capture and test gear, and a
+lot of engineering time. **Ko-fi donations and hardware donations are both welcome** and go
+straight into the next round of work — the Arcade Card fixes, Primer 25K / Nano 20K via the
+external MCU, and more.
+
+- Ko-fi: [ko-fi.com/rtissera](https://ko-fi.com/rtissera)
+- Hardware (Tang boards, dev kits, test equipment): get in touch through a GitHub issue or Ko-fi.
 
 ## How this was built
 
