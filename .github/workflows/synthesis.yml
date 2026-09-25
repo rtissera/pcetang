@@ -168,8 +168,10 @@ jobs:
       - name: Package
         run: |
           cd dist
-          test -f pcetang_console60k_cd.bin
-          mv pcetang_console60k_cd.bin pcetang.bin
+          # upload-artifact keeps the impl/pnr/ layout, so find the bitstream wherever it is
+          f=$(find . -name pcetang_console60k_cd.bin -print -quit)
+          test -n "$f"
+          mv "$f" pcetang.bin
           md5sum pcetang.bin | tee MD5SUMS.txt
           sha256sum pcetang.bin | tee SHA256SUMS.txt
 
