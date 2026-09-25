@@ -5,8 +5,8 @@ PC Engine / TurboGrafx-16 core for Sipeed Tang FPGA boards, integrated with
 on-screen display).
 
 **HuCard and CD-ROM² games boot and play on Tang Console 60K** — exact-locked HDMI
-(720x480, CEA 480p, no shimmer or tremor) with a correct 4:3 aspect, PSG audio, two
-controllers and an in-game OSD. CD games run from real
+(720x480, CEA 480p, no shimmer or tremor) with a correct 4:3 aspect, PSG audio, a
+DualShock 2 controller and an in-game OSD. CD games run from real
 CHD images served over UART, with CD-DA music and ADPCM voices: R-Type Complete CD,
 Prince of Persia, Rondo of Blood and Bonk III are playable, and **backup-RAM saves persist
 on the SD card**. **SuperGrafx works** (some titles may still be imperfect). **Arcade Card
@@ -117,7 +117,19 @@ debugging, and was not one.
 
 **Arcade Card games are not perfect yet.** Garou Densetsu 2 and World Heroes 2 have minor
 graphic glitches in gameplay, undiagnosed. Sapphire plays but its audio does not reach HDMI
-capture devices, and it locks up at the end of level 1.
+capture devices, and it freezes at the level-1 boss (the CD music keeps playing).
+
+**Load one game per power-up.** Loading a second game from the menu without switching the
+board off garbles the picture; power-cycle between games. A fix is in progress.
+
+**Two players / multitap are not available yet.** Multi-player needs the multitap option, and
+the firmware's OSD Options menu is not implemented yet, so it cannot be switched on.
+
+**Use DualShock 2 pads.** The USB gamepads tested so far (Nintendo Switch Pro, a Switch Pro
+clone, Anbernic RG01) are not recognised.
+
+**Loading a game takes a while** (the whole ROM is streamed from the SD card first), and the
+in-game OSD is slightly garbled — it still works.
 
 **An HDMI capture device can lose the audio after a game load** (seen with Sapphire, Bonk III
 and Skweek) while a monitor on the same signal still plays it; rebooting the board brings it
