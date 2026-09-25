@@ -4,6 +4,11 @@ PC Engine / TurboGrafx-16 core for Sipeed Tang FPGA boards, integrated with
 [TangCore](https://github.com/nand2mario/tangcore) (BL616-based ROM loading, joypad and
 on-screen display).
 
+**▶ Video: [pcetang on the Tang Console 60K](https://youtu.be/lsY_g2JAl80)** ·
+**Download: [latest release](https://github.com/rtissera/pcetang/releases/latest)** (needs the
+[firmware v0.2.0+](https://github.com/rtissera/firmware-bl616/releases/latest)) ·
+**Support: [Ko-fi](https://ko-fi.com/rtissera)**
+
 **HuCard and CD-ROM² games boot and play on Tang Console 60K** — exact-locked HDMI
 (720x480, CEA 480p, no shimmer or tremor) with a correct 4:3 aspect, PSG audio, a
 DualShock 2 controller and an in-game OSD. CD games run from real
