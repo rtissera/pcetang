@@ -37,6 +37,8 @@ int main(int argc, char **argv) {
     int out_frames = 0, prev_cy = -1, bad_frames_after = 0, good_frames_after = 0, vresets = 0;
     std::set<int> seen; int first_src = -1, last_src = -1; bool ordered = true;
     int cur_line_src = -1;
+    int osd_first_x = -1, osd_last_x = -1, osd_steps = 0, osd_prev_x = -1, osd_y0 = -1, osd_y479 = -1, osd_ymax = -1, osd_ymono = 1, osd_prev_y = -1;
+    int osd_edge_lo = -1, osd_edge_hi = -1;
 
     while (out_frames < frames_wanted) {
         if (t_pce <= t_pix) {
@@ -60,6 +62,23 @@ int main(int argc, char **argv) {
             dut->clk_pixel = 1; dut->eval();
             auto *r = dut->rootp;
             if (r->pce2hdmi_sd__DOT__vreset) vresets++;
+            if (out_frames == 4) {
+                int ox = r->pce2hdmi_sd__DOT__osd_x, oy = r->pce2hdmi_sd__DOT__osd_y;
+                int cxx = r->pce2hdmi_sd__DOT__cx, cyy = r->pce2hdmi_sd__DOT__cy_dbg;
+                int xs = r->pce2hdmi_sd__DOT__x_start, xe = r->pce2hdmi_sd__DOT__x_stop;
+                if (cyy == 200) {
+                    if (cxx == xs) osd_edge_lo = ox;
+                    if (cxx == xe - 1) osd_edge_hi = ox;
+                    if (cxx >= xs && cxx < xe) { if (osd_first_x < 0) osd_first_x = ox; if (ox != osd_prev_x && osd_prev_x >= 0) osd_steps++; osd_prev_x = ox; osd_last_x = ox; }
+                }
+                if (cxx == 100 && cyy < 480) {
+                    if (cyy == 0) osd_y0 = oy;
+                    if (cyy == 479) osd_y479 = oy;
+                    if (oy > osd_ymax) osd_ymax = oy;
+                    if (osd_prev_y >= 0 && cyy > 0 && oy < osd_prev_y) osd_ymono = 0;
+                    osd_prev_y = oy;
+                }
+            }
             int cy = r->pce2hdmi_sd__DOT__cy_dbg;
             int cx = r->pce2hdmi_sd__DOT__cx;
             // sample the middle of each visible line
@@ -88,6 +107,8 @@ int main(int argc, char **argv) {
             t_pix += 35;
         }
     }
+    printf("OSD x: first %d last %d steps %d | OSD y: at cy0 %d at cy479 %d max %d monotonic %d | x at window edges %d..%d\n",
+           osd_first_x, osd_last_x, osd_steps, osd_y0, osd_y479, osd_ymax, osd_ymono, osd_edge_lo, osd_edge_hi);
     printf("RESULT stall=%ld: after-jump good=%d bad=%d vresets=%d\n", stall, good_frames_after, bad_frames_after, vresets);
     delete dut;
     return 0;
