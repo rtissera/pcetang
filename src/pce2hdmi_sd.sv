@@ -367,8 +367,45 @@ wire [LINE_ABITS+1:0] mem_rd_addr = line_idx_rd * (2**LINE_ABITS) + sx;
 logic [8:0] sd_rdata;
 always_ff @(posedge clk_pixel) sd_rdata <= sd_buffer[mem_rd_addr];
 
-assign overlay_x = sx[7:0];
-assign overlay_y = out_line_pair[7:0];
+// OSD coordinates. iosys's textdisp draws a fixed 256 x 224 grid (x 0-255, y 0-223) and
+// returns the pixel colour two clocks after x/y. The source-sample index and line count
+// used before were in the GAME's space (up to 512 wide, 242 high), so the OSD wrapped and
+// tore in the wide modes and past line 224. Map the grid onto the displayed window
+// instead, as TangCore's own frame buffer does, and run x two pixels early.
+reg [7:0]  osd_x = 8'd0, osd_y = 8'd0;
+reg [10:0] osd_xacc = 11'd0;
+reg [10:0] osd_yacc = 11'd0;
+reg [10:0] osd_n = 11'd0;                 // pixels of the window walked so far
+// two pixels before the window, wrapping to the end of the previous line when it starts at 0
+wire [10:0] osd_start = (x_start >= 11'd2) ? x_start - 11'd2 : x_start + frameWidth - 11'd2;
+always @(posedge clk_pixel) begin
+	if (cx == osd_start) begin
+		osd_x <= 8'd0;
+		osd_xacc <= 11'd0;
+		osd_n <= 11'd1;
+	end else if (osd_n != 11'd0 && osd_n < act_w) begin
+		osd_n <= osd_n + 11'd1;
+		if (osd_xacc + 11'd256 >= act_w) begin
+			osd_xacc <= osd_xacc + 11'd256 - act_w;
+			osd_x <= osd_x + 8'd1;
+		end else
+			osd_xacc <= osd_xacc + 11'd256;
+	end
+	if (cx == 0) begin
+		if (cy == 0) begin
+			osd_y <= 8'd0;
+			osd_yacc <= 11'd0;
+		end else if (osd_y != 8'd223 && cy < 10'(SCREEN_HEIGHT)) begin
+			if (osd_yacc + 11'd224 >= 11'(SCREEN_HEIGHT)) begin
+				osd_yacc <= osd_yacc + 11'd224 - 11'(SCREEN_HEIGHT);
+				osd_y <= osd_y + 8'd1;
+			end else
+				osd_yacc <= osd_yacc + 11'd224;
+		end
+	end
+end
+assign overlay_x = osd_x;
+assign overlay_y = osd_y;
 
 always @(posedge clk_pixel) begin
 	reg active_t;
