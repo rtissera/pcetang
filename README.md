@@ -6,7 +6,7 @@ on-screen display).
 
 **▶ Video: [pcetang on the Tang Console 60K](https://youtu.be/lsY_g2JAl80)** ·
 **Download: [latest release](https://github.com/rtissera/pcetang/releases/latest)** (needs the
-[firmware v0.2.0+](https://github.com/rtissera/firmware-bl616/releases/latest)) ·
+[firmware v0.2.1+](https://github.com/rtissera/firmware-bl616/releases/latest)) ·
 **Support: [Ko-fi](https://ko-fi.com/rtissera)**
 
 **HuCard and CD-ROM² games boot and play on Tang Console 60K** — exact-locked HDMI
@@ -58,11 +58,9 @@ UART. GPL-3.0 throughout — see
 graphic glitches in gameplay, undiagnosed. Sapphire plays but its audio does not reach HDMI
 capture devices, and it freezes at the level-1 boss (the CD music keeps playing).
 
-**Load one game per power-up.** Loading a second game from the menu without switching the
-board off might garble the picture; power-cycle between games. A fix is in progress.
-
-**Two players / multitap are not available yet.** Multi-player needs the multitap option, and
-the firmware's OSD Options menu is not implemented yet, so it cannot be switched on.
+**Two players: switch Multitap on.** It is off by default, like on MiSTer. Open the in-game
+OSD, go to Options and set Multitap to On (needs firmware v0.2.1). The setting is saved on the
+SD card.
 
 **Use DualShock 2 pads.** The USB gamepads tested so far are not recognised. I need to do
 more testing.
@@ -102,7 +100,7 @@ start at all.
 
 The BL616 MCU firmware lives in a separate repo,
 [rtissera/firmware-bl616](https://github.com/rtissera/firmware-bl616) — a fork of nand2mario's
-`firmware-bl616`. **Use v0.2.0 or later** (see its releases). **Stock TangCore firmware has no PC Engine support of any kind** — its
+`firmware-bl616`. **Use v0.2.1 or later** (see its releases). **Stock TangCore firmware has no PC Engine support of any kind** — its
 cores are NES, SNES, GBA, Mega Drive, Master System and PC/XT. The fork adds:
 
 - `core/pce.cpp` — HuCard (`.pce`, `.sgx`) loading
