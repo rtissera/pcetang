@@ -1627,12 +1627,14 @@ begin
    end process;
 
    -- Real per-player HID source: only 2 real slots exist (hid1/hid2) -- any
-   -- other multitap position (2-4) reads back idle-high (no controller
-   -- present), matching real hardware's own idle convention (see MiSTer's
-   -- own `default: joy_data = 16'h0FFF`).
+   -- other multitap position (2-4) has no controller and must read as nothing
+   -- pressed. joy_active is active-high here (joy_in inverts it), so that is all
+   -- zeros. MiSTer's `default: joy_data = 16'h0FFF` is the same idle state on its
+   -- already-inverted bus; copying the constant as-is held every button on
+   -- players 3-5 (Bomberman with the multitap on).
    joy_active <= joy1 when joy_port = 0 else
                  joy2 when joy_port = 1 else
-                 (others => '1');
+                 (others => '0');   -- no pad: nothing pressed (joy_active is active-high)
 
    -- ROM loader: rom_loading[0] pulses 0->1 at load start (per iosys_bl616.v's UART
    -- protocol comment) -- reset the write-address counter on that edge, then just
