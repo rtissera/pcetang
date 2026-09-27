@@ -301,8 +301,14 @@ always_ff @(posedge clk_pixel) begin
 	// Fire on the output line where vact_sr[2] is about to go high -- the first line that
 	// gets drawn -- so the reset puts cy at 0 exactly there and the source's active area
 	// fills the output's active window from the top.
+	// Once in phase, this event recurs exactly as the output raster wraps to cy == 0. If it
+	// ever lands anywhere else (one line of slack either way for the vbl crossing), the source
+	// frame has moved -- a core reset or a second game restarts it at a new phase with the SAME
+	// height, which the height check above cannot see -- so re-fire. Without this, loading a
+	// second game left the picture wrapped until power-off (sim/hdmi_exact/tb_exact.cpp).
 	vreset <= 1'b0;
-	if (phase_armed && (cy != cy_rv) && vact_sr[1] && !vact_sr[2]) begin
+	if ((cy != cy_rv) && vact_sr[1] && !vact_sr[2] &&
+	    (phase_armed || !(cy == 10'd0 || cy == 10'd1 || cy == frameHeight - 1'b1))) begin
 		vreset      <= 1'b1;
 		phase_armed <= 1'b0;
 	end
