@@ -378,11 +378,25 @@ reg [10:0] osd_yacc = 11'd0;
 reg [10:0] osd_n = 11'd0;                 // pixels of the window walked so far
 // two pixels before the window, wrapping to the end of the previous line when it starts at 0
 wire [10:0] osd_start = (x_start >= 11'd2) ? x_start - 11'd2 : x_start + frameWidth - 11'd2;
+// The line the lead-in belongs to: the same line, or the next one when the window
+// starts at x = 0 and the lead-in wraps to the end of the previous line.
+wire [9:0] osd_line = (x_start >= 11'd2) ? cy : ((cy == frameHeight - 1'b1) ? 10'd0 : cy + 10'd1);
 always @(posedge clk_pixel) begin
 	if (cx == osd_start) begin
 		osd_x <= 8'd0;
 		osd_xacc <= 11'd0;
 		osd_n <= 11'd1;
+		// y steps here too, so the first pixels of a line already use its row
+		if (osd_line == 10'd0) begin
+			osd_y <= 8'd0;
+			osd_yacc <= 11'd0;
+		end else if (osd_y != 8'd223 && osd_line < 10'(SCREEN_HEIGHT)) begin
+			if (osd_yacc + 11'd224 >= 11'(SCREEN_HEIGHT)) begin
+				osd_yacc <= osd_yacc + 11'd224 - 11'(SCREEN_HEIGHT);
+				osd_y <= osd_y + 8'd1;
+			end else
+				osd_yacc <= osd_yacc + 11'd224;
+		end
 	end else if (osd_n != 11'd0 && osd_n < act_w) begin
 		osd_n <= osd_n + 11'd1;
 		if (osd_xacc + 11'd256 >= act_w) begin
@@ -391,17 +405,10 @@ always @(posedge clk_pixel) begin
 		end else
 			osd_xacc <= osd_xacc + 11'd256;
 	end
-	if (cx == 0) begin
-		if (cy == 0) begin
-			osd_y <= 8'd0;
-			osd_yacc <= 11'd0;
-		end else if (osd_y != 8'd223 && cy < 10'(SCREEN_HEIGHT)) begin
-			if (osd_yacc + 11'd224 >= 11'(SCREEN_HEIGHT)) begin
-				osd_yacc <= osd_yacc + 11'd224 - 11'(SCREEN_HEIGHT);
-				osd_y <= osd_y + 8'd1;
-			end else
-				osd_yacc <= osd_yacc + 11'd224;
-		end
+	// a raster reset (vreset) jumps straight to cy = 0 and can skip the lead-in of line 0
+	if (cy == 10'd0 && cx == 11'd0) begin
+		osd_y <= 8'd0;
+		osd_yacc <= 11'd0;
 	end
 end
 assign overlay_x = osd_x;

@@ -82,7 +82,10 @@ always @* begin             // address and output logic
         if (logo_active)
             color = mem_do_b[logo_xoff] ? COLOR_LOGO : COLOR_BACK;
         else
-            color = mem_do_b[x[2:0]] ? (is_cursor ? COLOR_CURSOR : COLOR_TEXT) : COLOR_BACK;
+            // x_r, not x: under the 480p exact lock x advances every 2-3 clocks, so by this
+            // (third) clock x may already be the next pixel. x_r is the pixel whose font byte
+            // was fetched as long as x never changes on two consecutive clocks.
+            color = mem_do_b[x_r[2:0]] ? (is_cursor ? COLOR_CURSOR : COLOR_TEXT) : COLOR_BACK;
     end
     default: mem_addr_b = 0;
     endcase
