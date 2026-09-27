@@ -136,10 +136,10 @@ module iosys_bl616 #(
 // single digit for a 1-bit option, listing its 2 choices; the existing
 // `O12,...` entry already claims bits 1-2, this is a genuinely free bit, no
 // collision). Real, honest reason this exists at all: this project's own
-// `core_config` output was previously wired `open` on every board -- the OSD
-// system itself was always real and live (TangCore's own, MCU-side), just
-// never consumed by any board's RTL until now. See pce_top-adjacent board
-// files' own `multitap_en <= core_config(3)` for the consumer side.
+// `core_config` output was previously wired `open` on every board. The MCU side
+// did not exist either: TangCore's firmware left its Options menu as a stub and
+// ignored this string until the pcetang firmware fork added it (2026-09-27). See
+// the board files' `multitap_en <= core_config(3)` for the consumer side.
 localparam integer STR_LEN = 92; // number of characters in the config string
 localparam [8*STR_LEN-1:0] CONF_STR = "Tangcores;-;O12,OSD key,Right+Select,Select+Start,Select+RB;O3,Multitap,Off,On;-;V,v20240101";
 
